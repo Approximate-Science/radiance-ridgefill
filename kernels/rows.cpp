@@ -59,7 +59,7 @@ static const RadOpSchema kSchemas[] = {
 { "kva_rho_update", ARR(pRho), ARR(oRho),
   "The decayed share of approximated rows in each GDN head's state, carried across one "
   "sequence's chunks (KVA quality mode). Per head h, sequentially over the n rows of `a` "
-  "[n, n_head] (any row pitch: a column slice of the a|b buffer): g = -exp(A_log[h]) * "
+  "[n, n_head] (read at its own strides, e.g. a column slice of the a|b buffer): g = -exp(A_log[h]) * "
   "softplus(a[t,h] + dt_bias[h]); D = e^g * D + 1; N = e^g * N + mask[t]. ND is a LINEAR slot "
   "[n_states, n_head, ...] holding (N, D) per head as two f32; the slot is state_idx[0] (one "
   "sequence); a slot outside the pool writes nothing. rho = clamp(N/D, 0, 1) is read by "

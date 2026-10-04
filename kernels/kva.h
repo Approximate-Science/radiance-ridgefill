@@ -98,7 +98,7 @@ typedef struct KvaRowsel {
 } KvaRowsel;
 
 typedef struct KvaRho {
-    const void*    a;       int64_t a_pitch; int a_bf16;   /* [n, n_head] column slice */
+    const void*    a;       int64_t a_pitch, a_col; int a_bf16;   /* [n, n_head], any strides */
     const int32_t* mask;
     const float*   a_log;
     const float*   dt_bias;

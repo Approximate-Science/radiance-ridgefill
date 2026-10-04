@@ -13,6 +13,7 @@
 
 #include <dlfcn.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -105,6 +106,15 @@ struct Rng {
 struct Buf {
     std::vector<unsigned char> bytes;
     RadTensor t{};
+    Buf() = default;
+    /* A copy owns its bytes, so its descriptor points at them and not at the original's. */
+    Buf(const Buf& o) : bytes(o.bytes), t(o.t) { t.data = o.t.data ? bytes.data() : nullptr; }
+    Buf& operator=(const Buf& o) {
+        bytes = o.bytes;
+        t = o.t;
+        t.data = o.t.data ? bytes.data() : nullptr;
+        return *this;
+    }
 };
 
 static Buf make(uint32_t dtype, std::vector<int64_t> shape, std::vector<int64_t> stride = {}) {
@@ -281,14 +291,12 @@ static bool described_operands(const RadKernelInfo* row, const std::vector<RadPa
 
 static const char* const kOps[] = { "kva_rowsel", "kva_rho_update", "kva_state_correct" };
 
-/* Rows whose launch is still a stub (R8). Emptied as each row is implemented; the case then skips. */
-static const char* const kStubbed[] = {
-    "kva_rowsel_host", "kva_rho_update_host", "kva_state_correct_host",
-    "kva_rowsel_device", "kva_rho_update_device", "kva_state_correct_device",
-};
+/* Rows whose launch is still a stub (R8). Emptied as each row was implemented (all six were stubs
+ * at the Stage 1 commit, 43bfeda); with none left the case skips and says R8 is retired. */
+static const char* const kStubbed[] = { nullptr };
 
 static bool is_stub(const char* name) {
-    for (const char* s : kStubbed) if (!std::strcmp(s, name)) return true;
+    for (const char* s : kStubbed) if (s && !std::strcmp(s, name)) return true;
     return false;
 }
 
@@ -352,6 +360,597 @@ TEST(described_operands_launch, "both") {
         CHECK_EQ(run_group(row, opds, p), RAD_OK);
     }
     if (implemented == 0) skip("every row in this domain is still a stub");
+}
+
+/* ================================================================== op runners
+ * Each builds one op's operands from plain vectors, runs the given row (host or device, by its
+ * domain), and hands back the outputs. Output buffers start as a sentinel, so a row that leaves an
+ * element unwritten shows as a mismatch rather than as a lucky zero. */
+
+static const int32_t kSentinel = 0x5A5A5A5A;
+
+struct RowselOut { int rc = 0; std::vector<int32_t> rows, mask; };
+
+static RowselOut run_rowsel(const RadKernelInfo* row, const std::vector<int32_t>& ids,
+                            const std::vector<float>& table, int64_t cap, double share,
+                            long long seed, const char* mode) {
+    const int64_t n = (int64_t)ids.size();
+    Buf tok = make(RAD_I32, { n }), score = make(RAD_F32, { (int64_t)table.size() });
+    Buf rows = make(RAD_I32, { cap }), mask = make(RAD_I32, { n });
+    for (int64_t i = 0; i < n; ++i) { seti(tok, i, ids[(size_t)i]); seti(mask, i, kSentinel); }
+    for (size_t i = 0; i < table.size(); ++i) setf(score, (int64_t)i, table[i]);
+    for (int64_t i = 0; i < cap; ++i) seti(rows, i, kSentinel);
+    RowselOut o;
+    o.rc = run_group(row, { &tok, &score, &rows, &mask },
+                     { pint("M", n), pint("cap", cap), pf64("share", share), pint("seed", seed),
+                       pstr("mode", mode) });
+    for (int64_t i = 0; i < cap; ++i) o.rows.push_back(geti(rows, i));
+    for (int64_t i = 0; i < n; ++i) o.mask.push_back(geti(mask, i));
+    return o;
+}
+
+/* The kept rows (rows_idx without its -1 padding). */
+static std::vector<int32_t> kept_rows(const RowselOut& o) {
+    std::vector<int32_t> k;
+    for (int32_t r : o.rows) if (r >= 0) k.push_back(r);
+    return k;
+}
+
+/* rows_idx ascending then -1 padded, and mask 0 exactly on the kept rows. */
+static bool rowsel_consistent(const RowselOut& o) {
+    size_t i = 0;
+    for (; i < o.rows.size() && o.rows[i] >= 0; ++i)
+        if ((i && o.rows[i] <= o.rows[i - 1]) || o.rows[i] >= (int32_t)o.mask.size()) return false;
+    const size_t kept = i;
+    for (; i < o.rows.size(); ++i) if (o.rows[i] != -1) return false;
+    size_t zeros = 0;
+    for (int32_t m : o.mask) {
+        if (m != 0 && m != 1) return false;
+        zeros += m == 0;
+    }
+    for (size_t j = 0; j < kept; ++j) if (o.mask[(size_t)o.rows[j]] != 0) return false;
+    return zeros == kept;
+}
+
+struct RhoRun {
+    int64_t n = 0, heads = 0, pitch = 0, col = 1, slots = 4;
+    bool bf16 = false;
+    int32_t slot = 0;
+    std::vector<float> a;            /* [n, heads], row-major dense; placed at `pitch` */
+    std::vector<int32_t> mask;
+    std::vector<float> a_log, dt_bias;
+    std::vector<float> nd;           /* [slots, heads, 2] (N, D); updated in place by run_rho */
+};
+
+static int run_rho(const RadKernelInfo* row, RhoRun& c) {
+    const int64_t pitch = c.pitch ? c.pitch : c.heads;
+    Buf a = make(c.bf16 ? RAD_BF16 : RAD_F32, { c.n, c.heads }, { pitch, c.col });
+    Buf mask = make(RAD_I32, { c.n }), alog = make(RAD_F32, { c.heads });
+    Buf dtb = make(RAD_F32, { c.heads }), nd = make(RAD_F32, { c.slots, c.heads, 1, 2 });
+    Buf sidx = make(RAD_I32, { 1, 1 });
+    for (int64_t t = 0; t < c.n; ++t) {
+        seti(mask, t, c.mask[(size_t)t]);
+        for (int64_t h = 0; h < c.heads; ++h)
+            setf(a, t * pitch + h * c.col, c.a[(size_t)(t * c.heads + h)]);
+    }
+    for (int64_t h = 0; h < c.heads; ++h) {
+        setf(alog, h, c.a_log[(size_t)h]);
+        setf(dtb, h, c.dt_bias[(size_t)h]);
+    }
+    for (size_t i = 0; i < c.nd.size(); ++i) setf(nd, (int64_t)i, c.nd[i]);
+    seti(sidx, 0, c.slot);
+    const int rc = run_group(row, { &a, &mask, &alog, &dtb, &nd, &sidx },
+                             { pint("M", c.n), pint("n_head", c.heads) });
+    for (size_t i = 0; i < c.nd.size(); ++i) c.nd[i] = getf(nd, (int64_t)i);
+    return rc;
+}
+
+/* A random rho case: realistic gate ranges (A_log in [-4, 2.5], dt_bias in [-3, 1]). */
+static RhoRun random_rho(Rng& r, int64_t n, int64_t heads, double exact_share, bool bf16) {
+    RhoRun c;
+    c.n = n; c.heads = heads; c.bf16 = bf16; c.slot = 2;
+    for (int64_t i = 0; i < n * heads; ++i) {
+        const float v = 2.0f * r.normal();
+        c.a.push_back(bf16 ? rad_bf16_to_f32(rad_f32_to_bf16(v)) : v);
+    }
+    for (int64_t t = 0; t < n; ++t) c.mask.push_back(r.uniform() < exact_share ? 0 : 1);
+    for (int64_t h = 0; h < heads; ++h) {
+        c.a_log.push_back((float)(-4.0 + 6.5 * r.uniform()));
+        c.dt_bias.push_back((float)(-3.0 + 4.0 * r.uniform()));
+    }
+    c.nd.assign((size_t)(c.slots * heads * 2), 0.0f);
+    return c;
+}
+
+static float nd_rho(const RhoRun& c, int64_t h) {
+    const float n = c.nd[(size_t)((c.slot * c.heads + h) * 2)], d = c.nd[(size_t)((c.slot * c.heads + h) * 2 + 1)];
+    if (!(d > 0.0f)) return 1.0f;
+    const float q = n / d;
+    return q < 0.0f ? 0.0f : (q > 1.0f ? 1.0f : q);
+}
+
+/* The state-correction operands at a padded layout: rows of the head padded by `row_pad`, heads by
+ * `head_pad`, slots by `slot_pad`, so a row that assumed a dense pool writes into the padding. */
+struct CorrectRun {
+    int64_t slots, heads, sd0, sd1;
+    Buf state, applied, sidx, c, nd;
+};
+
+static CorrectRun correct_operands(int64_t slots, int64_t heads, int64_t sd0, int64_t sd1,
+                                   const std::vector<int32_t>& seq_slots, int64_t pad) {
+    CorrectRun k{ slots, heads, sd0, sd1, {}, {}, {}, {}, {} };
+    const int64_t row = sd1 + pad, head = sd0 * row + pad, slot = heads * head + pad;
+    k.state = make(RAD_F32, { slots, heads, sd0, sd1 }, { slot, head, row, 1 });
+    k.applied = make(RAD_F32, { slots, heads, 1, 1 });
+    k.sidx = make(RAD_I32, { (int64_t)seq_slots.size(), 2 });
+    k.c = make(RAD_F32, { heads, sd0, sd1 });
+    k.nd = make(RAD_F32, { slots, heads, 1, 2 });
+    for (size_t s = 0; s < seq_slots.size(); ++s) {
+        seti(k.sidx, (int64_t)(2 * s), seq_slots[s]);
+        seti(k.sidx, (int64_t)(2 * s + 1), 999);   /* a speculation column the op must not read */
+    }
+    return k;
+}
+
+static int run_correct(const RadKernelInfo* row, CorrectRun& k, const char* mode, double alpha,
+                       bool with_nd) {
+    return run_group(row, { &k.state, &k.applied, &k.sidx, &k.c, with_nd ? &k.nd : nullptr },
+                     { pint("M", k.sidx.t.shape[0]), pstr("mode", mode), pf64("alpha", alpha),
+                       pint("n_head", k.heads), pint("sd0", k.sd0), pint("sd1", k.sd1) });
+}
+
+/* Element (slot, head, i, j) of the state, through its strides. */
+static int64_t st_at(const CorrectRun& k, int64_t s, int64_t h, int64_t i, int64_t j) {
+    return s * k.state.t.stride[0] + h * k.state.t.stride[1] + i * k.state.t.stride[2] + j;
+}
+
+/* ================================================================== host semantics */
+
+/* Hand-built chunk: ties, a non-finite score of every kind, an id past the table, and k at .5. */
+TEST(rowsel_class_semantics, "host") {
+    const RadKernelInfo* row = find_row("kva_rowsel", RAD_DOMAIN_HOST);
+    REQUIRE(row != nullptr);
+    const std::vector<float> table = { 5.0f, 3.0f, -INFINITY, 5.0f, 1.0f, NAN, INFINITY, 2.0f };
+    /* rows:                         0  1  2  3  4  5  6  7  8  9   matches: 0 1 3 4 5 9 (six) */
+    const std::vector<int32_t> ids = { 0, 1, 2, 3, 4, 0, 9, 5, 6, 7 };
+    const RowselOut half = run_rowsel(row, ids, table, 4, 0.5, 0, "class");   /* k = 3 */
+    CHECK_EQ(half.rc, RAD_OK);
+    CHECK(half.rows == (std::vector<int32_t>{ 0, 3, 5, -1 }));   /* the three 5.0s, by position */
+    CHECK(half.mask == (std::vector<int32_t>{ 0, 1, 1, 0, 1, 0, 1, 1, 1, 1 }));
+    const RowselOut more = run_rowsel(row, ids, table, 4, 0.75, 0, "class");  /* 4.5 -> 4 */
+    CHECK(more.rows == (std::vector<int32_t>{ 0, 1, 3, 5 }));
+    const RowselOut cut = run_rowsel(row, ids, table, 2, 0.75, 0, "class");   /* k 4 > cap 2 */
+    CHECK(cut.rows == (std::vector<int32_t>{ 0, 3 }));
+    CHECK(rowsel_consistent(cut));
+    const RowselOut quarter = run_rowsel(row, ids, table, 4, 0.25, 0, "class");  /* 1.5 -> 2 */
+    CHECK(quarter.rows == (std::vector<int32_t>{ 0, 3, -1, -1 }));
+    const RowselOut none = run_rowsel(row, ids, table, 4, 1.0 / 12.0, 0, "class");  /* 0.5 -> 0 */
+    CHECK(none.rows == (std::vector<int32_t>{ -1, -1, -1, -1 }));
+    CHECK(none.mask == std::vector<int32_t>(10, 1));
+    const RowselOut two = run_rowsel(row, ids, table, 4, 5.0 / 12.0, 0, "class");  /* 2.5 -> 2 */
+    CHECK(two.rows == (std::vector<int32_t>{ 0, 3, -1, -1 }));
+}
+
+TEST(rowsel_random_and_all_semantics, "host") {
+    const RadKernelInfo* row = find_row("kva_rowsel", RAD_DOMAIN_HOST);
+    REQUIRE(row != nullptr);
+    std::vector<float> table(100, -INFINITY);
+    std::vector<int32_t> ids(100);
+    for (int i = 0; i < 100; ++i) { ids[(size_t)i] = i; if (i % 5 < 3) table[(size_t)i] = 1.0f; }
+    /* 60 matches, share 0.25: k = 15, drawn from all 100 rows. */
+    const RowselOut a = run_rowsel(row, ids, table, 32, 0.25, 7, "random");
+    const RowselOut b = run_rowsel(row, ids, table, 32, 0.25, 7, "random");
+    const RowselOut other = run_rowsel(row, ids, table, 32, 0.25, 8, "random");
+    const RowselOut cut = run_rowsel(row, ids, table, 10, 0.25, 7, "random");
+    CHECK_EQ(a.rc, RAD_OK);
+    CHECK_EQ(kept_rows(a).size(), 15);
+    CHECK(rowsel_consistent(a));
+    CHECK(a.rows == b.rows);                       /* deterministic for a seed */
+    CHECK(kept_rows(other) != kept_rows(a));       /* and the seed matters */
+    CHECK_EQ(kept_rows(cut).size(), 10);           /* k 15 > cap 10: the 10 best of the 15 */
+    for (int32_t r : kept_rows(cut))
+        CHECK(std::find(a.rows.begin(), a.rows.end(), r) != a.rows.end());
+    const RowselOut all = run_rowsel(row, { 3, 1, 4, 1, 5 }, table, 8, 0.25, 0, "all");
+    CHECK(all.rows == (std::vector<int32_t>{ 0, 1, 2, 3, 4, -1, -1, -1 }));
+    CHECK(all.mask == std::vector<int32_t>(5, 0));
+    const RowselOut all_cut = run_rowsel(row, std::vector<int32_t>(12, 2), table, 8, 0.25, 0, "all");
+    CHECK(all_cut.rows == (std::vector<int32_t>{ 0, 1, 2, 3, 4, 5, 6, 7 }));
+    CHECK(all_cut.mask == (std::vector<int32_t>{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1 }));
+}
+
+/* Refusals by name; the parse is shared with the device row. */
+TEST(refuses_bad_operands, "both") {
+    if (!group_runnable()) return;
+    const RadKernelInfo* rs = find_row("kva_rowsel", group_domain());
+    const RadKernelInfo* rh = find_row("kva_rho_update", group_domain());
+    const RadKernelInfo* sc = find_row("kva_state_correct", group_domain());
+    REQUIRE(rs && rh && sc);
+    const std::vector<float> table = { 1.0f, 2.0f };
+    CHECK_EQ(run_rowsel(rs, { 0, 1 }, table, 2, 0.5, 0, "classy").rc, RAD_E_INVAL);
+    CHECK_EQ(run_rowsel(rs, { 0, 1 }, table, 2, 1.5, 0, "class").rc, RAD_E_INVAL);
+    Buf tok = make(RAD_I32, { 4 }), score16 = make(RAD_BF16, { 2 }), rows = make(RAD_I32, { 2 });
+    Buf mask = make(RAD_I32, { 4 }), short_mask = make(RAD_I32, { 3 }), score = make(RAD_F32, { 2 });
+    const std::vector<RadParam> p = { pint("M", 4), pint("cap", 2), pf64("share", 0.5),
+                                      pint("seed", 0), pstr("mode", "class") };
+    CHECK_EQ(run_group(rs, { &tok, &score16, &rows, &mask }, p), RAD_E_DTYPE);
+    CHECK_EQ(run_group(rs, { &tok, &score, nullptr, &mask }, p), RAD_E_INVAL);
+    CHECK_EQ(run_group(rs, { &tok, &score, &rows, &short_mask }, p), RAD_E_SHAPE);
+    CHECK_EQ(run_group(rh, {}, { pint("M", 8), pint("n_head", 4) }), RAD_E_INVAL);
+    CorrectRun k = correct_operands(3, 2, 4, 4, { 0 }, 0);
+    CHECK_EQ(run_correct(sc, k, "redo", 1.0, false), RAD_E_INVAL);
+    CHECK_EQ(run_group(sc, { &k.state, &k.applied, &k.sidx, &k.c, nullptr },
+                       { pint("M", 1), pstr("mode", "apply"), pf64("alpha", 1.0),
+                         pint("n_head", 3), pint("sd0", 4), pint("sd1", 4) }), RAD_E_SHAPE);
+}
+
+TEST(state_correct_semantics, "host") {
+    const RadKernelInfo* row = find_row("kva_state_correct", RAD_DOMAIN_HOST);
+    REQUIRE(row != nullptr);
+    /* Sequences on slots 1, none, 0; slot 2 is nobody's. Values are short binary fractions, so
+     * every expected value below is exact and computed in double. */
+    CorrectRun k = correct_operands(3, 2, 2, 3, { 1, -1, 0 }, 3);
+    for (int64_t s = 0; s < 3; ++s) for (int64_t h = 0; h < 2; ++h)
+        for (int64_t i = 0; i < 2; ++i) for (int64_t j = 0; j < 3; ++j)
+            setf(k.state, st_at(k, s, h, i, j), (float)(1 + 100 * s + 10 * h + 3 * i + j));
+    for (int64_t h = 0; h < 2; ++h) for (int64_t e = 0; e < 6; ++e)
+        setf(k.c, h * 6 + e, (float)(0.5 * (h + 1) + 0.125 * e));
+    const float applied0[6] = { 0.5f, 0.0f, 0.25f, 2.0f, 1.0f, 1.0f };   /* [slot][head] */
+    for (int e = 0; e < 6; ++e) setf(k.applied, e, applied0[e]);
+    const CorrectRun before = k;
+    CHECK_EQ(run_correct(row, k, "undo", 9.0, false), RAD_OK);
+    for (int64_t s = 0; s < 3; ++s) for (int64_t h = 0; h < 2; ++h) {
+        const double sc = s == 2 ? 0.0 : applied0[s * 2 + h];
+        for (int64_t i = 0; i < 2; ++i) for (int64_t j = 0; j < 3; ++j)
+            CHECK(getf(k.state, st_at(k, s, h, i, j)) ==
+                  (float)(getf(before.state, st_at(k, s, h, i, j)) - sc * getf(k.c, h * 6 + i * 3 + j)));
+        CHECK(getf(k.applied, s * 2 + h) == (s == 2 ? applied0[s * 2 + h] : 0.0f));
+    }
+    /* apply, alpha 0.5, with ND: slot 0 rho 0.5 / clamp to 1; slot 1 D = 0 -> 1 / clamp to 0. */
+    const float nd[12] = { 1, 2, 3, 2,  0, 0, -1, 4,  7, 7, 7, 7 };
+    for (int e = 0; e < 12; ++e) setf(k.nd, e, nd[e]);
+    const CorrectRun undone = k;
+    CHECK_EQ(run_correct(row, k, "apply", 0.5, true), RAD_OK);
+    const double scale[3][2] = { { 0.25, 0.5 }, { 0.5, 0.0 }, { 0.0, 0.0 } };
+    for (int64_t s = 0; s < 3; ++s) for (int64_t h = 0; h < 2; ++h) {
+        for (int64_t i = 0; i < 2; ++i) for (int64_t j = 0; j < 3; ++j)
+            CHECK(getf(k.state, st_at(k, s, h, i, j)) ==
+                  (float)(getf(undone.state, st_at(k, s, h, i, j)) + scale[s][h] * getf(k.c, h * 6 + i * 3 + j)));
+        CHECK(getf(k.applied, s * 2 + h) == (s == 2 ? applied0[s * 2 + h] : (float)scale[s][h]));
+    }
+    CHECK(k.state.bytes != undone.state.bytes);
+    /* alpha 0: every state bit kept, -0.0 included; applied cleared. */
+    CorrectRun z = undone;
+    setf(z.state, st_at(z, 0, 0, 0, 0), -0.0f);
+    const CorrectRun z0 = z;
+    CHECK_EQ(run_correct(row, z, "apply", 0.0, false), RAD_OK);
+    CHECK(z.state.bytes == z0.state.bytes);
+    CHECK(getf(z.applied, 0) == 0.0f && getf(z.applied, 3) == 0.0f);
+}
+
+TEST(rho_semantics, "host") {
+    const RadKernelInfo* row = find_row("kva_rho_update", RAD_DOMAIN_HOST);
+    REQUIRE(row != nullptr);
+    Rng r{ 11 };
+    /* No decay (exp(-1000) is 0, so e = 1): D counts rows, N counts approximated rows. */
+    RhoRun flat = random_rho(r, 5, 2, 0.0, false);
+    flat.mask = { 1, 0, 1, 1, 0 };
+    flat.a_log = { -1000.0f, -1000.0f };
+    flat.nd[(size_t)(2 * 2 * 2)] = 2.0f; flat.nd[(size_t)(2 * 2 * 2 + 1)] = 3.0f;   /* slot 2, head 0 */
+    CHECK_EQ(run_rho(row, flat), RAD_OK);
+    CHECK(flat.nd[8] == 5.0f && flat.nd[9] == 8.0f);      /* head 0: N 2+3, D 3+5 */
+    CHECK(flat.nd[10] == 3.0f && flat.nd[11] == 5.0f);    /* head 1: from zero */
+    /* Total forgetting (exp(100) overflows, e = 0): only the last row is left. */
+    RhoRun sharp = random_rho(r, 6, 1, 0.0, false);
+    sharp.mask = { 1, 1, 1, 1, 1, 0 };
+    sharp.a_log = { 100.0f };
+    CHECK_EQ(run_rho(row, sharp), RAD_OK);
+    CHECK(nd_rho(sharp, 0) == 0.0f);                       /* last row exact: rho 0, not a bug */
+    /* No exact row: N == D to the bit, so rho is exactly 1, across two chunks. */
+    RhoRun ones = random_rho(r, 300, 8, 0.0, false);
+    CHECK_EQ(run_rho(row, ones), RAD_OK);
+    CHECK_EQ(run_rho(row, ones), RAD_OK);
+    for (int64_t h = 0; h < 8; ++h) CHECK(nd_rho(ones, h) == 1.0f);
+    /* A slot outside the pool writes nothing. */
+    RhoRun away = random_rho(r, 10, 2, 0.5, false);
+    away.slot = -1;
+    const std::vector<float> nd0 = away.nd;
+    CHECK_EQ(run_rho(row, away), RAD_OK);
+    CHECK(away.nd == nd0);
+    /* The same rows as a column slice of a wider buffer, interleaved with other columns, and as
+     * f32 instead of bf16, give the same bits. */
+    RhoRun dense = random_rho(r, 64, 6, 0.2, true), sliced = dense, mixed = dense, wide = dense;
+    sliced.pitch = 12;
+    mixed.pitch = 12;
+    mixed.col = 2;
+    wide.bf16 = false;
+    CHECK_EQ(run_rho(row, dense), RAD_OK);
+    CHECK_EQ(run_rho(row, sliced), RAD_OK);
+    CHECK_EQ(run_rho(row, mixed), RAD_OK);
+    CHECK_EQ(run_rho(row, wide), RAD_OK);
+    CHECK(sliced.nd == dense.nd && mixed.nd == dense.nd && wide.nd == dense.nd);
+}
+
+/* N <= D always (each step is monotone in its inputs and mask <= 1), so rho in [0, 1] before any
+ * clamp. Checked raw over random gates and masks. */
+TEST(rho_in_unit_interval, "host") {
+    const RadKernelInfo* row = find_row("kva_rho_update", RAD_DOMAIN_HOST);
+    REQUIRE(row != nullptr);
+    Rng r{ 21 };
+    for (int trial = 0; trial < 20; ++trial) {
+        RhoRun c = random_rho(r, 1 + r.below(700), 8, r.uniform(), false);
+        for (int chunk = 0; chunk < 3; ++chunk) CHECK_EQ(run_rho(row, c), RAD_OK);
+        for (int64_t h = 0; h < 8; ++h) {
+            const float n = c.nd[(size_t)((2 * 8 + h) * 2)], d = c.nd[(size_t)((2 * 8 + h) * 2 + 1)];
+            CHECK(n >= 0.0f && n <= d && d >= 1.0f);
+        }
+    }
+}
+
+/* ================================================================== fixtures */
+
+/* tests/rho_ref.py's output: the reference's closed-form rho (st_hook.py) over three chunks. */
+struct RhoFixture { int64_t heads = 0; RhoRun base; std::vector<RhoRun> chunks;
+                    std::vector<std::vector<float>> n, d, rho; };
+
+static bool read_list(FILE* f, const char* name, std::vector<float>& v) {
+    char word[64];
+    long long count = 0;
+    if (std::fscanf(f, "%63s %lld", word, &count) != 2 || std::strcmp(word, name)) return false;
+    v.assign((size_t)count, 0.0f);
+    for (float& x : v) if (std::fscanf(f, "%f", &x) != 1) return false;
+    return true;
+}
+
+static bool load_rho_fixture(RhoFixture& fx) {
+    const char* path = std::getenv("KVA_RHO_FIXTURE");
+    FILE* f = path ? std::fopen(path, "r") : nullptr;
+    if (!f) return false;
+    long long heads = 0, chunks = 0, seed = 0;
+    int version = 0;
+    bool ok = std::fscanf(f, "kva-rho-fixture %d heads %lld chunks %lld seed %lld", &version, &heads,
+                          &chunks, &seed) == 4 && version == 1;
+    fx.heads = heads;
+    ok = ok && read_list(f, "A_log", fx.base.a_log) && read_list(f, "dt_bias", fx.base.dt_bias);
+    for (long long c = 0; ok && c < chunks; ++c) {
+        long long index = 0, rows = 0;
+        RhoRun run = fx.base;
+        std::vector<float> mask, n, d, rho;
+        ok = std::fscanf(f, " chunk %lld rows %lld", &index, &rows) == 2 &&
+             read_list(f, "a", run.a) && read_list(f, "mask", mask) && read_list(f, "N", n) &&
+             read_list(f, "D", d) && read_list(f, "rho", rho);
+        run.n = rows; run.heads = heads;
+        for (float m : mask) run.mask.push_back((int32_t)m);
+        fx.chunks.push_back(run); fx.n.push_back(n); fx.d.push_back(d); fx.rho.push_back(rho);
+    }
+    std::fclose(f);
+    return ok;
+}
+
+/* R34's reference leg: the row against the NumPy transcription, chunk by chunk, ND carried. */
+TEST(rho_matches_numpy_reference, "both") {
+    if (!group_runnable()) return;
+    RhoFixture fx;
+    if (!load_rho_fixture(fx)) { skip("KVA_RHO_FIXTURE unset or unreadable (tests/rho_ref.py writes it)"); return; }
+    const RadKernelInfo* row = find_row("kva_rho_update", group_domain());
+    REQUIRE(row != nullptr);
+    std::vector<float> nd((size_t)(4 * fx.heads * 2), 0.0f);
+    double worst_rho = 0, worst_rel = 0;
+    for (size_t c = 0; c < fx.chunks.size(); ++c) {
+        RhoRun run = fx.chunks[c];
+        run.nd = nd;
+        CHECK_EQ(run_rho(row, run), RAD_OK);
+        nd = run.nd;
+        for (int64_t h = 0; h < fx.heads; ++h) {
+            const double n = nd[(size_t)((run.slot * fx.heads + h) * 2)];
+            const double d = nd[(size_t)((run.slot * fx.heads + h) * 2 + 1)];
+            worst_rel = std::max({ worst_rel, std::fabs(n - fx.n[c][(size_t)h]) / fx.n[c][(size_t)h],
+                                   std::fabs(d - fx.d[c][(size_t)h]) / fx.d[c][(size_t)h] });
+            worst_rho = std::max(worst_rho, std::fabs((double)nd_rho(run, h) - fx.rho[c][(size_t)h]));
+        }
+    }
+    std::fprintf(stderr, "  rho vs NumPy: max |rho diff| %.3g, max rel N/D diff %.3g\n", worst_rho, worst_rel);
+    CHECK(worst_rho <= 1e-5);
+    CHECK(worst_rel <= 1e-4);
+}
+
+/* A JSON reader for the R33 fixture: objects, arrays, numbers, strings, null. */
+struct Json {
+    enum Kind { NUL, NUM, STR, ARR, OBJ } kind = NUL;
+    double num = 0;
+    std::string str;
+    std::vector<Json> arr;
+    std::vector<std::pair<std::string, Json>> obj;
+    const Json* get(const char* key) const {
+        for (const auto& kv : obj) if (kv.first == key) return &kv.second;
+        return nullptr;
+    }
+};
+
+struct JsonReader {
+    const char* p;
+    bool ok = true;
+    void space() { while (*p == ' ' || *p == '\n' || *p == '\r' || *p == '\t') ++p; }
+    bool eat(char c) { space(); if (*p != c) return false; ++p; return true; }
+    std::string text() {
+        std::string s;
+        if (!eat('"')) { ok = false; return s; }
+        while (*p && *p != '"') { if (*p == '\\' && p[1]) ++p; s += *p++; }
+        ok = ok && eat('"');
+        return s;
+    }
+    Json value() {
+        Json v;
+        space();
+        if (!ok || !*p) { ok = false; return v; }
+        if (*p == '{' || *p == '[') {
+            const bool object = *p++ == '{';
+            v.kind = object ? Json::OBJ : Json::ARR;
+            if (eat(object ? '}' : ']')) return v;
+            do {
+                if (object) { std::string key = text(); ok = ok && eat(':'); v.obj.push_back({ key, value() }); }
+                else v.arr.push_back(value());
+            } while (ok && eat(','));
+            ok = ok && eat(object ? '}' : ']');
+        } else if (*p == '"') {
+            v.kind = Json::STR;
+            v.str = text();
+        } else if (!std::strncmp(p, "null", 4)) {
+            p += 4;
+        } else {
+            char* end = nullptr;
+            v.kind = Json::NUM;
+            v.num = std::strtod(p, &end);
+            ok = end != p;
+            p = end;
+        }
+        return v;
+    }
+};
+
+static std::vector<int32_t> ints(const Json* j) {
+    std::vector<int32_t> v;
+    if (j) for (const Json& x : j->arr) v.push_back((int32_t)x.num);
+    return v;
+}
+
+/* R33: on each quick doc's first chunk the row keeps exactly fnlev.rules' rows (the SIDECAR lane's
+ * tools/rows_compare.py fixture, format kva-rowsel-fixture-1). */
+TEST(rowsel_matches_fnlev_rules, "both") {
+    if (!group_runnable()) return;
+    const char* path = std::getenv("KVA_ROWSEL_FIXTURE");
+    FILE* f = path ? std::fopen(path, "rb") : nullptr;
+    if (!f) { skip("KVA_ROWSEL_FIXTURE unset or absent (SIDECAR lane: tools/rows_compare.py fixture)"); return; }
+    std::string body;
+    char chunk[65536];
+    for (size_t got; (got = std::fread(chunk, 1, sizeof chunk, f)) > 0;) body.append(chunk, got);
+    std::fclose(f);
+    JsonReader rd{ body.c_str() };
+    const Json fx = rd.value();
+    REQUIRE(rd.ok && fx.get("format") && fx.get("format")->str == "kva-rowsel-fixture-1");
+    const RadKernelInfo* row = find_row("kva_rowsel", group_domain());
+    const RadKernelInfo* host = find_row("kva_rowsel", RAD_DOMAIN_HOST);
+    REQUIRE(row && host && fx.get("vocab") && fx.get("kept_ids") && fx.get("kept_scores") &&
+            fx.get("docs") && fx.get("share") && fx.get("window"));
+    std::vector<float> table((size_t)fx.get("vocab")->num, -INFINITY);
+    const std::vector<int32_t> kept = ints(fx.get("kept_ids"));
+    for (size_t i = 0; i < kept.size(); ++i) table[(size_t)kept[i]] = (float)fx.get("kept_scores")->arr[i].num;
+    const double share = fx.get("share")->num;
+    /* PLAN D12's capacity at a chunk of `window` rows: share x window rounded up to 64. */
+    const int64_t cap = (int64_t)std::ceil(share * fx.get("window")->num / 64.0) * 64;
+    for (const Json& doc : fx.get("docs")->arr) {
+        const std::vector<int32_t> ids = ints(doc.get("token_ids")), want = ints(doc.get("rows"));
+        const RowselOut got = run_rowsel(row, ids, table, cap, share, 0, "class");
+        CHECK_EQ(got.rc, RAD_OK);
+        CHECK(rowsel_consistent(got));
+        CHECK_EQ(kept_rows(got).size(), (size_t)doc.get("k")->num);
+        if (kept_rows(got) != want) fail_at(__FILE__, __LINE__, doc.get("doc")->str + ": rows differ from fnlev.rules");
+        if (row != host) CHECK(got.rows == run_rowsel(host, ids, table, cap, share, 0, "class").rows);
+        std::fprintf(stderr, "  %-10s n %zu  k %zu  == fnlev.rules%s\n", doc.get("doc")->str.c_str(),
+                     ids.size(), want.size(), row != host ? " == host row" : "");
+    }
+}
+
+/* ================================================================== device against host */
+
+/* R20: the device row and the host row on the same random operands -- model-sized heads, padded
+ * slot / head / row strides, nonzero applied scales, a skipped sequence -- agree to the bit, over
+ * the whole buffers (padding included). */
+TEST(state_correct_device_matches_host, "gpu") {
+    if (!group_runnable()) return;
+    const RadKernelInfo* dev = find_row("kva_state_correct", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("kva_state_correct", RAD_DOMAIN_HOST);
+    REQUIRE(dev && host);
+    Rng r{ 31 };
+    CorrectRun k = correct_operands(6, 24, 128, 128, { 4, -1, 1, 5 }, 8);
+    for (size_t i = 0; i < k.state.bytes.size() / 4; ++i) setf(k.state, (int64_t)i, r.normal());
+    for (int64_t i = 0; i < rad_tensor_numel(&k.c.t); ++i) setf(k.c, i, 0.01f * r.normal());
+    for (int64_t i = 0; i < rad_tensor_numel(&k.applied.t); ++i) setf(k.applied, i, 0.5f + r.normal());
+    for (int64_t i = 0; i < rad_tensor_numel(&k.nd.t); i += 2) {
+        const float d = (float)(1.0 + 50.0 * r.uniform());
+        setf(k.nd, i, (float)(d * 1.2 * r.uniform()));   /* some N > D: the clamp is exercised */
+        setf(k.nd, i + 1, d);
+    }
+    struct Step { const char* mode; double alpha; bool nd; } steps[] = {
+        { "undo", 1.0, false }, { "apply", 0.7, true }, { "undo", 1.0, false },
+        { "apply", 1.0, false }, { "apply", 0.0, true } };
+    for (const Step& st : steps) {
+        CorrectRun on_dev = k;
+        CHECK_EQ(run_correct(host, k, st.mode, st.alpha, st.nd), RAD_OK);
+        CHECK_EQ(run_correct(dev, on_dev, st.mode, st.alpha, st.nd), RAD_OK);
+        size_t differ = 0;
+        for (size_t i = 0; i < k.state.bytes.size(); ++i) differ += k.state.bytes[i] != on_dev.state.bytes[i];
+        CHECK_EQ(differ, 0);
+        CHECK(k.applied.bytes == on_dev.applied.bytes);
+        std::fprintf(stderr, "  %-5s alpha %.1f ND %d: %zu state bytes, %zu differ (max abs diff %s)\n",
+                     st.mode, st.alpha, (int)st.nd, k.state.bytes.size(), differ, differ ? ">0" : "0");
+    }
+}
+
+/* R33's device leg: the device row equals the host row on chunks with many ties, non-matching
+ * rows, every mode, truncation (k > cap), tiny and maximal n. */
+TEST(rowsel_device_matches_host, "gpu") {
+    if (!group_runnable()) return;
+    const RadKernelInfo* dev = find_row("kva_rowsel", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("kva_rowsel", RAD_DOMAIN_HOST);
+    REQUIRE(dev && host);
+    Rng r{ 41 };
+    std::vector<float> table(1000);
+    const float levels[] = { -INFINITY, -INFINITY, 1.0f, 2.0f, 2.5f, 3.0f };   /* ties everywhere */
+    for (float& s : table) s = levels[r.below(6)];
+    const int64_t sizes[] = { 1, 7, 300, 2048, 8192 };
+    const char* modes[] = { "class", "random", "all" };
+    int cases_run = 0;
+    for (int64_t n : sizes) {
+        std::vector<int32_t> ids((size_t)n);
+        for (int32_t& id : ids) id = (int32_t)r.below(1010) - 5;   /* a few ids outside the table */
+        for (const char* mode : modes)
+            for (int64_t cap : { (int64_t)3, (int64_t)512, n })
+                for (double share : { 0.25, 1.0 }) {
+                    const RowselOut h = run_rowsel(host, ids, table, cap, share, 12345, mode);
+                    const RowselOut d = run_rowsel(dev, ids, table, cap, share, 12345, mode);
+                    CHECK_EQ(d.rc, RAD_OK);
+                    CHECK(d.rows == h.rows && d.mask == h.mask);
+                    CHECK(rowsel_consistent(d));
+                    ++cases_run;
+                }
+    }
+    std::vector<int32_t> ids(2048);
+    for (int32_t& id : ids) id = (int32_t)r.below(1000);
+    const RowselOut once = run_rowsel(dev, ids, table, 512, 0.25, 99, "random");
+    const RowselOut again = run_rowsel(dev, ids, table, 512, 0.25, 99, "random");
+    CHECK(once.rows == again.rows && once.mask == again.mask);   /* deterministic for a seed */
+    std::fprintf(stderr, "  %d configurations: device rows_idx and mask == host\n", cases_run);
+}
+
+/* R34's device leg: device vs host on model-sized gates (bf16 a as a column slice of the a|b
+ * buffer, carried over two chunks); rho within 1e-5, N and D reported. */
+TEST(rho_device_matches_host, "gpu") {
+    if (!group_runnable()) return;
+    const RadKernelInfo* dev = find_row("kva_rho_update", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("kva_rho_update", RAD_DOMAIN_HOST);
+    REQUIRE(dev && host);
+    Rng r{ 51 };
+    double worst_rho = 0, worst_rel = 0;
+    for (double exact : { 0.056, 0.5, 0.0 }) {
+        RhoRun h = random_rho(r, 2048, 24, exact, true);
+        h.pitch = 48;
+        RhoRun d = h;
+        for (int chunk = 0; chunk < 2; ++chunk) {
+            CHECK_EQ(run_rho(host, h), RAD_OK);
+            CHECK_EQ(run_rho(dev, d), RAD_OK);
+        }
+        for (int64_t k = 0; k < 24; ++k) {
+            worst_rho = std::max(worst_rho, (double)std::fabs(nd_rho(h, k) - nd_rho(d, k)));
+            for (int w = 0; w < 2; ++w) {
+                const double a = h.nd[(size_t)((2 * 24 + k) * 2 + w)], b = d.nd[(size_t)((2 * 24 + k) * 2 + w)];
+                worst_rel = std::max(worst_rel, std::fabs(a - b) / std::max(std::fabs(a), 1e-30));
+            }
+            if (exact == 0.0) CHECK(nd_rho(d, k) == 1.0f);   /* no exact row: exactly 1 */
+            CHECK(nd_rho(d, k) >= 0.0f && nd_rho(d, k) <= 1.0f);
+        }
+    }
+    std::fprintf(stderr, "  device vs host: max |rho diff| %.3g, max rel N/D diff %.3g\n", worst_rho, worst_rel);
+    CHECK(worst_rho <= 1e-5);
 }
 
 /* ================================================================== main */
