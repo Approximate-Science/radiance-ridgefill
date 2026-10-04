@@ -5,7 +5,7 @@
 #
 # Exits non-zero with a named reason if:
 #   (a) any process other than this repo's own tooling and the engines inside the
-#       radiance-kva-* containers matches radiance|llama|vllm|r9v (pgrep -af; the check's
+#       radiance-kva-* containers matches radiance|llama|vllm|r9v AND holds /dev/kfd open (pgrep -af; the check's
 #       own process tree is excluded -- the script, its launcher, every ancestor: a
 #       squatter is by definition not in it -- and the report is filtered with awk,
 #       not grep, so no grep process ever matches);
@@ -103,6 +103,16 @@ if pgrep -af 'radiance|llama|vllm|r9v' > "$tmp_squat" 2>/dev/null; then
             if (index(rest, pattern) != 0) next
             print
         }' "$tmp_squat")
+    # A name match is a squatter only if it holds the GPU (/dev/kfd open). A port forwarder
+    # or a log tailer named after an engine is not; a process whose fds we cannot read is
+    # counted (fail closed).
+    bad=$(printf '%s\n' "$bad" | while read -r spid srest; do
+        [ -n "$spid" ] || continue
+        if ls -l "/proc/$spid/fd" 2>/dev/null | grep -q '/dev/kfd' \
+           || ! ls "/proc/$spid/fd" >/dev/null 2>&1; then
+            printf '%s %s\n' "$spid" "$srest"
+        fi
+    done)
     if [ -n "$bad" ]; then
         printf '%s\n' "$bad" >&2
         fail "a process outside this repo matches radiance|llama|vllm|r9v (lines above)"
