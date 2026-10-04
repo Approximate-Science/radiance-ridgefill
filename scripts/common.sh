@@ -52,10 +52,12 @@ export RK_PORT RK_IMAGE RK_PLUGIN_HOME RK_EVIDENCE
 #   --num-speculative-tokens 0    MTP off: the protocol measures plain prefill
 #                                 (config.cpp:89)
 #   --max-model-len 49152         the measurement context (config.cpp:42)
-#   --gpu-headroom-mib 3072       VRAM left unclaimed on every card so the KL-mode logits
-#                                 buffer (a row per token of a step, docs/TOOLS.md) has
-#                                 room; fnserve.sh's 96 is the production shape, this is
-#                                 the measurement shape (config.cpp:44)
+#   --gpu-headroom-mib 3072       VRAM left unclaimed on every card. One card may drive a
+#                                 desktop display, and the engine takes one headroom for all
+#                                 cards; 3 GiB keeps the display responsive. fnserve.sh's 96
+#                                 is the production shape, this is the measurement shape
+#                                 (config.cpp:44). Fewer resident experts than production, the
+#                                 same for every arm.
 # Mirrored from radiance scripts/fnserve.sh because Flash-Next does not start without
 # them (the container's routed experts do not fit both cards' VRAM):
 #   --placement expert_tiered     the routed experts that do not fit stream from a pinned
@@ -127,7 +129,7 @@ rk_docker_prefix() {
         --init \
         --network host \
         --ulimit memlock=-1 \
-        -v "$(dirname "$RK_MODEL")":/models:ro
+        -v "$(dirname "$(readlink -f "$RK_MODEL")")":/models:ro
     if [ "$1" = exact ]; then
         printf '%s\n' -e RADIANCE_HOME=/opt/radiance/share/radiance
     else
