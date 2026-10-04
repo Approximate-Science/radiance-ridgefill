@@ -100,12 +100,20 @@ rk_require_model() {
 # set -- would be lost).
 #
 # What the prefix carries and why (docs/DOCKER.md "Run it"):
-#   --device /dev/kfd --device /dev/dri, video+render groups   the GPUs
+#   --device /dev/kfd --device /dev/dri   the GPUs. No --group-add: the runtime image is FROM
+#                                        scratch with no video/render entries (docker refuses
+#                                        the names), and under rootless Docker the host's kfd/
+#                                        render nodes must be world-rw anyway
+#   --security-opt label=disable        SELinux hosts: the container label cannot open the
+#                                        device nodes otherwise (found in the kernel tests)
 #   --security-opt seccomp=unconfined   io_uring (the n-gram table) and the NUMA binding
 #                                        the ROCm runtime makes for pinned host memory
 #   --init                              the engine finishes its step and releases the
 #                                        cards on SIGTERM instead of dying as PID 1
-#   --network host                      the server binds the host's addresses, no NAT
+#   -p 127.0.0.1:PORT:PORT              publish the server port on loopback. NOT --network host:
+#                                        under rootless Docker it hides every GPU from the HIP
+#                                        runtime ("built with HIP but no device is visible";
+#                                        measured 2026-10-04, each flag tried alone)
 #   --ulimit memlock=-1                 the pinned host pool needs unlimited memlock
 #                                        (deploy/compose/common.yaml does the same)
 #   -v <model dir>:/models:ro          the model, read-only
@@ -123,11 +131,10 @@ rk_docker_prefix() {
     printf '%s\n' \
         --device /dev/kfd \
         --device /dev/dri \
-        --group-add video \
-        --group-add render \
         --security-opt seccomp=unconfined \
+        --security-opt label=disable \
         --init \
-        --network host \
+        -p "127.0.0.1:$RK_PORT:$RK_PORT" \
         --ulimit memlock=-1 \
         -v "$(dirname "$(readlink -f "$RK_MODEL")")":/models:ro
     if [ "$1" = exact ]; then
