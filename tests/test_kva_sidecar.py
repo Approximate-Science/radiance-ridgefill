@@ -210,3 +210,46 @@ def test_real_sidecar_layout_and_known_tokens():
     assert len(ids[" The"]) == len(ids["ing"]) == len(ids[" the"]) == 1
     assert math.isfinite(score[ids[" The"][0]]) and math.isfinite(score[ids["ing"][0]])
     assert score[ids[" the"][0]] == INF and all(score[i] == INF for i in ids["3.14"])
+
+
+@pytest.fixture(scope="module")
+def refit(built):
+    out = built["root"] / "refit"
+    args = [a for a in built["args"]]
+    cut = args.index("--freq")
+    source_args = args[:cut]                      # --proj and --st only
+    K.main(["build", "--names", "refit", *source_args, "--out", str(out)])
+    shard = out / K.NAMES["refit"]["shard"]
+    with safe_open(str(shard), "pt") as f:
+        meta = f.metadata()
+    return dict(args=source_args, shard=shard, tensors=load_file(str(shard)), meta=meta)
+
+
+def test_refit_names_are_projr_and_str_only(refit):
+    assert sorted(refit["tensors"]) == ["kva.projr.2.bias", "kva.projr.2.weight", "kva.projr.3.bias",
+                                        "kva.projr.3.weight", "kva.str.2", "kva.str.3"]
+
+
+def test_refit_tensors_equal_the_shipped_layout(built, refit):
+    assert torch.equal(refit["tensors"]["kva.projr.2.weight"], built["tensors"]["kva.proj.2.weight"])
+    assert torch.equal(refit["tensors"]["kva.str.3"], built["tensors"]["kva.st.3"])
+
+
+def test_refit_hash_keys_do_not_collide_with_the_shipped_ones(built, refit):
+    assert sorted(k for k in refit["meta"] if k.startswith("kva.src.")) == [
+        "kva.src.projr.sha256", "kva.src.str0.sha256", "kva.src.str1.sha256"]
+    assert refit["meta"]["kva.src.projr.sha256"] == built["meta"]["kva.src.proj.sha256"]
+
+
+def test_refit_verify_passes(refit):
+    assert K.main(["verify", str(refit["shard"]), "--names", "refit", *refit["args"]]) == 0
+
+
+def test_refit_refuses_row_selection_inputs(built, tmp_path):
+    with pytest.raises(SystemExit, match="drop --freq"):
+        K.main(["build", "--names", "refit", *built["args"], "--out", str(tmp_path / "x")])
+
+
+def test_shipped_requires_row_selection_inputs(refit, tmp_path):
+    with pytest.raises(SystemExit, match="--freq and --tokenizer are required"):
+        K.main(["build", *refit["args"], "--out", str(tmp_path / "x")])

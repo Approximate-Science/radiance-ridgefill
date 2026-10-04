@@ -5,6 +5,7 @@ namespace `rad-convert --reuse --in-place` can append from.
 
   kva_sidecar.py build  --proj P --st RANK0.pt RANK1.pt --freq F --tokenizer DIR --out DIR
   kva_sidecar.py verify TARGET --proj P --st RANK0.pt RANK1.pt --freq F --tokenizer DIR [--rad-info CMD]
+  kva_sidecar.py build  --names refit --proj P --st RANK0.pt RANK1.pt --out DIR      (Stage 6 refit set)
 
 Tensors written (L = the layers present in the inputs; no model number is typed here):
   kva.proj.L.weight [H, W] bf16     projector layer.L[:, :W]   (W = its columns - 1)
@@ -14,6 +15,8 @@ Tensors written (L = the layers present in the inputs; no model number is typed 
   kva.rowsel.score       [vocab] f32  rarity (-logfreq) where the token's class is kept, else -inf
   kva.rowsel.score_none  [vocab] f32  all -inf: no row selected, rho = 1 (R41)
   kva.rowsel.score_all   [vocab] f32  all 0: every row a match, ties by position (the all-rows check, R35)
+`--names refit` writes only kva.projr.L.{weight,bias} and kva.str.L (no swap control, no row tables) into
+kva-sidecar-refit.safetensors, with source-hash keys kva.src.{projr,str0,str1}.sha256.
 The controls share the container with the real tensors because an in-place append cannot replace a weight and
 there is no disk for a second container (orchestrator decision, 2026-10-04).
 
@@ -37,8 +40,18 @@ from safetensors.torch import save_file
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import kva_rules as R  # noqa: E402
 
-SHARD = "kva-sidecar.safetensors"
 SET_FILE = "rad-convert-set.txt"
+# Which copy of the fitted tensors a build writes (arch/kva_config.h selects among them at serve time).
+# shipped: the published fits, with the head-swap control and the row-selection tables.
+# refit:   the Stage 6 fits from radiance's own captures, under their own names and source-hash keys, so
+#          the two copies sit in one container side by side (an in-place append cannot replace a weight).
+NAMES = {
+    "shipped": dict(shard="kva-sidecar.safetensors", proj="kva.proj", st="kva.st", swap="kva.stswap",
+                    roles=("proj", "st0", "st1")),
+    "refit": dict(shard="kva-sidecar-refit.safetensors", proj="kva.projr", st="kva.str", swap=None,
+                  roles=("projr", "str0", "str1")),
+}
+SHARD = NAMES["shipped"]["shard"]
 FORMAT = "kva-sidecar-1"
 # The selection share the paper's quality row was measured at (HANDOVER §2.4.5: changing it is Dylan's call).
 SHARE = 0.25
@@ -55,9 +68,17 @@ def sha256_file(path):
 
 
 def source_files(args):
-    """{role: path} of every file the build reads; a missing one stops the tool before any work."""
-    files = {"proj": Path(args.proj), "st0": Path(args.st[0]), "st1": Path(args.st[1]), "freq": Path(args.freq)}
-    files.update({role: Path(args.tokenizer) / name for role, name in TOKENIZER_FILES.items()})
+    """{role: path} of every file the build reads; a missing one stops the tool before any work. The
+    row-selection inputs belong to the shipped set only."""
+    names = NAMES[args.names]
+    files = dict(zip(names["roles"], (Path(args.proj), Path(args.st[0]), Path(args.st[1]))))
+    if args.names == "shipped":
+        if not (args.freq and args.tokenizer):
+            raise SystemExit("--names shipped builds the row-selection tables: --freq and --tokenizer are required")
+        files["freq"] = Path(args.freq)
+        files.update({role: Path(args.tokenizer) / name for role, name in TOKENIZER_FILES.items()})
+    elif args.freq or args.tokenizer:
+        raise SystemExit("--names refit writes no row-selection tables: drop --freq and --tokenizer")
     missing = [f"{role}: {path}" for role, path in files.items() if not path.is_file()]
     if missing:
         raise SystemExit("input file(s) not found:\n  " + "\n  ".join(missing))
@@ -68,8 +89,8 @@ def source_hashes(files):
     return {f"kva.src.{role}.sha256": sha256_file(path) for role, path in files.items()}
 
 
-def projector_tensors(path):
-    """(split, tensors): layer.L [H, W+1] -> weight [H, W] + bias [H]; split = the lowest layer present."""
+def projector_tensors(path, prefix):
+    """(split, tensors): layer.L [H, W+1] -> <prefix>.L.weight [H, W] + .bias [H]; split = the lowest layer."""
     out = {}
     with safe_open(str(path), "pt") as f:
         layers = sorted(int(k.split(".", 1)[1]) for k in f.keys() if k.startswith("layer."))
@@ -79,8 +100,8 @@ def projector_tensors(path):
             w = f.get_tensor(f"layer.{layer}")
             if w.dim() != 2 or w.dtype != torch.bfloat16:
                 raise SystemExit(f"{path}: layer.{layer} is {w.dtype} {list(w.shape)}; expected a 2-D bf16 [H, W+1]")
-            out[f"kva.proj.{layer}.weight"] = w[:, :-1].contiguous()
-            out[f"kva.proj.{layer}.bias"] = w[:, -1].contiguous()
+            out[f"{prefix}.{layer}.weight"] = w[:, :-1].contiguous()
+            out[f"{prefix}.{layer}.bias"] = w[:, -1].contiguous()
     return layers[0], out
 
 
@@ -94,7 +115,7 @@ def load_correction(path):
     return {int(layer): total / d["count"][layer] for layer, total in d["sum"].items()}
 
 
-def correction_tensors(rank0_path, rank1_path, split):
+def correction_tensors(rank0_path, rank1_path, split, prefix, swap_prefix):
     rank0, rank1 = load_correction(rank0_path), load_correction(rank1_path)
     if set(rank0) != set(rank1):
         raise SystemExit(f"rank files name different layers: {sorted(rank0)} vs {sorted(rank1)}")
@@ -106,8 +127,9 @@ def correction_tensors(rank0_path, rank1_path, split):
         if a.dtype != torch.float32 or a.shape != b.shape or a.dim() != 3:
             raise SystemExit(f"layer {layer}: halves {a.dtype} {list(a.shape)} / {b.dtype} {list(b.shape)}; "
                              "expected two f32 [h, V, K] of one shape")
-        out[f"kva.st.{layer}"] = torch.cat([a, b]).contiguous()
-        out[f"kva.stswap.{layer}"] = torch.cat([b, a]).contiguous()
+        out[f"{prefix}.{layer}"] = torch.cat([a, b]).contiguous()
+        if swap_prefix:
+            out[f"{swap_prefix}.{layer}"] = torch.cat([b, a]).contiguous()
     return out
 
 
@@ -142,36 +164,40 @@ def sort_header_metadata(path):
         f.write(text.ljust(size))
 
 
-def write_index(out_dir, tensors):
+def write_index(out_dir, shard_name, tensors):
     total = sum(t.numel() * t.element_size() for t in tensors.values())
-    index = {"metadata": {"total_size": total}, "weight_map": {name: SHARD for name in sorted(tensors)}}
+    index = {"metadata": {"total_size": total}, "weight_map": {name: shard_name for name in sorted(tensors)}}
     (out_dir / "model.safetensors.index.json").write_text(json.dumps(index, indent=1) + "\n", encoding="utf-8")
 
 
 def build(args):
+    names = NAMES[args.names]
     files = source_files(args)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     print("hashing sources ...", flush=True)
     meta = {"kva.format": FORMAT, **source_hashes(files)}
     print("projector ...", flush=True)
-    split, tensors = projector_tensors(files["proj"])
-    tensors.update(correction_tensors(files["st0"], files["st1"], split))
-    print("row-selection tables ...", flush=True)
-    rowsel, kept, n_tok = rowsel_tensors(args.tokenizer, files["freq"])
-    tensors.update(rowsel)
-    meta.update({"kva.split": str(split), "kva.rowsel.share": repr(SHARE), "kva.rowsel.classes": ",".join(R.CLASSES)})
+    split, tensors = projector_tensors(files[names["roles"][0]], names["proj"])
+    tensors.update(correction_tensors(files[names["roles"][1]], files[names["roles"][2]], split,
+                                      names["st"], names["swap"]))
+    if args.names == "shipped":
+        print("row-selection tables ...", flush=True)
+        rowsel, kept, n_tok = rowsel_tensors(args.tokenizer, files["freq"])
+        tensors.update(rowsel)
+        meta.update({"kva.split": str(split), "kva.rowsel.share": repr(SHARE),
+                     "kva.rowsel.classes": ",".join(R.CLASSES)})
+        print(f"rowsel: {kept} of {len(rowsel['kva.rowsel.score'])} vocab rows kept ({n_tok} tokenizer ids)")
     assert all(" " not in v and "\n" not in v for v in meta.values()), "metadata values go on a command line"
-    print(f"writing {out_dir / SHARD} ({len(tensors)} tensors) ...", flush=True)
-    save_file(tensors, str(out_dir / SHARD), metadata=meta)
-    sort_header_metadata(out_dir / SHARD)
-    write_index(out_dir, tensors)
+    shard = out_dir / names["shard"]
+    print(f"writing {shard} ({len(tensors)} tensors) ...", flush=True)
+    save_file(tensors, str(shard), metadata=meta)
+    sort_header_metadata(shard)
+    write_index(out_dir, shard.name, tensors)
     (out_dir / SET_FILE).write_text("".join(f"{k}={v}\n" for k, v in sorted(meta.items())), encoding="utf-8")
-    vocab = len(rowsel["kva.rowsel.score"])
-    print(f"split {split}; {sum(k.startswith('kva.proj.') for k in tensors) // 2} projector layers; "
-          f"{sum(k.startswith('kva.st.') for k in tensors)} correction layers; "
-          f"rowsel: {kept} of {vocab} vocab rows kept ({n_tok} tokenizer ids)")
-    print(f"wrote {out_dir / SHARD}, model.safetensors.index.json, {SET_FILE}")
+    print(f"split {split}; {sum(k.startswith(names['proj'] + '.') for k in tensors) // 2} projector layers; "
+          f"{sum(k.startswith(names['st'] + '.') for k in tensors)} correction layers")
+    print(f"wrote {shard}, model.safetensors.index.json, {SET_FILE}")
 
 
 def parse_rad_info_meta(text):
@@ -213,7 +239,8 @@ def verify(args):
         else:
             bad += 1
             print(f"{'MISSING' if have is None else 'MISMATCH':9s} {key}: recorded {have}, recomputed {want}")
-    for key in ("kva.format", "kva.split", "kva.rowsel.share", "kva.rowsel.classes"):
+    for key in ("kva.format",) + (("kva.split", "kva.rowsel.share", "kva.rowsel.classes")
+                                  if args.names == "shipped" else ()):
         bad += key not in meta
         print(f"{'' if key in meta else 'MISSING':9s} {key} = {meta.get(key)}")
     print(f"verify {target}: {'PASS' if bad == 0 else f'FAIL ({bad} problem(s))'}")
@@ -230,8 +257,11 @@ def main(argv=None):
             p.add_argument("--rad-info", default="rad-info", help="rad-info command (a .rad target), e.g. a docker run prefix")
         p.add_argument("--proj", required=True, help="projector safetensors (layer.S..layer.L-1 [H, W+1] bf16)")
         p.add_argument("--st", required=True, nargs=2, metavar=("RANK0", "RANK1"), help="correction .pt per TP rank")
-        p.add_argument("--freq", required=True, help="unigram table safetensors (`logfreq` [vocab])")
-        p.add_argument("--tokenizer", required=True, help="checkpoint dir with config.json + tokenizer.json")
+        p.add_argument("--names", choices=sorted(NAMES), default="shipped",
+                       help="tensor-name set: shipped (kva.proj/kva.st + controls + row tables) or refit "
+                            "(kva.projr/kva.str, Stage 6)")
+        p.add_argument("--freq", help="unigram table safetensors (`logfreq` [vocab]); shipped only")
+        p.add_argument("--tokenizer", help="checkpoint dir with config.json + tokenizer.json; shipped only")
         if name == "build":
             p.add_argument("--out", required=True, help="output directory (created)")
     args = ap.parse_args(argv)
