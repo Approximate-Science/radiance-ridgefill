@@ -16,8 +16,9 @@
  * fill path (Stage 3): an approximate chunk runs the stock prologue and layers 0..S-1, then for each
  * late layer the projector into the block input `x`, its codes, and only the block's cache-writing
  * pieces (kva_fill.h); `plumb` runs every late layer exactly through those same pieces, fed the real
- * block input. NOT YET: the correction (Stage 4) and the exact rows (Stage 5) -- quality refuses at
- * declare until then, because nothing unimplemented returns success.
+ * block input. The correction (Stage 4): kva_state_correct undo before each late delta-net layer's
+ * scan and apply after it, approximate chunks only. NOT YET: the exact rows (Stage 5) -- quality
+ * refuses at declare until then, because nothing unimplemented returns success.
  *
  * Included by tests/arch_static_test.cpp too, which defines RAD_ARCH_NO_EXPORTS itself; then
  * neither plugin's exports are emitted and the test calls both namespaces directly.
@@ -126,6 +127,21 @@ static void plumb_block(RadCtx* c, const qwen4exp_fp8::Layer& l, const RadBatch*
     }
 }
 
+/* THE +st CORRECTION (Stage 4, PLAN D7): `undo` before the layer's conv/scan takes back what the
+ * previous approximate chunk end added (nothing, at the first: the slot is zeroed at admission);
+ * `apply` after the scan adds alpha * C and records the scale. Approximate chunks only, so the exact
+ * tail starts from S_pred(P) + alpha*C and no approximate chunk reads a corrected state. ND is absent
+ * in speed mode (rho = 1). Not issued when the model holds no correction. */
+static void correct(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li, rad_op op,
+                    const RadBatch* batch) {
+    if (!op) return;
+    const RadKVGroupBatch* st = kv_batch(batch, m.kv_state);
+    const int64_t pitch = st && st->state_index_pitch > 0 ? st->state_index_pitch : 1;
+    RAD_ISSUE_N(c, op, batch->n_seq, kv_cache(m.kv_state, (int)li), kv_cache(k.kv_applied, (int)li),
+                praw2(st ? st->state_index : nullptr, RAD_I32, batch->n_seq, pitch),
+                RAD_W(k.st[(size_t)li]), RAD_NONE);
+}
+
 /* A filled late layer: the projector writes the block input `x` from the stream entering layer S,
  * the quantiser writes its codes as the connection read would (QuantFP8::step without its
  * matvec-only guard: an int8 linear always reads the codes), then only the cache-writing pieces.
@@ -144,7 +160,9 @@ static void fill_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int64_t 
         attn_kv(c, l.attn, batch);
     } else {
         gdn_project(c, l.gdn, T);
+        correct(c, k, m, li, k.op_undo[(size_t)li], batch);
         gdn_scan(c, l.gdn, batch);
+        correct(c, k, m, li, k.op_apply[(size_t)li], batch);
     }
 }
 

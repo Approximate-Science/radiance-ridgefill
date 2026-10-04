@@ -31,6 +31,9 @@ struct Kva {
      * way to ask whether an op resolves is to declare it. */
     std::vector<rad_op> op_undo, op_apply;
     rad_op  op_rowsel = 0;
+    /* What each sequence's late delta-net layer had added to its state at its last approximate
+     * chunk end (PLAN D7): one f32 a head, zeroed by the engine at admission. */
+    rad_kvgroup kv_applied = 0;
     /* The fill (Stage 3): a projector GEMM per late layer, and the quantiser that writes the
      * projected block input's codes. */
     std::vector<rad_op> op_proj;              /* [n_layer]: 0 below S */
@@ -138,6 +141,29 @@ static int decl_every_copy(RadBuilder* b, const qwen4exp_fp8::Model& m, Kva& k) 
     return RAD_OK;
 }
 
+/* THE APPLIED SCALE LIVES ON THE DEVICE, NOT THE HOST (PLAN D7): the tape audit fails a step whose
+ * issues depend on host state that is not in the pass key, and "was a correction applied at this
+ * sequence's last chunk end" is per-sequence, per-layer state. A LINEAR group gives each sequence
+ * one slot the engine zeroes at admission and keeps for the sequence's life: [heads, 1, 1] f32,
+ * bound to every late delta-net layer. kva_state_correct indexes it with the delta-net state's
+ * slot row (one state_idx operand, kernels/rows.cpp), which names the same slot because the KV
+ * manager allocates every stateful group's slot together from identically initialised free lists
+ * (radiance core/mem/kv.cpp:478-484, 676-691); a schema with its own index operand would not rely
+ * on that. */
+static int decl_applied(RadBuilder* b, const qwen4exp_fp8::Model& m, Kva& k) {
+    RadKVGroupDecl d{};
+    d.kind         = RAD_KV_LINEAR;
+    d.dtype        = RAD_F32;
+    d.n_head_kv    = m.gcfg.n_head_v;
+    d.state_dim[0] = 1;
+    d.state_dim[1] = 1;
+    k.kv_applied = rad_decl_kv_group(b, k.nm.f("kv_kva_applied"), &d);
+    if (!k.kv_applied) return RAD_E_INVAL;
+    for (int64_t l = k.split; l < m.g.n_layer; ++l)
+        if (!m.layers[(size_t)l].full) RAD_ARCH_TRY(rad_bind_layer_kv(b, (int)l, k.kv_applied));
+    return RAD_OK;
+}
+
 /* The ops the mode issues from kva.so, declared per PLAN §5's schemas. A handle that comes back
  * null means no kernel library serves the op: kva.so is not on the search path, or declines this
  * machine. Refused here, by name, rather than at the first approximate chunk -- or, worse, served
@@ -149,6 +175,7 @@ static int decl_kernel_ops(RadBuilder* b, const qwen4exp_fp8::Model& m, const Ra
     const Config& c = k.cfg;
     const char* missing = nullptr;
     const bool corrects = k.have_st && (c.mode == MODE_SPEED || c.mode == MODE_QUALITY);
+    if (corrects) RAD_ARCH_TRY(decl_applied(b, m, k));
     for (int64_t l = k.split; corrects && l < m.g.n_layer; ++l) {
         if (m.layers[(size_t)l].full) continue;
         for (int apply = 0; apply < 2; ++apply) {

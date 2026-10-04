@@ -21,6 +21,7 @@
 #include <unistd.h>
 
 #include <cstdarg>
+#include <algorithm>
 #include <functional>
 #include <set>
 #include <string>
@@ -45,6 +46,7 @@ struct RadBuilder {
     std::vector<std::string>                           maps, notes, kv_groups;
     std::set<std::string>                              refuse;   /* ops no kernel serves */
     std::set<rad_buf>                                  concurrent;
+    std::vector<std::pair<int, rad_kvgroup>>           binds;
     /* What rad_weight_encoding answers: for a kva.* key, the source named by it or by it plus a
      * '.'-suffix ("kva.proj.4" holds kva.proj.4.weight and .bias, "kva.rowsel.score" does not hold
      * kva.rowsel.score_none); for any other key, the first source CONTAINING it, as radiance's own
@@ -108,7 +110,7 @@ rad_kvgroup rad_decl_kv_group(RadBuilder* b, const char* name, const RadKVGroupD
     return (rad_kvgroup)b->kv_groups.size();
 }
 int64_t rad_kv_block_size(RadBuilder*, rad_kvgroup) { return 4; }
-int rad_bind_layer_kv(RadBuilder*, int, rad_kvgroup) { return RAD_OK; }
+int rad_bind_layer_kv(RadBuilder* b, int layer, rad_kvgroup g) { b->binds.push_back({layer, g}); return RAD_OK; }
 int rad_decl_name_map(RadBuilder* b, const RadNameMap* m) { b->maps.push_back(m->declared); return RAD_OK; }
 void rad_note(RadBuilder* b, const char* fmt, ...) {
     char buf[1024];
@@ -154,6 +156,9 @@ int   rad_memset_async(void*, int, int64_t, RadStream) { ++g_ctx->device_calls; 
 
 /* ==================================================================== the plugin under test */
 #include "qwen4exp_kva.cpp"
+
+using rad::arch::kv_cache;
+using rad::arch::praw2;
 
 /* ==================================================================== fixtures */
 namespace {
@@ -773,10 +778,58 @@ TEST(speed_fills_late_layers_with_their_cache_writing_ops_only) {
             if (lay.full ? (pc.keys.count(r.op) || pc.kv.count(r.op)) : pc.gdn.count(r.op))
                 keep.push_back(r);
         CHECK(keep.size() >= (lay.full ? 9u : 5u));
+        if (!lay.full) {
+            /* Stage 4: undo right before the conv/scan, apply right after, on this layer's slots. */
+            const RadOperand state = kv_cache(m.kv_state, l), applied = kv_cache(k.kv_applied, l);
+            const RadOperand idx = praw2(bk.b.kv[m.kv_state - 1].state_index, RAD_I32, 1, 3);
+            const RecIssue undo{k.op_undo[(size_t)l],
+                                {state, applied, idx, RAD_W(k.st[(size_t)l]), RAD_NONE}, 1};
+            const RecIssue apply{k.op_apply[(size_t)l],
+                                 {state, applied, idx, RAD_W(k.st[(size_t)l]), RAD_NONE}, 1};
+            size_t conv = 0;
+            while (conv < keep.size() && keep[conv].op != lay.gdn.op_conv_prep) ++conv;
+            keep.insert(keep.begin() + (long)conv, undo);
+            keep.push_back(apply);   /* the scan is the block's last cache-writing piece */
+        }
         CHECK_EQ(differ(slice(seg, 2, seg.size()), keep), 0);
     }
     CHECK_EQ(count(got.log, "kva: approximate step"), 1);
     CHECK_EQ(got.device_calls, 0);
+}
+
+/* The correction is wired only where the model holds one, with the strength the switch names,
+ * and its slot group binds exactly the late delta-net layers. Without kva.st.* nothing of it is
+ * declared or issued (speed without correction, Stage 3's arm). */
+TEST(the_correction_is_declared_and_issued_only_when_held) {
+    for (bool held : {true, false}) {
+        RadModelMeta meta = flash_next_meta();
+        RadBuildCtx c = served_ctx();
+        RadBuilder kva;
+        served(kva);
+        if (held) hold_kva(kva, {"kva.proj", "kva.st"});
+        else      hold_kva(kva, {"kva.proj"});
+        Env env({{"RADIANCE_KVA", "speed"}, {"RADIANCE_KVA_ALPHA", "0.5"}});
+        REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
+        const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+        CHECK_EQ(k.kv_applied != 0, held);
+        CHECK_EQ(std::count(kva.kv_groups.begin(), kva.kv_groups.end(), "kv_kva_applied"), held ? 1 : 0);
+        int bound = 0;
+        for (const auto& [layer, g] : kva.binds) {
+            if (g != k.kv_applied || !held) continue;
+            ++bound;
+            CHECK(layer >= kSplit && !qwen4exp_fp8::g_model[0].layers[(size_t)layer].full);
+        }
+        CHECK_EQ(bound, held ? 3 : 0);
+        for (const RecOp& o : kva.ops)
+            if (o.op == "kva_state_correct")
+                for (const RecParam& q : o.p) if (q.key == "alpha") CHECK_EQ(q.dval, 0.5);
+        Batch bk = one_prefill(kva, 128, 2048, 128);
+        const Run r = run_step(qwen4exp_kva::step, bk.b);
+        int corrections = 0;
+        for (const RecIssue& i : r.issues)
+            corrections += i.op && kva.ops[i.op - 1].op == "kva_state_correct";
+        CHECK_EQ(corrections, held ? 2 * 3 : 0);
+    }
 }
 
 /* Speed declares the projector per late layer and one quantiser, after the whole in-tree graph and
