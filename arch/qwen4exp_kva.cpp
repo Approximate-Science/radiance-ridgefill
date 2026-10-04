@@ -132,6 +132,17 @@ static void plumb_block(RadCtx* c, const qwen4exp_fp8::Layer& l, const RadBatch*
  * `apply` after the scan adds alpha * C and records the scale. Approximate chunks only, so the exact
  * tail starts from S_pred(P) + alpha*C and no approximate chunk reads a corrected state. ND is absent
  * in speed mode (rho = 1). Not issued when the model holds no correction. */
+/* This rank's value heads of the replicated correction (kva_declare.h's decl_correction): a row
+ * slice of the weight, which the issue path narrows and bounds-checks like a buffer slice
+ * (radiance core/runtime/issue.cpp:661-698). */
+static RadOperand correction_heads(const qwen4exp_fp8::Model& m, rad_weight w) {
+    const GdnFP8::Config& g = m.gcfg;
+    RadOperand o = RAD_W(w);
+    o.offset = (int64_t)m.g.rank * g.n_head_v * g.head_v * g.head_k;
+    o.rows   = g.n_head_v;
+    return o;
+}
+
 static void correct(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li, rad_op op,
                     const RadBatch* batch) {
     if (!op) return;
@@ -139,7 +150,7 @@ static void correct(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64
     const int64_t pitch = st && st->state_index_pitch > 0 ? st->state_index_pitch : 1;
     RAD_ISSUE_N(c, op, batch->n_seq, kv_cache(m.kv_state, (int)li), kv_cache(k.kv_applied, (int)li),
                 praw2(st ? st->state_index : nullptr, RAD_I32, batch->n_seq, pitch),
-                RAD_W(k.st[(size_t)li]), RAD_NONE);
+                correction_heads(m, k.st[(size_t)li]), RAD_NONE);
 }
 
 /* A filled late layer: the projector writes the block input `x` from the stream entering layer S,

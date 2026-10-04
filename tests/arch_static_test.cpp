@@ -430,7 +430,7 @@ TEST(off_step_issues_the_in_tree_sequence) {
  * access class and group the plan states, and nothing is issued that the in-tree graph does not. */
 TEST(declare_all_declares_every_held_copy_and_no_op) {
     RadModelMeta meta = flash_next_meta();
-    RadBuildCtx c = served_ctx(1, 2);   /* rank 1 of 2: the correction is row-sharded */
+    RadBuildCtx c = served_ctx(1, 2);   /* rank 1 of 2: per-rank extents show */
     Env env({{"RADIANCE_KVA_DECLARE", "all"}});
     RadBuilder stock, kva;
     hold_kva(kva, {"kva.proj", "kva.projr", "kva.st", "kva.stswap", "kva.str"});
@@ -464,10 +464,10 @@ TEST(declare_all_declares_every_held_copy_and_no_op) {
             if (!w) continue;
             ++st;
             CHECK_EQ(w->dtype, (uint32_t)RAD_F32);
-            CHECK_EQ(w->shape[0], m.gcfg.n_head_v);   /* this rank's heads */
+            CHECK_EQ(w->shape[0], m.gcfg.n_head_v * 2);   /* every head: replicated */
             CHECK_EQ(w->shape[1], m.gcfg.head_v);
             CHECK_EQ(w->shape[2], m.gcfg.head_k);
-            CHECK_EQ(w->shard, RAD_SHARD_ROW);
+            CHECK_EQ(w->shard, RAD_SHARD_NONE);   /* the loader has no ROW share of rank 3 */
             CHECK_EQ(w->optional, 1);
         }
     }
@@ -782,10 +782,10 @@ TEST(speed_fills_late_layers_with_their_cache_writing_ops_only) {
             /* Stage 4: undo right before the conv/scan, apply right after, on this layer's slots. */
             const RadOperand state = kv_cache(m.kv_state, l), applied = kv_cache(k.kv_applied, l);
             const RadOperand idx = praw2(bk.b.kv[m.kv_state - 1].state_index, RAD_I32, 1, 3);
-            const RecIssue undo{k.op_undo[(size_t)l],
-                                {state, applied, idx, RAD_W(k.st[(size_t)l]), RAD_NONE}, 1};
-            const RecIssue apply{k.op_apply[(size_t)l],
-                                 {state, applied, idx, RAD_W(k.st[(size_t)l]), RAD_NONE}, 1};
+            RadOperand heads = RAD_W(k.st[(size_t)l]);   /* rank 0 of 1: every head, from 0 */
+            heads.rows = m.gcfg.n_head_v;
+            const RecIssue undo{k.op_undo[(size_t)l], {state, applied, idx, heads, RAD_NONE}, 1};
+            const RecIssue apply{k.op_apply[(size_t)l], {state, applied, idx, heads, RAD_NONE}, 1};
             size_t conv = 0;
             while (conv < keep.size() && keep[conv].op != lay.gdn.op_conv_prep) ++conv;
             keep.insert(keep.begin() + (long)conv, undo);
@@ -830,6 +830,44 @@ TEST(the_correction_is_declared_and_issued_only_when_held) {
             corrections += i.op && kva.ops[i.op - 1].op == "kva_state_correct";
         CHECK_EQ(corrections, held ? 2 * 3 : 0);
     }
+}
+
+/* AT TP2 EACH RANK HANDS THE CORRECTION ITS OWN VALUE HEADS: the weight is the whole [48, V, K]
+ * tensor on every rank (no ROW share of a rank-3 weight exists), sliced at issue to rows
+ * [rank*H, rank*H + H) -- the contiguous head split of the delta net's own weights. */
+TEST(at_tp2_each_rank_corrects_its_own_heads) {
+    for (int rank : {0, 1}) {
+        Pair p;
+        declare_pair(p, "speed", rank, 2);
+        REQUIRE_EQ(p.st, RAD_OK);
+        const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
+        const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+        const RadWeightDecl* w = weight(p.kva, "kva.st.4");
+        REQUIRE(w != nullptr);
+        CHECK_EQ(w->shard, RAD_SHARD_NONE);
+        CHECK_EQ(w->shape[0], m.gcfg.n_head_v * 2);
+        Batch bk = one_prefill(p.kva, 128, 2048, 128);
+        const Run r = run_step(qwen4exp_kva::step, bk.b, rank);
+        int seen = 0;
+        for (const RecIssue& i : r.issues) {
+            if (i.op != k.op_undo[kSplit] && i.op != k.op_apply[kSplit]) continue;
+            ++seen;
+            REQUIRE_EQ(i.opd.size(), (size_t)5);
+            CHECK_EQ(i.opd[3].handle, k.st[kSplit]);
+            CHECK_EQ(i.opd[3].rows, m.gcfg.n_head_v);
+            CHECK_EQ(i.opd[3].offset, (int64_t)rank * m.gcfg.n_head_v * m.gcfg.head_v * m.gcfg.head_k);
+        }
+        CHECK_EQ(seen, 2);
+    }
+}
+
+/* plumb runs the late layers exactly and issues no correction, so it places none. */
+TEST(plumb_declares_no_correction) {
+    Pair p;
+    declare_pair(p, "plumb");
+    REQUIRE_EQ(p.st, RAD_OK);
+    CHECK(weight(p.kva, "kva.st.4") == nullptr);
+    CHECK(weight(p.kva, "kva.proj.4.weight") != nullptr);
 }
 
 /* Speed declares the projector per late layer and one quantiser, after the whole in-tree graph and

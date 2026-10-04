@@ -85,7 +85,12 @@ static int decl_projector(RadBuilder* b, Names& nm, const qwen4exp_fp8::Model& m
 }
 
 /* One correction copy (`kva.st`, `kva.stswap` or `kva.str`): [value heads, head_v, head_k] f32 a
- * late delta-net layer, row-sharded by head (PLAN D6) -- the state's own layout, kv_gdn_state.
+ * late delta-net layer -- the state's own layout, kv_gdn_state -- for ALL of the model's value heads.
+ * REPLICATED, NOT ROW-SHARDED (deviation from PLAN D6, found at the first TP2 load): the loader
+ * defines no ROW share of a rank-3 weight (radiance core/format/share.cpp:56), so each rank holds
+ * the whole tensor (3 MiB a layer, 54 MiB a rank over 18 layers) and hands kva_state_correct its
+ * own heads as a row slice of it at issue (correction_heads in qwen4exp_kva.cpp): rank r's value
+ * heads are [r*H, (r+1)*H), the contiguous split the delta net's own weights take.
  * All of the late delta-net layers or none. */
 static int decl_correction(RadBuilder* b, Names& nm, const qwen4exp_fp8::Model& m,
                            const char* base, int64_t from, Kva& k) {
@@ -95,8 +100,8 @@ static int decl_correction(RadBuilder* b, Names& nm, const qwen4exp_fp8::Model& 
         char sn[96];
         std::snprintf(sn, sizeof sn, "%s.%lld", base, (long long)l);
         k.st[(size_t)l] = decl_held(b, nm, sn, RAD_F32,
-                                    {m.gcfg.n_head_v, m.gcfg.head_v, m.gcfg.head_k},
-                                    RAD_SHARD_ROW, grp_layer((int)l));
+                                    {m.gcfg.n_head_v * m.g.world, m.gcfg.head_v, m.gcfg.head_k},
+                                    RAD_SHARD_NONE, grp_layer((int)l));
         held += k.st[(size_t)l] != 0;
         ++want;
     }
@@ -132,8 +137,9 @@ static int decl_every_copy(RadBuilder* b, const qwen4exp_fp8::Model& m, Kva& k) 
         if (m.layers[(size_t)l].full) continue;
         for (const char* s : { "kva.st", "kva.stswap", "kva.str" }) {
             std::snprintf(name, sizeof name, "%s.%lld", s, (long long)l);
-            decl_held(b, k.nm, name, RAD_F32, {m.gcfg.n_head_v, m.gcfg.head_v, m.gcfg.head_k},
-                      RAD_SHARD_ROW, grp);
+            decl_held(b, k.nm, name, RAD_F32,
+                      {m.gcfg.n_head_v * m.g.world, m.gcfg.head_v, m.gcfg.head_k},
+                      RAD_SHARD_NONE, grp);
         }
     }
     for (const char* t : { "kva.rowsel.score", "kva.rowsel.score_none", "kva.rowsel.score_all" })
@@ -309,7 +315,9 @@ static int decl_fill(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuild
 static int decl_selected(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx,
                          Kva& k) {
     RAD_ARCH_TRY(decl_projector(b, k.nm, m, k.cfg.proj, k));
-    if (k.have_proj) RAD_ARCH_TRY(decl_correction(b, k.nm, m, k.cfg.st, k.split, k));
+    /* plumb issues no correction, so it does not place one */
+    if (k.have_proj && k.cfg.mode != MODE_PLUMB)
+        RAD_ARCH_TRY(decl_correction(b, k.nm, m, k.cfg.st, k.split, k));
     k.score = decl_score(b, k.nm, m, k.cfg.score);
     k.have_rowsel = k.score != 0;
     if (ctx->shape_probe) k.cfg.cap = g_kva[ctx->rank].cfg.cap;
