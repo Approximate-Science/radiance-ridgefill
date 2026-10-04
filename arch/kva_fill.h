@@ -210,6 +210,63 @@ inline void attn_tail(RadCtx* c, const AttnGatedFP8& a, const RadBatch* batch) {
     if (a.op_add) RAD_ISSUE(c, a.op_add, brows(a.w.x, T), brows(a.w.h.x, T), brows(a.w.x, T));
 }
 
+/* ---------------------------------------------------------------- quality mode's exact rows */
+
+/* rad_block_hc.h:360-376 with the STREAM swapped: the connection read over rows [0, rows) of `h`
+ * (the exact rows' own wide stream, compacted) instead of the model's `b_h`. Every output is the
+ * connection's own buffer, rows [0, rows) -- which is where MoeFP8::pass reads its input. */
+inline void hc_read_from(RadCtx* c, const HyperConn& hc, rad_buf h, int64_t rows) {
+    const int64_t n = hc.g.n_embd;
+    RAD_ISSUE_N(c, hc.op_read, rows,
+                brows(h, rows), RAD_W(hc.w_norm), RAD_W(hc.w_down), RAD_W(hc.w_up),
+                hc.c.inject ? RAD_W(hc.w_inj) : RAD_NONE,
+                brow_slice(hc.w.x.x, 0, rows, n),
+                hc.c.inject ? brow_slice(hc.w.inj, 0, rows, hc.c.hc) : RAD_NONE,
+                hc.c.quant ? brow_slice(hc.c.codes_i8 ? hc.w.x.q8 : hc.w.x.q, 0, rows, n) : RAD_NONE,
+                hc.c.quant ? brow_slice(hc.c.codes_i8 ? hc.w.x.s8 : hc.w.x.s, 0, rows,
+                                        fp8_blocks(n)) : RAD_NONE,
+                hc.c.rotate ? brow_slice(hc.w.rq, 0, rows, n) : RAD_NONE,
+                hc.c.rotate ? brow_slice(hc.w.rs, 0, rows, fp8_blocks(n)) : RAD_NONE);
+}
+
+/* rad_block_hc.h:378-397 with the stream swapped. `T` decides the wire and whether the gather and
+ * the all-reduce ride in the write, exactly as the block in front decided with the same T. */
+inline void hc_write_into(RadCtx* c, const HyperConn& hc, rad_buf h, int64_t T, int64_t rows) {
+    if (!hc.op_write) return;
+    const int64_t n = hc.g.n_embd;
+    if (hc.takes_gather(T)) {
+        const int64_t k = hc.gsrc.top_k;
+        const bool shared = hc.gsrc.sh && hc.gsrc.sg;
+        RAD_ISSUE_N(c, ar_wire_is_exact(hc.g, T) ? hc.op_ar_gather_write : hc.op_ar_gather_write6,
+                    rows, brows(hc.gsrc.ye, rows * k), brow_slice(hc.gsrc.ew, 0, rows, k),
+                    brows(hc.gsrc.sorted, rows * k),
+                    shared ? brow_slice(hc.gsrc.sh, 0, rows, n) : RAD_NONE,
+                    shared ? brow_slice(hc.gsrc.sg, 0, rows, 1) : RAD_NONE,
+                    brow_slice(hc.w.x.x, 0, rows, n), brow_slice(hc.w.inj, 0, rows, hc.c.hc),
+                    brows(h, rows));
+        return;
+    }
+    RAD_ISSUE_N(c, hc.takes_ar(T) ? hc.ar_write(T) : hc.op_write, rows,
+                brow_slice(hc.w.x.x, 0, rows, n), brow_slice(hc.w.inj, 0, rows, hc.c.hc),
+                brows(h, rows));
+}
+
+/* rad_block_moe_fp8.h:1543-1576 over rows [0, rows) only: one pass (rows <= the block's pass size,
+ * which cap is) and the routing report the heat engine reads. */
+inline void moe_rows(RadCtx* c, const MoeFP8& e, int64_t rows) {
+    e.pass(c, rows, 0, rows);
+    RadRouting r{};
+    r.expert_ids    = (const int32_t*)rad_buf_ptr(c, e.w.ids);
+    r.expert_w      = nullptr;
+    const int32_t* const counts = rad_route_counts(c, e.layer, e.c.n_expert);
+    r.expert_count  = counts ? counts : (const int32_t*)rad_buf_ptr(c, e.w.ecnt);
+    r.sorted_tok    = (const int32_t*)rad_buf_ptr(c, e.w.sorted);
+    r.expert_offset = (const int32_t*)rad_buf_ptr(c, e.w.eoff);
+    r.top_k         = e.c.top_k;
+    r.n_expert      = e.c.n_expert;
+    rad_route_report(c, e.layer, &r);
+}
+
 }  /* namespace qwen4exp_kva */
 
 #endif /* QWEN4EXP_KVA_FILL_H */

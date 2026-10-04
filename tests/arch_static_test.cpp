@@ -157,6 +157,8 @@ int   rad_memset_async(void*, int, int64_t, RadStream) { ++g_ctx->device_calls; 
 /* ==================================================================== the plugin under test */
 #include "qwen4exp_kva.cpp"
 
+using rad::arch::bcol;
+using rad::arch::brows;
 using rad::arch::kv_cache;
 using rad::arch::praw2;
 
@@ -525,10 +527,7 @@ TEST(quality_declares_the_selected_row_table_and_kva_rowsel) {
     hold_kva(kva, {"kva.proj", "kva.st"});
     for (const char* t : {"kva.rowsel.score", "kva.rowsel.score_none", "kva.rowsel.score_all"})
         hold_score(kva, t);
-    int st = RAD_OK;
-    const std::string err = stderr_of([&] { st = qwen4exp_kva::declare(&kva, &meta, &c); });
-    CHECK_EQ(st, RAD_E_UNSUPPORTED);
-    CHECK(has(err, "not implemented"));
+    CHECK_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
     CHECK(weight(kva, "kva.rowsel.score_none") != nullptr);
     CHECK(weight(kva, "kva.rowsel.score") == nullptr);
     CHECK(weight(kva, "kva.rowsel.score_all") == nullptr);
@@ -648,9 +647,22 @@ void declare_pair(Pair& p, const char* mode, int rank = 0, int world = 1) {
     served(p.stock);
     served(p.kva);
     hold_kva(p.kva, {"kva.proj", "kva.st"});
+    hold_score(p.kva, "kva.rowsel.score");
     REQUIRE_EQ(qwen4exp_fp8::declare(&p.stock, &meta, &c), RAD_OK);
     Env env({{"RADIANCE_KVA", mode}});
     p.st = qwen4exp_kva::declare(&p.kva, &meta, &c);
+}
+
+/* kva_state_correct's operand list for late layer l: each KV operand with its own group's rows. */
+std::vector<RadOperand> seg_opd_correct(const qwen4exp_fp8::Model& m, const qwen4exp_kva::Kva& k,
+                                        const Batch& bk, int l, bool nd) {
+    RadOperand heads = RAD_W(k.st[(size_t)l]);
+    heads.offset = (int64_t)m.g.rank * m.gcfg.n_head_v * m.gcfg.head_v * m.gcfg.head_k;
+    heads.rows = m.gcfg.n_head_v;
+    auto rows_of = [&](rad_kvgroup g) { return praw2(bk.b.kv[g - 1].state_index, RAD_I32, 1, 3); };
+    return {kv_cache(m.kv_state, l), rows_of(m.kv_state), kv_cache(k.kv_applied, l),
+            rows_of(k.kv_applied), heads, nd ? kv_cache(k.kv_rho, l) : RAD_NONE,
+            nd ? rows_of(k.kv_rho) : RAD_NONE};
 }
 
 /* ONLY a prefill chunk of ONE sequence with T prompt tokens after it is filled; a mixed step, two
@@ -873,6 +885,126 @@ TEST(plumb_declares_no_correction) {
     CHECK(weight(p.kva, "kva.proj.4.weight") != nullptr);
 }
 
+/* ==================================================================== quality mode (Stage 5) */
+
+/* What an in-tree helper issues, on a scratch context: the oracle for the hand-issued copies. */
+template <class F>
+std::vector<RecIssue> issues_by(F f) {
+    RadCtx cx;
+    f(&cx);
+    return cx.issues;
+}
+
+/* QUALITY RUNS THE SELECTED ROWS EXACTLY ON cap COMPACTED ROWS. Per approximate chunk: kva_rowsel
+ * once (token ids and absolute positions), the selected rows' wide stream gathered into h_R. Per
+ * late layer: the projector over all rows; the connection read over h_R's cap rows into x_R
+ * (the in-tree read's operands with the stream and outputs swapped); x_R scattered over the
+ * projection; the codes; the WHOLE block over all n_tok rows (stock issues; for a delta-net
+ * layer with undo, decay sums and apply inside it); the block output gathered to y_R; the
+ * connection write into h_R at cap rows; the feed-forward read, the MoE pass and its write at
+ * cap rows -- each equal to the in-tree helper's own issues with only the stream swapped.
+ * TP1 and rank 0 of TP2 (where the writes carry the all-reduce). */
+TEST(quality_runs_the_selected_rows_exactly_on_cap_compacted_rows) {
+    for (int world : {1, 2}) {
+        Pair p;
+        declare_pair(p, "quality", 0, world);
+        REQUIRE_EQ(p.st, RAD_OK);
+        qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
+        const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+        const int64_t T = 128, cap = k.cfg.cap;
+        CHECK_EQ(cap, (int64_t)512);
+        REQUIRE(k.op_rowsel && k.op_gather_h && k.op_scatter_x && k.op_gather_y && k.kv_rho);
+        for (rad_buf h : {k.b_rows, k.b_mask, k.b_hr, k.b_xr, k.b_injr, k.b_yr, m.b_ab})
+            CHECK(p.kva.concurrent.count(h) == 1);
+        Batch bs = one_prefill(p.stock, T, 2048, 4096);
+        Batch bk = one_prefill(p.kva, T, 2048, 4096);
+        const Run want = run_step(qwen4exp_fp8::step, bs.b);
+        const Run got = run_step(qwen4exp_kva::step, bk.b);
+        std::vector<rad_op> reads, projs;
+        for (int l = kSplit; l < 8; ++l) {
+            reads.push_back(m.layers[(size_t)l].hc_mix.op_read);
+            projs.push_back(k.op_proj[(size_t)l]);
+        }
+        const std::vector<size_t> ws = starts(want.issues, reads, m.mixer.op_read);
+        const std::vector<size_t> gs = starts(got.issues, projs, m.mixer.op_read);
+        REQUIRE(gs[0] >= 2 && gs[0] < got.issues.size());
+        CHECK_EQ(differ(slice(got.issues, 0, gs[0] - 2), slice(want.issues, 0, ws[0])), 0);
+        const RecIssue& sel = got.issues[gs[0] - 2];
+        CHECK_EQ(sel.op, k.op_rowsel);
+        CHECK_EQ(sel.n, T);
+        REQUIRE_EQ(sel.opd.size(), (size_t)5);
+        CHECK(sel.opd[0].raw == bk.b.token_ids && sel.opd[1].raw == bk.b.positions);
+        CHECK_EQ(sel.opd[2].handle, k.score);
+        CHECK_EQ(sel.opd[3].handle, k.b_rows);
+        CHECK_EQ(sel.opd[4].handle, k.b_mask);
+        const RecIssue& gat = got.issues[gs[0] - 1];
+        CHECK_EQ(gat.op, k.op_gather_h);
+        CHECK_EQ(gat.n, cap);
+        CHECK(gat.opd[0].handle == m.b_h && gat.opd[1].handle == k.b_rows && gat.opd[2].handle == k.b_hr);
+        CHECK_EQ(differ(slice(got.issues, gs.back(), got.issues.size()),
+                        slice(want.issues, ws.back(), want.issues.size())), 0);
+        for (int l = kSplit; l < 8; ++l) {
+            const size_t i = (size_t)(l - kSplit);
+            const qwen4exp_fp8::Layer& lay = m.layers[(size_t)l];
+            const std::vector<RecIssue> seg = slice(got.issues, gs[i], gs[i + 1]);
+            REQUIRE(seg.size() > 4);
+            std::vector<RecIssue> want_seg;
+            want_seg.push_back(seg[0]);                                     /* the projector */
+            CHECK_EQ(seg[0].op, k.op_proj[(size_t)l]);
+            /* the read over h_R into x_R / inj_R, codes absent */
+            std::vector<RecIssue> rd = issues_by([&](RadCtx* cx) { lay.hc_mix.read(cx, cap, 0, cap); });
+            REQUIRE_EQ(rd.size(), (size_t)1);
+            rd[0].opd[0] = brows(k.b_hr, cap);
+            rd[0].opd[5] = brows(k.b_xr, cap);
+            rd[0].opd[6] = brows(k.b_injr, cap);
+            for (int o = 7; o < 11; ++o) rd[0].opd[(size_t)o] = RAD_NONE;
+            want_seg.push_back(rd[0]);
+            want_seg.push_back({k.op_scatter_x, {brows(k.b_xr, cap), brows(k.b_rows, cap),
+                                                 brows(m.a_x.x, T)}, cap});
+            REQUIRE(seg.size() > 3);
+            want_seg.push_back(seg[3]);                                     /* the codes */
+            CHECK_EQ(seg[3].op, k.quant.op);
+            /* the whole block over all rows: the stock issues between the read and the write */
+            const std::vector<RecIssue> stock_seg = slice(want.issues, ws[i], ws[i + 1]);
+            size_t wpos = 1;
+            const rad_op wr = lay.hc_mix.takes_ar(T) ? lay.hc_mix.ar_write(T) : lay.hc_mix.op_write;
+            while (wpos < stock_seg.size() && stock_seg[wpos].op != wr) ++wpos;
+            REQUIRE(wpos < stock_seg.size());
+            for (size_t j = 1; j < wpos; ++j) {
+                const RecIssue& r = stock_seg[j];
+                if (!lay.full && r.op == lay.gdn.op_conv_prep)
+                    want_seg.push_back({k.op_undo[(size_t)l], seg_opd_correct(m, k, bk, l, false), 1});
+                want_seg.push_back(r);
+                if (!lay.full && r.op == lay.gdn.op_scan) {
+                    want_seg.push_back({k.op_rho[(size_t)l],
+                        {bcol(lay.gdn.w.ab, 0, lay.gdn.cfg.n_head_v, T), brows(k.b_mask, T),
+                         RAD_W(lay.gdn.w_a_log), RAD_W(lay.gdn.w_dt_bias), kv_cache(k.kv_rho, l),
+                         praw2(bk.b.kv[k.kv_rho - 1].state_index, RAD_I32, 1, 3)}, T});
+                    want_seg.push_back({k.op_apply[(size_t)l], seg_opd_correct(m, k, bk, l, true), 1});
+                }
+            }
+            want_seg.push_back({k.op_gather_y, {brows(m.a_x.x, T), brows(k.b_rows, cap),
+                                                brows(k.b_yr, cap)}, cap});
+            std::vector<RecIssue> mw = issues_by([&](RadCtx* cx) { lay.hc_mix.write(cx, T, 0, cap); });
+            REQUIRE_EQ(mw.size(), (size_t)1);
+            mw[0].opd = {brows(k.b_yr, cap), brows(k.b_injr, cap), brows(k.b_hr, cap)};
+            want_seg.push_back(mw[0]);
+            std::vector<RecIssue> fr = issues_by([&](RadCtx* cx) { lay.hc_ffn.read(cx, cap, 0, cap); });
+            fr[0].opd[0] = brows(k.b_hr, cap);
+            want_seg.push_back(fr[0]);
+            for (const RecIssue& r : issues_by([&](RadCtx* cx) { lay.mlp.pass(cx, cap, 0, cap); }))
+                want_seg.push_back(r);
+            std::vector<RecIssue> fw = issues_by([&](RadCtx* cx) { lay.hc_ffn.write(cx, cap, 0, cap); });
+            REQUIRE_EQ(fw.size(), (size_t)1);
+            fw[0].opd.back() = brows(k.b_hr, cap);
+            want_seg.push_back(fw[0]);
+            CHECK_EQ(differ(seg, want_seg), 0);
+        }
+        CHECK_EQ(count(got.log, "kva: approximate step"), 1);
+        CHECK_EQ(got.device_calls, 0);
+    }
+}
+
 /* Speed declares the projector per late layer and one quantiser, after the whole in-tree graph and
  * nothing in between: the in-tree op list is a prefix of the KVA one. */
 TEST(speed_adds_its_ops_after_the_in_tree_graph) {
@@ -900,38 +1032,57 @@ TEST(speed_adds_its_ops_after_the_in_tree_graph) {
 }
 
 /* A SIZING DECLARE describes the same graph with only rows smaller and leaves the step's state
- * alone (radiance core/engine_bringup.cpp:598-660); the cap stays the real declare's. */
-TEST(a_speed_sizing_declare_matches_the_real_one) {
-    Pair p;
-    declare_pair(p, "speed");
-    REQUIRE_EQ(p.st, RAD_OK);
-    RadModelMeta meta = flash_next_meta();
-    RadBuildCtx c = served_ctx();
-    c.max_tok = 256;
-    c.shape_probe = 1;
-    RadBuilder small;
-    served(small);
-    hold_kva(small, {"kva.proj", "kva.st"});
-    Env env({{"RADIANCE_KVA", "speed"}});
-    REQUIRE_EQ(qwen4exp_kva::declare(&small, &meta, &c), RAD_OK);
-    REQUIRE_EQ(small.ops.size(), p.kva.ops.size());
-    int fixed_differ = 0;
-    for (size_t i = 0; i < small.ops.size(); ++i) {
-        CHECK_EQ(small.ops[i].op, p.kva.ops[i].op);
-        REQUIRE_EQ(small.ops[i].p.size(), p.kva.ops[i].p.size());
-        for (size_t j = 0; j < small.ops[i].p.size(); ++j) {
-            const RecParam& a = p.kva.ops[i].p[j];
-            const RecParam& q = small.ops[i].p[j];
-            const bool cap = (p.kva.ops[i].op == "qsa_work" && a.key == "work") ||
-                             (p.kva.ops[i].op == "attn_paged_gate_quant" && a.key == "max_seqs");
-            if (a.kind == RAD_P_RANGE || (cap && q.ival <= a.ival)) continue;
-            fixed_differ += a.ival != q.ival || a.sval != q.sval || a.dval != q.dval;
+ * alone (radiance core/engine_bringup.cpp:598-660); the cap stays the real declare's. Its weight
+ * list is the real one name for name -- which is what lets the quality path reuse the real
+ * declare's in-tree weight handles (A_log, dt_bias) under a sizing declare -- and its buffers are
+ * the real ones with only dim 0 smaller. */
+TEST(a_sizing_declare_matches_the_real_one) {
+    for (const char* mode : {"speed", "quality"}) {
+        Pair p;
+        declare_pair(p, mode);
+        REQUIRE_EQ(p.st, RAD_OK);
+        RadModelMeta meta = flash_next_meta();
+        RadBuildCtx c = served_ctx();
+        c.max_tok = 256;
+        c.shape_probe = 1;
+        RadBuilder small;
+        served(small);
+        hold_kva(small, {"kva.proj", "kva.st"});
+        hold_score(small, "kva.rowsel.score");
+        Env env({{"RADIANCE_KVA", mode}});
+        REQUIRE_EQ(qwen4exp_kva::declare(&small, &meta, &c), RAD_OK);
+        REQUIRE_EQ(small.ops.size(), p.kva.ops.size());
+        int fixed_differ = 0;
+        for (size_t i = 0; i < small.ops.size(); ++i) {
+            CHECK_EQ(small.ops[i].op, p.kva.ops[i].op);
+            REQUIRE_EQ(small.ops[i].p.size(), p.kva.ops[i].p.size());
+            CHECK(small.ops[i].w == p.kva.ops[i].w);
+            for (size_t j = 0; j < small.ops[i].p.size(); ++j) {
+                const RecParam& a = p.kva.ops[i].p[j];
+                const RecParam& q = small.ops[i].p[j];
+                const bool cap = (p.kva.ops[i].op == "qsa_work" && a.key == "work") ||
+                                 (p.kva.ops[i].op == "attn_paged_gate_quant" && a.key == "max_seqs") ||
+                                 (p.kva.ops[i].op == "kva_rowsel" && a.key == "cap");
+                if (a.kind == RAD_P_RANGE || (cap && q.ival <= a.ival)) continue;
+                fixed_differ += a.ival != q.ival || a.sval != q.sval || a.dval != q.dval;
+            }
         }
+        CHECK_EQ(fixed_differ, 0);
+        REQUIRE_EQ(small.weights.size(), p.kva.weights.size());
+        for (size_t i = 0; i < small.weights.size(); ++i)
+            CHECK_EQ(small.weights[i].first, p.kva.weights[i].first);
+        REQUIRE_EQ(small.bufs.size(), p.kva.bufs.size());
+        for (size_t i = 0; i < small.bufs.size(); ++i) {
+            CHECK_EQ(small.bufs[i].first, p.kva.bufs[i].first);
+            CHECK(small.bufs[i].second.shape[0] <= p.kva.bufs[i].second.shape[0]);
+            for (uint32_t d = 1; d < p.kva.bufs[i].second.rank; ++d)
+                CHECK_EQ(small.bufs[i].second.shape[d], p.kva.bufs[i].second.shape[d]);
+        }
+        CHECK(small.kv_groups == p.kva.kv_groups);
+        CHECK_EQ(qwen4exp_fp8::g_model[0].g.max_tok, 2048);
+        CHECK_EQ(qwen4exp_kva::g_kva[0].op_proj.size(), (size_t)8);
+        CHECK(qwen4exp_kva::g_kva[0].op_proj[kSplit] != 0);
     }
-    CHECK_EQ(fixed_differ, 0);
-    CHECK_EQ(qwen4exp_fp8::g_model[0].g.max_tok, 2048);
-    CHECK_EQ(qwen4exp_kva::g_kva[0].op_proj.size(), (size_t)8);
-    CHECK(qwen4exp_kva::g_kva[0].op_proj[kSplit] != 0);
 }
 
 /* ==================================================================== refusals (R31) */

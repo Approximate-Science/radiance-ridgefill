@@ -40,6 +40,11 @@ struct Kva {
      * projected block input's codes. */
     std::vector<rad_op> op_proj;              /* [n_layer]: 0 below S */
     QuantFP8 quant{};
+    /* Quality mode (Stage 5): the selected rows, their compacted streams, the row moves, and the
+     * decay sums per late delta-net layer. */
+    rad_buf b_rows = 0, b_mask = 0, b_hr = 0, b_xr = 0, b_injr = 0, b_yr = 0;
+    rad_op  op_gather_h = 0, op_scatter_x = 0, op_gather_y = 0;
+    std::vector<rad_op> op_rho;               /* [n_layer]: late delta-net layers, have_st only */
     std::string dump_dir;                     /* RADIANCE_KVA_DUMP, empty when unset */
 };
 
@@ -193,12 +198,24 @@ static int decl_kernel_ops(RadBuilder* b, const qwen4exp_fp8::Model& m, const Ra
         }
     }
     if (c.mode == MODE_QUALITY) {
-        k.op_rowsel = RAD_OP(b, "kva_rowsel",
+        k.op_rowsel = rw(b, RAD_OP(b, "kva_rowsel",
             RAD_PARAMS(RAD_RANGE("M", 1, max_tok), RAD_INT("cap", c.cap),
                        RAD_F64("share", c.share), RAD_INT("seed", c.seed),
                        RAD_STR("mode", kRowselNames[c.rowsel])),
-            RAD_WEIGHTS(k.score));
+            RAD_WEIGHTS(k.score)), {}, {k.b_rows, k.b_mask});
         if (!k.op_rowsel) missing = "kva_rowsel";
+    }
+    /* The decay sums read the layer's own a|b columns and its own A_log / dt_bias. Under a sizing
+     * declare these in-tree handles are the real declare's, which name the same weights (the
+     * in-tree declare declares them in the same order at every max_tok; the static test checks
+     * the weight lists agree). */
+    for (int64_t l = k.split; k.kv_rho && l < m.g.n_layer; ++l) {
+        const qwen4exp_fp8::Layer& lay = m.layers[(size_t)l];
+        if (lay.full) continue;
+        k.op_rho[(size_t)l] = rw(b, RAD_OP(b, "kva_rho_update",
+            RAD_PARAMS(RAD_RANGE("M", 1, max_tok), RAD_INT("n_head", m.gcfg.n_head_v)),
+            RAD_WEIGHTS(lay.gdn.w_a_log, lay.gdn.w_dt_bias)), {lay.gdn.w.ab, k.b_mask}, {});
+        if (!k.op_rho[(size_t)l]) missing = "kva_rho_update";
     }
     if (missing && !probe) {
         std::fprintf(stderr, "radiance: qwen4exp_kva: mode %s issues '%s' and no kernel library "
@@ -307,6 +324,58 @@ static int decl_fill(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuild
     return RAD_OK;
 }
 
+static rad_kvgroup decl_rho(RadBuilder* b, const qwen4exp_fp8::Model& m, Kva& k) {
+    RadKVGroupDecl d{};
+    d.kind         = RAD_KV_LINEAR;
+    d.dtype        = RAD_F32;
+    d.n_head_kv    = m.gcfg.n_head_v;
+    d.state_dim[0] = 1;
+    d.state_dim[1] = 2;            /* N, D */
+    const rad_kvgroup g = rad_decl_kv_group(b, k.nm.f("kv_kva_rho"), &d);
+    for (int64_t l = k.split; g && l < m.g.n_layer; ++l)
+        if (!m.layers[(size_t)l].full && rad_bind_layer_kv(b, (int)l, g) < 0) return 0;
+    return g;
+}
+
+/* QUALITY MODE'S EXACT ROWS (Stage 5, PLAN §3, D11-D14). Every compacted issue is at M = cap,
+ * never at the selected count, which is device data the host never reads (D12): rows_idx is
+ * -1 padded, a gather reads a zero row for -1 and a scatter skips it. The exact rows' wide stream
+ * lives in its own buffer `h_R` [cap, hc*n_embd] across the late layers -- b_h must stay the
+ * layer-S stream for every projector -- with its block input `x_R`, write gains `inj_R` and block
+ * output `y_R`. All plugin-owned and whole-program (declared after the in-tree graph, PLAN D4), as
+ * is the in-tree `gdn_ab` the decay sums read. The decay sums' group exists only with a correction
+ * to scale. */
+static int decl_quality(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva& k) {
+    k.op_rho.assign(m.layers.size(), 0);
+    if (k.cfg.mode != MODE_QUALITY) return RAD_OK;
+    const int64_t cap = k.cfg.cap, n = m.g.n_embd, hc = m.hccfg.hc;
+    const uint32_t act = m.g.act_dtype;
+    k.b_rows = decl_b(b, k.nm.f("kva_rows_idx"), RAD_I32, {cap});
+    k.b_mask = decl_b(b, k.nm.f("kva_mask"),     RAD_I32, {ctx->max_tok});
+    k.b_hr   = decl_b(b, k.nm.f("kva_h_rows"),   act,     {cap, hc * n});
+    k.b_xr   = decl_b(b, k.nm.f("kva_x_rows"),   act,     {cap, n});
+    k.b_injr = decl_b(b, k.nm.f("kva_inj_rows"), act,     {cap, hc});
+    k.b_yr   = decl_b(b, k.nm.f("kva_y_rows"),   act,     {cap, n});
+    for (rad_buf h : { k.b_rows, k.b_mask, k.b_hr, k.b_xr, k.b_injr, k.b_yr, m.b_ab }) {
+        if (!h) return RAD_E_INVAL;
+        RAD_ARCH_TRY(rad_buf_concurrent(b, h));
+    }
+    auto rows_op = [&](const char* op, int64_t width) {
+        return RAD_OP(b, op, RAD_PARAMS(RAD_RANGE("M", 1, cap), RAD_INT("n", width),
+                                        RAD_STR("dtype", m.g.dtype)), RAD_NOWEIGHTS);
+    };
+    k.op_gather_h  = rw(b, rows_op("gather_rows", hc * n), {m.b_h, k.b_rows}, {k.b_hr});
+    k.op_scatter_x = rw(b, rows_op("scatter_rows", n), {k.b_xr, k.b_rows, m.a_x.x}, {m.a_x.x});
+    k.op_gather_y  = rw(b, rows_op("gather_rows", n), {m.a_x.x, k.b_rows}, {k.b_yr});
+    if (!ctx->shape_probe && (!k.op_gather_h || !k.op_scatter_x || !k.op_gather_y)) {
+        std::fprintf(stderr, "radiance: qwen4exp_kva: quality mode moves rows with gather_rows and "
+                             "scatter_rows, and no kernel serves them at %lld rows\n", (long long)cap);
+        return RAD_E_UNSUPPORTED;
+    }
+    if (k.have_st && !(k.kv_rho = decl_rho(b, m, k))) return RAD_E_INVAL;
+    return RAD_OK;
+}
+
 /* The selected set, its ops and its refusals. Under a sizing declare the cap is the real
  * declare's -- a fixed op parameter that followed max_tok would cost the arena its level -- and
  * nothing is refused: the real declare already decided. */
@@ -316,19 +385,14 @@ static int decl_selected(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadB
     /* plumb issues no correction, so it does not place one */
     if (k.have_proj && k.cfg.mode != MODE_PLUMB)
         RAD_ARCH_TRY(decl_correction(b, k.nm, m, k.cfg.st, k.split, k));
-    k.score = decl_score(b, k.nm, m, k.cfg.score);
+    if (k.cfg.mode == MODE_QUALITY) k.score = decl_score(b, k.nm, m, k.cfg.score);
     k.have_rowsel = k.score != 0;
     if (ctx->shape_probe) k.cfg.cap = g_kva[ctx->rank].cfg.cap;
     else RAD_ARCH_TRY(check_mode(k, m.g.max_tok));
     RAD_ARCH_TRY(decl_fill(b, m, ctx, k));
+    RAD_ARCH_TRY(decl_quality(b, m, ctx, k));
     RAD_ARCH_TRY(decl_kernel_ops(b, m, ctx, k));
     note_config(b, k);
-    /* NOTHING UNIMPLEMENTED RETURNS SUCCESS: the exact-row path is Stage 5. */
-    if (k.cfg.mode == MODE_QUALITY && !ctx->shape_probe) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: mode quality is not implemented in this build "
-                             "(the exact-row path is Stage 5); run speed or off\n");
-        return RAD_E_UNSUPPORTED;
-    }
     return RAD_OK;
 }
 
