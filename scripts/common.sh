@@ -122,9 +122,9 @@ rk_require_model() {
 #   other:  -v $RK_PLUGIN_HOME:/plugins:ro
 #           -e RADIANCE_HOME=/plugins:/opt/radiance/share/radiance   (plugin first)
 #           -e RADIANCE_KVA=<MODE>
-# Every RADIANCE_KVA* (except RADIANCE_KVA itself, which the mode argument sets) and
-# RADIANCE_LOG_STEPS in the caller's environment is passed through (-e NAME, the
-# caller's value).
+# Every RADIANCE_KVA* (except RADIANCE_KVA itself, which the mode argument sets),
+# RADIANCE_LOG_STEPS, RADIANCE_PROFILE_EVERY and RADIANCE_DEBUG_ROUTING in the caller's
+# environment is passed through (-e NAME, the caller's value), then RK_DOCKER_EXTRA's words.
 rk_docker_prefix() {
     rk_mode_validate "$1"
     rk_require_model
@@ -146,8 +146,13 @@ rk_docker_prefix() {
         printf '%s\n' -e RADIANCE_KVA="$1"
     fi
     for rk_name in $(env | cut -d= -f1 | LC_ALL=C sort -u |
-                     grep -E '^RADIANCE_KVA|^RADIANCE_LOG_STEPS$' |
+                     grep -E '^RADIANCE_KVA|^RADIANCE_LOG_STEPS$|^RADIANCE_PROFILE_EVERY$|^RADIANCE_DEBUG_ROUTING$' |
                      grep -v '^RADIANCE_KVA$'); do
         printf '%s\n' -e "$rk_name"
     done
+    # RK_DOCKER_EXTRA: extra docker-run arguments, one per WORD (no spaces inside one), e.g.
+    # RK_DOCKER_EXTRA="-v /host/dump:/dump" for RADIANCE_KVA_DUMP=/dump, which needs a writable
+    # mount. Debug runs only; empty by default, so measured runs are unchanged.
+    # shellcheck disable=SC2086  # one argument per word by construction
+    [ -z "${RK_DOCKER_EXTRA:-}" ] || printf '%s\n' $RK_DOCKER_EXTRA
 }
