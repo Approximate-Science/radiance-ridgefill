@@ -5,7 +5,7 @@ namespace `rad-convert --reuse --in-place` can append from.
 
   kva_sidecar.py build  --proj P --st RANK0.pt RANK1.pt --freq F --tokenizer DIR --out DIR
   kva_sidecar.py verify TARGET --proj P --st RANK0.pt RANK1.pt --freq F --tokenizer DIR [--rad-info CMD]
-  kva_sidecar.py build  --names refit --proj P --st RANK0.pt RANK1.pt --out DIR      (Stage 6 refit set)
+  kva_sidecar.py build  --names refit --proj P [--st RANK0.pt RANK1.pt] --out DIR    (Stage 6 refit set)
 
 Tensors written (L = the layers present in the inputs; no model number is typed here):
   kva.proj.L.weight [H, W] bf16     projector layer.L[:, :W]   (W = its columns - 1)
@@ -16,7 +16,10 @@ Tensors written (L = the layers present in the inputs; no model number is typed 
   kva.rowsel.score_none  [vocab] f32  all -inf: no row selected, rho = 1 (R41)
   kva.rowsel.score_all   [vocab] f32  all 0: every row a match, ties by position (the all-rows check, R35)
 `--names refit` writes only kva.projr.L.{weight,bias} and kva.str.L (no swap control, no row tables) into
-kva-sidecar-refit.safetensors, with source-hash keys kva.src.{projr,str0,str1}.sha256.
+kva-sidecar-refit.safetensors, with source-hash keys kva.src.{projr,str0,str1}.sha256. Its --st is optional: the
+correction refit needs the refit projector IN the container (its speed run fills with it), so Stage 6 appends twice:
+first the projector alone (no --st: no kva.str.*, so RADIANCE_KVA_ST=refit serves with no correction), then the
+full refit set (the projector tensors are byte-identical and reused by name, only kva.str.* is new).
 The controls share the container with the real tensors because an in-place append cannot replace a weight and
 there is no disk for a second container (orchestrator decision, 2026-10-04).
 
@@ -71,7 +74,9 @@ def source_files(args):
     """{role: path} of every file the build reads; a missing one stops the tool before any work. The
     row-selection inputs belong to the shipped set only."""
     names = NAMES[args.names]
-    files = dict(zip(names["roles"], (Path(args.proj), Path(args.st[0]), Path(args.st[1]))))
+    if args.names == "shipped" and not args.st:
+        raise SystemExit("--names shipped needs --st RANK0 RANK1: the correction is part of the shipped set")
+    files = dict(zip(names["roles"], [Path(args.proj)] + [Path(f) for f in args.st or ()]))
     if args.names == "shipped":
         if not (args.freq and args.tokenizer):
             raise SystemExit("--names shipped builds the row-selection tables: --freq and --tokenizer are required")
@@ -179,8 +184,9 @@ def build(args):
     meta = {"kva.format": FORMAT, **source_hashes(files)}
     print("projector ...", flush=True)
     split, tensors = projector_tensors(files[names["roles"][0]], names["proj"])
-    tensors.update(correction_tensors(files[names["roles"][1]], files[names["roles"][2]], split,
-                                      names["st"], names["swap"]))
+    if args.st:
+        tensors.update(correction_tensors(files[names["roles"][1]], files[names["roles"][2]], split,
+                                          names["st"], names["swap"]))
     if args.names == "shipped":
         print("row-selection tables ...", flush=True)
         rowsel, kept, n_tok = rowsel_tensors(args.tokenizer, files["freq"])
@@ -256,7 +262,8 @@ def main(argv=None):
             p.add_argument("target", help="kva-sidecar.safetensors, a .rad container, or saved `rad-info --meta` output")
             p.add_argument("--rad-info", default="rad-info", help="rad-info command (a .rad target), e.g. a docker run prefix")
         p.add_argument("--proj", required=True, help="projector safetensors (layer.S..layer.L-1 [H, W+1] bf16)")
-        p.add_argument("--st", required=True, nargs=2, metavar=("RANK0", "RANK1"), help="correction .pt per TP rank")
+        p.add_argument("--st", nargs=2, metavar=("RANK0", "RANK1"),
+                       help="correction .pt per TP rank; required for shipped, optional for refit (projector alone)")
         p.add_argument("--names", choices=sorted(NAMES), default="shipped",
                        help="tensor-name set: shipped (kva.proj/kva.st + controls + row tables) or refit "
                             "(kva.projr/kva.str, Stage 6)")
