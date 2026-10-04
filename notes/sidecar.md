@@ -200,7 +200,7 @@ number replaces it once the dump exists.
 
 ## 7. Stage 2 step 3 — the append, and Q12 (read from `tools/rad_convert.cpp:180-900` and `core/format/`, not run)
 
-**Q12 answer (UNVERIFIED reading, verify with `--plan-only -v` once the container + plugin exist): NO —
+**Q12 answer: NO (read in the code; the §7.4 plan-only run is consistent with it) —
 `--reuse --in-place` does not accept a sidecar-only namespace.** Four reasons in the code:
 1. `Checkpoint::open` needs `config.json` beside the shards and refuses without it
    (`core/format/checkpoint.cpp:170-176`); the declare's meta, and the container's rewritten header meta
@@ -217,53 +217,180 @@ number replaces it once the dump exists.
 Also: without `--recipe`, every unnamed weight plans as its checkpoint dtype, so the container's quantised
 weights would mismatch and be refused — the container's recipe must be passed.
 
-**Proposed way through (orchestrator / Dylan to decide; nothing downloaded):** a STUB namespace of the source
-checkpoint. The source is `Qwen/Qwen3.8-Flash-Next` (bf16, 131 shards, 360 GB; public, the HF tree API answers
-without a token). Build a dir with its real `config.json`, `generation_config.json`, `preprocessor_config.json`,
-`video_preprocessor_config.json`, `tokenizer.json` (small files), its `model.safetensors.index.json` extended
-with the 87 `kva.*` names → `kva-sidecar.safetensors` (symlink/copy of ours), and 131 SPARSE shard files whose
-first bytes are the real safetensors headers (HTTP range read: probed shard 2, header 160 B, 1 tensor
-`model.language_model.layers.0.mlp.experts.gate_up_proj` BF16 [512,1280,2560]) and whose data is a hole
-(apparent 360 GB, ~0 disk on /var/home). In-place reused weights are planned from names/dtypes/shapes only and
-copied by offset (`add_existing`), so stub data is never read; only the 87 new weights are read (from our real
-shard). Risks to check first: (a) the gptq rule's options include `calib=calib/w4nl-calib` — if the quantiser
-checks that path when the recipe is compiled (`rad_convert.cpp:446`), an empty dir at that relative path may
-be needed (the options string must stay identical); (b) the recipe text must equal the container's
-(`rad-info --recipe` vs `~/models/rad/qwen4exp-w4nl64-i8-hc8m.recipe`); (c) the safetensors loader must accept
-holes (it mmaps; to confirm). Alternatives: the plugin loads the sidecar file itself (RADIANCE-FACTS §8,
-UNVERIFIED, not documented), or a full re-convert (impossible: the expert calibration Grams are unpublished).
+**Way through, APPROVED by the orchestrator and DONE (2026-10-04 17:28–17:40): a header-only stub of the source
+checkpoint.** The plan-only run below confirms the reading: with the full namespace the plan covers every old
+weight; nothing in the stub's data regions is read.
 
-**The command** (inside `radiance-build`; `STUB` as above; `home/` = the plugin home the ARCH/KERNELS lanes
-install, holding `architectures/qwen4exp_fp8.so` (KVA) and `kernels/kva.so`):
+### 7.1 The stub — `data/stub/` (git-ignored, /var/home), built by `tools/stub_checkpoint.py`
 ```
-docker run --rm \
-  -v "$(readlink -f ~/models/rad)":/models \
-  -v ~/projects/inference/radiance-kva:/kva:ro -v "$STUB":/stub:ro \
-  radiance-build /stage/opt/radiance/bin/rad-convert /stub \
+$ tools/stub_checkpoint.py --repo Qwen/Qwen3.8-Flash-Next --revision main --out data/stub \
+      --extra data/sidecar/kva-sidecar.safetensors
+Qwen/Qwen3.8-Flash-Next@de4b8e4d43b917e7706784d8bb445c9af86a3540: 13 small files, 131 shards to stub
+wrote data/stub: 131 header-only shards (335.3 GiB apparent), extra tensors {'kva-sidecar.safetensors': 87}
+```
+13 s. **Disk: 23 MB real, 336 GB apparent** (sparse; anything that copies it must use `--sparse`/reflinks, or it
+expands to 336 GB). Every non-safetensors file of the repo downloaded as is (configs, tokenizer, vocab, merges,
+chat template, index, README, LICENSE). Each shard = its real header (two HTTP range reads; header + data
+length checked against the repo's file size) + a hole. The index gains the 87 `kva.*` names →
+`kva-sidecar.safetensors`, a relative symlink to `../sidecar/kva-sidecar.safetensors` (resolves inside the
+`/kva` mount). Revision pinned in `data/stub/stub-manifest.json` with every header's sha256.
+
+### 7.2 Checks (evidence/stage2/)
+- **Container sha256** (orchestrator, `evidence/stage0/container.sha256`): `0af5e962…4d20` = the published LFS
+  sha256. All runs below are on the pristine container.
+- **Tokenizer**: `sha256sum data/stub/tokenizer.json` = `0997f410…29b9f3` = the file the container's vocab was
+  baked from (README "How this file was made") = the tokenizer the score table was built with.
+  `tokenizer_config.json` git blob `5de744b3` equal too.
+- **config.json vs `rad-info --meta`** (`config-vs-meta.txt`): of the container's 180 meta keys, 166 equal
+  the stub's config.json / generation_config.json / preprocessor configs flattened the radiance way (text_config
+  aliased, `generation.*`, `preprocessor.*`, `video_preprocessor.*`); the rest are rad-convert's derived keys
+  (n_layers 48, n_embd 2560, n_vocab 248320, …, `radiance.encoder vision`). **0 differ, 0 container keys
+  unexplained.** Four stub keys absent from the meta are `null` in config.json (`pad_token_id`,
+  `mtp_use_hidden_state_from_layer`, plain and text_config), which radiance's flatten skips. arch: model_type
+  `qwen4_exp` → `qwen4exp`; header "created by rad-convert Oct 2 2026 from Qwen/Qwen3.8-Flash-Next".
+- **Recipe**: `rad-info --recipe` is NOT byte-equal to `~/models/rad/qwen4exp-w4nl64-i8-hc8m.recipe`
+  (`recipe.diff`, 108 lines): the container stores the parsed rules — no comments, single spaces, `$CALIB`
+  expanded. Normalised (comments stripped, whitespace collapsed, `$CALIB` → `calib/w4nl-calib`) the file equals
+  the stored 26 rules exactly (`recipe-file-normalised.txt` vs `rad-info-recipe.txt`: `diff` empty).
+- **`calib=` (read in the code)**: no directory is needed. `Compiled::build` only parses option strings
+  (`rad_convert.cpp:67-127`); gptq's `encoding` hook never reads `calib` (`libquant/lq_registry.cpp:101-118`);
+  the directory is opened only in `gptq_quantize` (`:131`, `gptq_factor`/`calib_gram`), which runs only for a
+  weight being WRITTEN, never for one reused in place. BUT the recipe file says `calib=$CALIB` and an unset
+  variable is refused at parse (`core/format/recipe.cpp:37-56`), so the run sets `CALIB=calib/w4nl-calib` —
+  the literal the container recorded, so the options string (`options_text`, sorted) matches. No empty dir made.
+- **R13 negative control**: `kva_sidecar.py verify evidence/stage2/rad-info-meta.txt …` on the pristine
+  container → `FAIL (11 problem(s))` (7 hashes + 4 keys MISSING), exit 1 (`verify-pre-append.txt`).
+
+### 7.3 Plugin home used (`home/`)
+`ls home/*`: only the arch `.so` was installed (by the ARCH lane); `kva.so` was missing. Built + installed both
+from **committed `fc90feb`** (`git archive HEAD` into `build-sidecar-hip/src`, sources unedited) inside
+`radiance-build`: configure says `radiance 1.0.8: RADIANCE_SRC and /stage/opt/radiance/bin/radiance agree`,
+`device rows ON, GPU targets 'gfx1201', installs into /kva/home`; log `build-sidecar-hip/build.log`.
+`home/architectures/qwen4exp_fp8.so` sha256 `eb6396a9…`, `home/kernels/kva.so` `73229f27…`; both `.comment`
+Ubuntu GCC 14.2 + AMD clang 22 (roc-7.2.4), i.e. the radiance-build toolchain, HIP configured. kva.so is the
+KERNELS lane's committed Stage 1 (device rows refuse; no device code object yet: "0 fat binaries, gfx1201
+host"). The KERNELS/ARCH lanes will reinstall newer builds over these; the plan only needs the declare.
+
+### 7.4 `--plan-only -v` — RUN, exit 0 (`evidence/stage2/plan-only.log`, 51,732 lines, 4.5 s, no GPU)
+```
+docker run --rm -e RADIANCE_KVA_DECLARE=all -e CALIB=calib/w4nl-calib \
+  -v "$(readlink -f ~/models/rad)":/models:ro -v ~/projects/inference/radiance-kva:/kva:ro \
+  radiance-build /stage/opt/radiance/bin/rad-convert /kva/data/stub \
     --reuse /models/qwen3.8-next-flash-fp8-iq4r-moe.rad --in-place \
     --recipe /models/qwen4exp-w4nl64-i8-hc8m.recipe \
     --home /kva/home:/stage/opt/radiance/share/radiance \
-    $(sed 's/^/--set /' ~/projects/inference/radiance-kva/data/sidecar/rad-convert-set.txt) \
-    --set kva.mode=quality --set kva.tail=2048 \
-    --plan-only -v 2>&1 | tee evidence/stage2/plan-only.log
+    $(sed 's/^/--set /' data/sidecar/rad-convert-set.txt | tr '\n' ' ') --set kva.mode=quality --set kva.tail=2048 \
+    --plan-only -v > evidence/stage2/plan-only.log 2>&1
 ```
-(`-o` defaults to the `--reuse` file under `--in-place`; `tokenizer.json` in the stub dir replaces the
-original `--tokenizer` flag — same file by hash.) Drop `--plan-only` for the real append; the container must
-not be open in any engine (`begin_append` refuses, `radfile.cpp:673-680`). Disk: +1.28 GiB on the model SSD.
+Key lines:
+```
+I source   /kva/data/stub (1745 tensors)
+I arch     qwen4exp
+I device: built with HIP but no device is visible -- using the host backend
+D loader.cpp:488  plugin 0: kva 0.1.0 (/kva/home/kernels/kva.so) -- 6 kernels, 3 schemas, 0 fat binaries, gfx1201 host
+I plugin /stage/opt/radiance/share/radiance/architectures/qwen4exp_fp8.so is shadowed by /kva/home/architectures/qwen4exp_fp8.so, which comes first on the search path
+D loader.cpp:488  plugin 4: qwen4exp_kva 0.1.0 (/kva/home/architectures/qwen4exp_fp8.so) -- 0 kernels, 0 schemas, 0 fat binaries, portable
+I recipe   26 rule(s)
+D rad_builder.cpp:1532  declare: 0 device band(s) and 265 host band(s) resolved to nothing; run with --debug-graph for the full list
+I plan     51576 weight(s): 50603 quantised by the recipe, 973 kept as the checkpoint holds them
+D rad_convert.cpp:659    kva.proj.24.weight      bf16    50.00 MiB  as is
+D rad_convert.cpp:659    kva.st.24               f32      3.00 MiB  as is
+D rad_convert.cpp:659    kva.rowsel.score        f32    970.00 KiB  as is
+I --plan-only: about 114.74 GiB would be written; nothing was written to /models/qwen3.8-next-flash-fp8-iq4r-moe.rad.
+```
+51,576 = 51,489 (container entries, `rad-info.txt`) + 87. "About 114.74 GiB" counts every planned weight; the
+real append writes 1.28 GiB of new weights + ~19 MB of new tables. The 265 unresolved host bands are the
+device-only ops on a GPU-less run (no dead op, else exit 1); the container's original convert had the same view.
+The `/models` mount was read-only, so this run could not have written.
 
-**What `--plan-only -v` must show:**
-- the KVA `qwen4exp_fp8.so` from `/kva/home` shadowing the installed one, `kva.so` loaded, no refusal;
-- `source /stub (T tensors)`, `arch qwen4exp`;
-- `plan N weight(s): …` with **N = (weights in `rad-info -v <rad>`) + 87**;
-- per-weight debug lines for the new ones, all "as is": `kva.proj.L.weight bf16 50.0 MiB`,
-  `kva.proj.L.bias bf16 5.0 KiB`, `kva.st.L` and `kva.stswap.L f32 3.0 MiB`, `kva.rowsel.score{,_none,_all}
-  f32 970 KiB`;
-- `--plan-only: about ~115 GiB would be written` — this sums EVERY planned weight, reused ones included; the
-  real append writes 1.28 GiB.
-`--plan-only` cannot show new vs reused vs dropped itself, so the gate is a diff of the plan's name+encoding
-list against `rad-info -v`: new = exactly the 87 `kva.*`, dropped = 0, changed encoding = 0. After the real
-append the last line must read `--in-place: <container count> weight(s) … kept where they were …; 87 added
-past its end`, and `<rad>.pre-append` must exist.
+**`-e RADIANCE_KVA_DECLARE=all` is on every rad-convert command here** (ARCH lane, notes/arch.md §4): under it
+the plugin (committed `arch/qwen4exp_kva.cpp` `decl_every_copy`) declares, all optional, `kva.proj.L.{weight,bias}`
+and `kva.projr.L.{weight,bias}` for every layer, `kva.st.L` / `kva.stswap.L` / `kva.str.L` for every delta-net
+layer, and `kva.rowsel.score`, `score_none`, `score_all`. The shipped shard's 87 tensors are a subset (so
+`score_all` stays); absent optional names (projr, str, layers < 24) are skipped by the planner. The gate below
+proves the match: every one of the 87 was planned (`expected_missing 0`), nothing else new.
+
+### 7.5 Name + encoding diff gate — **PASS** (`tools/plan_diff.py`; `plan-diff.txt`, `plan-diff.json`)
+```
+$ tools/plan_diff.py --plan evidence/stage2/plan-only.log --container evidence/stage2/rad-info-v.txt \
+      --expect-new data/sidecar/kva-sidecar.safetensors --out evidence/stage2/plan-diff.json
+new                  87  kva.proj.24.bias, kva.proj.24.weight, kva.proj.25.bias, ...
+dropped               0
+changed               0
+unexpected_new        0
+expected_missing      0
+planned 51576, held 51489: PASS
+```
+"changed" compares encoding AND quantiser + options for all 51,489 held weights (e.g. an expert:
+`affine:codes=u4[1x1],scale=fp8_e4m3[1x64],scale.1=f32[*x*],table=f32{1x16}/fwht128` + `gptq
+block2=*x*,calib=calib/w4nl-calib,cd=3,…` on both sides; the protected `blk.47.ffn_down_exps.445.weight`
+`bf16` + `cast dtype=bf16` on both). Sizes are not compared (rad-info prints stored bytes incl. plane padding,
+the plan prints raw plane bytes: 825.31 vs 825.07 KiB for one expert). Shape/group mismatches the plan cannot
+show are refused loudly by the writer (`rad_convert.cpp:762-779`), not dropped silently.
+
+### 7.6 The REAL append — orchestrator only, after the Stage 0 baselines, on the pristine container
+Preconditions: (1) `docker ps` shows NO engine container and `pgrep -af 'radiance|rad-'` shows nothing — the
+writer's "open in another process" refusal (`radfile.cpp:673-680`) scans /proc inside rad-convert's own
+container and **cannot see an engine running in another container**; (2) `sha256sum` of the container =
+`0af5e962…4d20` (or trust stage0's check if the file has not been opened rw since); (3) model SSD free space
+≥ 2 GB (33 GB free at 17:38); (4) the same `home/` and `data/sidecar` shard as the gate (rerun §7.4 + §7.5 if
+either changed since — `data/sidecar/kva-sidecar.safetensors` sha256 `05c4e088…`).
+```
+cd ~/projects/inference/radiance-kva
+docker run --rm -e RADIANCE_KVA_DECLARE=all -e CALIB=calib/w4nl-calib \
+  -v "$(readlink -f ~/models/rad)":/models -v ~/projects/inference/radiance-kva:/kva:ro \
+  radiance-build /stage/opt/radiance/bin/rad-convert /kva/data/stub \
+    --reuse /models/qwen3.8-next-flash-fp8-iq4r-moe.rad --in-place \
+    --recipe /models/qwen4exp-w4nl64-i8-hc8m.recipe \
+    --home /kva/home:/stage/opt/radiance/share/radiance \
+    $(sed 's/^/--set /' data/sidecar/rad-convert-set.txt | tr '\n' ' ') --set kva.mode=quality --set kva.tail=2048 \
+    -v > evidence/stage2/append.log 2>&1; echo "exit $?"
+```
+(Identical to §7.4 minus `--plan-only` and with `/models` writable.) Expect the last lines:
+`wrote /models/…rad: 51576 weight(s), …` and `--in-place: 51489 weight(s), …, kept where they were in …; 87
+added past its end`, then `/models/…rad.pre-append` (256 B) beside the container.
+
+After it (evidence/stage2/, `-after` suffix):
+1. `rad-info -v` → `rad-info-v-after.txt`; `tools/plan_diff.py --plan evidence/stage2/plan-only.log
+   --container evidence/stage2/rad-info-v-after.txt` (no `--expect-new`) must PASS: the container holds exactly
+   the plan (51,576, none new, none dropped, none changed).
+2. `rad-info --meta` → `rad-info-meta-after.txt`; `diff` with `rad-info-meta.txt` must show only the 13 added
+   `kva.*` keys (11 from the set file + `kva.mode`, `kva.tail`); then `tools/kva_sidecar.py verify
+   evidence/stage2/rad-info-meta-after.txt <the build's source flags>` must PASS (R13).
+3. `rad-info --recipe` → must equal `rad-info-recipe.txt` (diff empty). The header's "created by" gains
+   "; extended in place by rad-convert … from data/stub" (expected).
+4. R12: `rad-info -v` lists `kva.proj.24.weight … kva.st.46`; R7 again with `RADIANCE_KVA=off`.
+Note `kva.mode=quality` becomes the container's default: until the plugin implements quality mode, every serve
+with the KVA home must set `RADIANCE_KVA=off|speed|plumb` explicitly (the plugin refuses unimplemented modes at
+declare — loud, not silent). A later append can re-set it (see the next note).
+
+**Every later append (Stage 6 refit) must re-pass ALL kva `--set` keys** — the shipped set file, the refit set
+file, `kva.mode`, `kva.tail` — because only `radiance.*` keys carry over from the old header
+(`rad_convert.cpp:403-416`) and the new meta is the stub's config + this run's `--set`s. Rebuild the stub with
+both `--extra` shards, `-e RADIANCE_KVA_DECLARE=all`, and gate with `--expect-new` = the refit shard.
+
+### 7.7 Restoring the pristine container from `.pre-append`
+What it holds (`core/format/radfile.cpp:1318-1338`): the old `RadFileHeader` byte for byte (248 B,
+`abi/rad_format.h:38-60`) followed by the old file length as a native int64 (x86: little-endian) — 256 B
+total. Why that is enough: an original container's tables sit in front of the blob (strings at 248 … vocab
+ending ≈ 19.3 MB, data from 20,971,520 — `rad-info.txt`); the append writes every new byte at or past the old
+end rounded up to 2 MiB (`append_base_`, `radfile.cpp:684`) and leaves the old tables and blob untouched, so
+the old header + truncation to the old length gives the old file back byte for byte (the comment at
+`radfile.cpp:1318-1319` states it). The writer also undoes itself on any error it catches (`abort()`,
+`radfile.cpp:577-590`: old header back, truncate). No radiance tool does the restore; by hand:
+```
+RAD=$(readlink -f ~/models/rad)/qwen3.8-next-flash-fp8-iq4r-moe.rad; BAK=$RAD.pre-append
+docker ps; pgrep -af 'radiance|rad-'                       # nothing may have the file open
+H=$(( $(stat -c %s "$BAK") - 8 )); test "$H" -eq 248       # the header size of this format version
+OLD=$(od -An -t d8 -j "$H" -N 8 "$BAK" | tr -d ' '); test "$OLD" -eq 121969901568
+cmp -n 8 "$BAK" "$RAD"                                     # same magic + version as the live header
+dd if="$BAK" of="$RAD" bs="$H" count=1 conv=notrunc,fsync  # the old header back
+truncate -s "$OLD" "$RAD"                                  # the appended tail off
+sha256sum "$RAD"                                           # MUST print 0af5e96244e8…ceaa4d20
+rm "$BAK"                                                  # only after the hash matches
+```
+If rad-convert was killed hard BEFORE `.pre-append` existed, the old header is still in place (it is written
+last); the file is just longer: `truncate -s 121969901568 "$RAD"` and check the sha256. The sha256 takes ~4 min.
 
 ## 8. Decisions and their cost
 
