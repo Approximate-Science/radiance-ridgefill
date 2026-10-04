@@ -1,0 +1,137 @@
+#!/bin/sh
+# preflight.sh -- fail closed before any GPU measurement: a number taken on a busy or
+# unhealthy machine is not a measurement. scripts/speed.sh runs it before every sample,
+# scripts/serve.sh and scripts/grade.sh before each container.
+#
+# Exits non-zero with a named reason if:
+#   (a) any process other than this repo's own tooling and the engines inside the
+#       radiance-kva-* containers matches radiance|llama|vllm|r9v (pgrep -af; the check's
+#       own process tree is excluded -- the script, its launcher, every ancestor: a
+#       squatter is by definition not in it -- and the report is filtered with awk,
+#       not grep, so no grep process ever matches);
+#   (b) no radiance-kva container runs and any discrete GPU (mem_info_vram_total > 8 GiB)
+#       holds more than RK_PREFLIGHT_VRAM_MIB MiB of VRAM;
+#   (c) journalctl -k --since "$RK_PREFLIGHT_SINCE" has lines matching
+#       amdgpu.*(MES|SMU|ring.*timeout|GPU reset) -- a MES or SMU error invalidates every
+#       result after it (HANDOVER §3).
+#
+# Prints one provenance line first (UTC time, then per card: PCI id, VRAM used,
+# temperature, current sclk), and "preflight: OK" on success; the failure reason goes to
+# stderr. The caller keeps the stdout lines in the evidence file.
+#
+# Env vars:
+#   RK_PREFLIGHT_SINCE     default -30min: the journalctl kernel-log window
+#   RK_PREFLIGHT_VRAM_MIB  default 1024: the per-card VRAM ceiling for check (b)
+
+set -u
+
+. "$(dirname "$0")/common.sh"
+: "${RK_PREFLIGHT_SINCE:=-30min}"
+: "${RK_PREFLIGHT_VRAM_MIB:=1024}"
+
+fail() {
+    printf 'preflight: FAIL: %s\n' "$*" >&2
+    exit 1
+}
+
+tmp_klog=$(mktemp) || fail "mktemp failed"
+tmp_squat=$(mktemp) || fail "mktemp failed"
+trap 'rm -f "$tmp_klog" "$tmp_squat"' EXIT INT TERM
+
+# ---- the provenance line: UTC time, per card PCI id + VRAM used + temperature + sclk.
+# The card's clock is part of the measurement (scripts/fnpf.sh's rule): prefill drifts
+# down as the part heats, so a thermostat reads as a regression unless the temperature
+# and sclk are recorded beside the number.
+provenance=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+n_cards=0
+for dev in /sys/class/drm/card*/device; do
+    [ -r "$dev/mem_info_vram_total" ] || continue
+    total=$(cat "$dev/mem_info_vram_total") || fail "cannot read $dev/mem_info_vram_total"
+    [ "$total" -gt 8589934592 ] || continue             # discrete only: > 8 GiB
+    n_cards=$((n_cards + 1))
+    pci=$(basename "$(readlink -f "$dev")")
+    used_mib=$(awk -v b="$(cat "$dev/mem_info_vram_used")" 'BEGIN { printf "%.0f", b / 1048576 }')
+    temp=''
+    for h in "$dev"/hwmon/hwmon*/temp1_input; do
+        [ -r "$h" ] || continue
+        temp=$(awk -v m="$(cat "$h")" 'BEGIN { printf "%.1f", m / 1000 }')
+        break
+    done
+    sclk=''
+    if [ -r "$dev/pp_dpm_sclk" ]; then
+        # the line with '*' is the current clock; print its value (e.g. 2900M)
+        sclk=$(awk '/\*/ { for (i = 1; i <= NF; i++) if ($i ~ /M/) { print $i; exit } }' \
+            "$dev/pp_dpm_sclk")
+    fi
+    provenance="$provenance  $pci vram=${used_mib}MiB temp=${temp:-?}C sclk=${sclk:-?}"
+done
+printf '%s\n' "$provenance"
+[ "$n_cards" -gt 0 ] || fail "no discrete GPU (mem_info_vram_total > 8 GiB) under /sys/class/drm"
+
+# ---- (a) squatters: any radiance|llama|vllm|r9v process that is not ours.
+# Ours = this check's own process tree (the script, its launcher and every ancestor:
+# the operator's shell, an agent or CI wrapper that deliberately ran this check -- a
+# squatter is by definition NOT in it), this repo's own tooling (command lines
+# containing the repo path) and the processes inside the radiance-kva-* containers.
+# A process whose command line merely QUOTES the word (a wrapper embedding the pattern)
+# is not an engine either; no real radiance/llama/vllm/r9v carries a "|" in its name.
+ours=' '
+pid=$$
+while [ "$pid" != 1 ] && [ -r "/proc/$pid/status" ]; do
+    ppid=$(awk '/^PPid:/ { print $2 }' /proc/$pid/status 2>/dev/null)
+    [ -n "$ppid" ] || break
+    ours="$ours$ppid "
+    pid=$ppid
+done
+containers=$(docker ps --filter name=radiance-kva- --format '{{.Names}}' 2>/dev/null) \
+    || fail "docker ps failed: cannot tell which radiance-kva containers are ours"
+for c in $containers; do
+    ours="$ours$(docker top "$c" -eo pid 2>/dev/null | awk 'NR > 1 { printf "%s ", $1 }')"
+done
+if pgrep -af 'radiance|llama|vllm|r9v' > "$tmp_squat" 2>/dev/null; then
+    bad=$(awk -v me="$$" -v repo="$RK_REPO" -v ours="$ours" \
+        -v pattern='radiance|llama|vllm|r9v' '
+        {
+            pid = $1
+            rest = $0; sub(/^[0-9]+[ \t]*/, "", rest)
+            if (pid == me) next
+            if (repo != "" && index(rest, repo) != 0) next
+            if (index(ours, " " pid " ") != 0) next
+            # a process that merely QUOTES the check pattern (a wrapper like
+            # `bash -c "scripts/preflight.sh"` or an agent harness) is not an engine;
+            # no real radiance/llama/vllm/r9v process carries a "|" in its name
+            if (index(rest, pattern) != 0) next
+            print
+        }' "$tmp_squat")
+    if [ -n "$bad" ]; then
+        printf '%s\n' "$bad" >&2
+        fail "a process outside this repo matches radiance|llama|vllm|r9v (lines above)"
+    fi
+fi
+
+# ---- (b) leftover VRAM when no radiance-kva container runs.
+if [ -z "$containers" ]; then
+    limit_bytes=$((RK_PREFLIGHT_VRAM_MIB * 1048576))
+    for dev in /sys/class/drm/card*/device; do
+        [ -r "$dev/mem_info_vram_total" ] || continue
+        total=$(cat "$dev/mem_info_vram_total")
+        [ "$total" -gt 8589934592 ] || continue
+        used=$(cat "$dev/mem_info_vram_used")
+        if [ "$used" -gt "$limit_bytes" ]; then
+            pci=$(basename "$(readlink -f "$dev")")
+            used_mib=$(awk -v b="$used" 'BEGIN { printf "%.0f", b / 1048576 }')
+            fail "$pci holds ${used_mib} MiB of VRAM with no radiance-kva container running (ceiling ${RK_PREFLIGHT_VRAM_MIB} MiB)"
+        fi
+    done
+fi
+
+# ---- (c) the kernel log: a MES/SMU error invalidates everything measured after it.
+if ! journalctl -k --since "$RK_PREFLIGHT_SINCE" > "$tmp_klog" 2>/dev/null; then
+    fail "journalctl -k --since $RK_PREFLIGHT_SINCE is unreadable; the amdgpu health window cannot be checked"
+fi
+if grep -iE 'amdgpu.*(MES|SMU|ring.*timeout|GPU reset)' "$tmp_klog" >/dev/null 2>&1; then
+    grep -iE 'amdgpu.*(MES|SMU|ring.*timeout|GPU reset)' "$tmp_klog" | head -5 >&2
+    fail "the kernel log since $RK_PREFLIGHT_SINCE holds amdgpu MES/SMU/timeout/reset lines (above); a MES or SMU error invalidates every result after it"
+fi
+
+printf 'preflight: OK\n'
