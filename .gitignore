@@ -3,3 +3,4 @@ home/
 corpus/
 __pycache__/
 *.pyc
+data/
