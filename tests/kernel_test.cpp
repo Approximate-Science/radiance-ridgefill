@@ -265,6 +265,8 @@ static std::vector<RadParam> described_params(const char* op) {
         return { pint("M", 64), pint("cap", 16), pf64("share", 0.25), pint("seed", 7),
                  pstr("mode", "class") };
     if (!std::strcmp(op, "kva_rho_update")) return { pint("M", 48), pint("n_head", 4) };
+    if (!std::strcmp(op, "kva_state_read"))
+        return { pint("M", 3), pint("n_head", 2), pint("sd0", 8), pint("sd1", 8) };
     return { pint("M", 3), pstr("mode", "apply"), pf64("alpha", 1.0), pint("n_head", 2),
              pint("sd0", 8), pint("sd1", 8) };
 }
@@ -289,7 +291,8 @@ static bool described_operands(const RadKernelInfo* row, const std::vector<RadPa
     return true;
 }
 
-static const char* const kOps[] = { "kva_rowsel", "kva_rho_update", "kva_state_correct" };
+static const char* const kOps[] = { "kva_rowsel", "kva_rho_update", "kva_state_correct",
+                                    "kva_state_read" };
 
 /* Rows whose launch is still a stub (R8). Emptied as each row was implemented (all six were stubs
  * at the Stage 1 commit, 43bfeda); with none left the case skips and says R8 is retired. */
@@ -512,6 +515,16 @@ static int run_correct(const RadKernelInfo* row, CorrectRun& k, const char* mode
                        pint("n_head", k.heads), pint("sd0", k.sd0), pint("sd1", k.sd1) });
 }
 
+/* kva_state_read on k.state through `index`; `out` starts as a sentinel so an unwritten element
+ * shows. Returns the launch status. */
+static int run_state_read(const RadKernelInfo* row, CorrectRun& k, Buf& index, Buf& out) {
+    out = make(RAD_F32, { index.t.shape[0], k.heads, k.sd0, k.sd1 });
+    for (int64_t i = 0; i < rad_tensor_numel(&out.t); ++i) setf(out, i, 12345.0f);
+    return run_group(row, { &k.state, &index, &out },
+                     { pint("M", index.t.shape[0]), pint("n_head", k.heads), pint("sd0", k.sd0),
+                       pint("sd1", k.sd1) });
+}
+
 /* Element (slot, head, i, j) of the state, through its strides. */
 static int64_t st_at(const CorrectRun& k, int64_t s, int64_t h, int64_t i, int64_t j) {
     return s * k.state.t.stride[0] + h * k.state.t.stride[1] + i * k.state.t.stride[2] + j;
@@ -632,6 +645,34 @@ TEST(refuses_bad_operands, "both") {
              RAD_E_INVAL);                                  /* ND without its index */
     CHECK_EQ(run_group(sc, { &k.state, nullptr, &k.applied, &k.aidx, &k.c, nullptr, nullptr }, cp),
              RAD_E_INVAL);
+    const RadKernelInfo* sr = find_row("kva_state_read", group_domain());
+    REQUIRE(sr != nullptr);
+    const std::vector<RadParam> rp = { pint("M", 1), pint("n_head", 2), pint("sd0", 4), pint("sd1", 4) };
+    std::vector<RadParam> rp_heads = rp;
+    rp_heads[1] = pint("n_head", 3);
+    Buf small_out = make(RAD_F32, { 31 }), out = make(RAD_F32, { 1, 2, 4, 4 });
+    Buf out16 = make(RAD_BF16, { 1, 2, 4, 4 });
+    CHECK_EQ(run_group(sr, { &k.state, &k.sidx, &small_out }, rp), RAD_E_SHAPE);   /* 31 < 32 */
+    CHECK_EQ(run_group(sr, { &k.state, &k.sidx, &out16 }, rp), RAD_E_DTYPE);
+    CHECK_EQ(run_group(sr, { &k.state, nullptr, &out }, rp), RAD_E_INVAL);
+    CHECK_EQ(run_group(sr, { &k.state, &k.sidx, &out }, rp_heads), RAD_E_SHAPE);
+}
+
+/* A straight copy of each sequence's slot through the padded strides; a negative slot and one past
+ * the pool read zeros; two sequences may read one slot; the state is left alone. */
+TEST(state_read_semantics, "host") {
+    const RadKernelInfo* row = find_row("kva_state_read", RAD_DOMAIN_HOST);
+    REQUIRE(row != nullptr);
+    CorrectRun k = correct_operands(4, 2, 2, 3, { 0 }, 3);
+    for (int64_t s = 0; s < 4; ++s) for (int64_t h = 0; h < 2; ++h) for (int64_t e = 0; e < 6; ++e)
+        setf(k.state, st_at(k, s, h, e / 3, e % 3), (float)(100 * s + 10 * h + e) + 0.5f);
+    const CorrectRun before = k;
+    Buf index = slot_index({ 2, -1, 9, 2 }), out;
+    CHECK_EQ(run_state_read(row, k, index, out), RAD_OK);
+    for (int64_t s = 0; s < 4; ++s) for (int64_t h = 0; h < 2; ++h) for (int64_t e = 0; e < 6; ++e)
+        CHECK(getf(out, (s * 2 + h) * 6 + e) ==
+              (s == 1 || s == 2 ? 0.0f : (float)(200 + 10 * h + e) + 0.5f));
+    CHECK(k.state.bytes == before.state.bytes);
 }
 
 /* Each pool through its own index: state slot 3, applied slot 1, ND slot 5 -- pools of different
@@ -981,6 +1022,30 @@ TEST(state_correct_device_matches_host, "gpu") {
                          pass ? "own slots  " : "shared slots", st.mode, st.alpha, (int)st.nd,
                          h.state.bytes.size(), differ, differ ? ">0" : "0");
         }
+}
+
+/* kva_state_read, device vs host: model-sized heads at padded strides, a negative slot, a slot past
+ * the pool and a repeated slot; the outputs agree to the bit and the out-of-pool rows are zeros. */
+TEST(state_read_device_matches_host, "gpu") {
+    if (!group_runnable()) return;
+    const RadKernelInfo* dev = find_row("kva_state_read", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("kva_state_read", RAD_DOMAIN_HOST);
+    REQUIRE(dev && host);
+    Rng r{ 61 };
+    CorrectRun k = correct_operands(6, 24, 128, 128, { 0 }, 8);
+    for (size_t i = 0; i < k.state.bytes.size() / 4; ++i) setf(k.state, (int64_t)i, r.normal());
+    Buf index = slot_index({ 4, -1, 1, 7, 4 }), out_host, out_dev;
+    CHECK_EQ(run_state_read(host, k, index, out_host), RAD_OK);
+    CHECK_EQ(run_state_read(dev, k, index, out_dev), RAD_OK);
+    size_t differ = 0, nonzero_out_of_pool = 0;
+    const int64_t per_seq = 24 * 128 * 128;
+    for (size_t i = 0; i < out_host.bytes.size(); ++i) differ += out_host.bytes[i] != out_dev.bytes[i];
+    for (int64_t s : { 1, 3 }) for (int64_t e = 0; e < per_seq; ++e)
+        nonzero_out_of_pool += getf(out_dev, s * per_seq + e) != 0.0f;
+    CHECK_EQ(differ, 0);
+    CHECK_EQ(nonzero_out_of_pool, 0);
+    std::fprintf(stderr, "  %zu out bytes, %zu differ; out-of-pool rows all zero: %s\n",
+                 out_host.bytes.size(), differ, nonzero_out_of_pool ? "no" : "yes");
 }
 
 /* R33's device leg: the device row equals the host row on chunks with many ties, non-matching

@@ -170,6 +170,30 @@ extern "C" int kva_correct_parse(const RadArgs* a, KvaCorrect* g) {
     return RAD_OK;
 }
 
+extern "C" int kva_state_read_parse(const RadArgs* a, KvaStateRead* g) {
+    const RadTensor* st = rad_arg_in(a, SR_STATE);
+    const RadTensor* sidx = rad_arg_in(a, SR_STATE_IDX);
+    const RadTensor* out = rad_arg_in(a, SR_OUT);
+    long long heads = 0, sd0 = 0, sd1 = 0;
+    if (!st || !sidx || !out || !rad_args_geti(a, "n_head", &heads) ||
+        !rad_args_geti(a, "sd0", &sd0) || !rad_args_geti(a, "sd1", &sd1)) return RAD_E_INVAL;
+    if (st->dtype != RAD_F32 || out->dtype != RAD_F32) return RAD_E_DTYPE;
+    const int rc = index_rows(sidx, &g->n_seq, &g->idx_pitch);
+    if (rc != RAD_OK) return rc;
+    if (!dense(out)) return RAD_E_STRIDE;
+    /* `out` is written densely from its first element, so it only has to be big enough. */
+    if (st->rank != 4 || st->shape[1] != heads || st->shape[2] != sd0 || st->shape[3] != sd1 ||
+        rad_tensor_numel(out) < g->n_seq * heads * sd0 * sd1) return RAD_E_SHAPE;
+    g->state = (const float*)st->data;
+    g->st_slot = st->stride[0]; g->st_head = st->stride[1];
+    g->st_row = st->stride[2];  g->st_col = st->stride[3];
+    g->n_states = st->shape[0];
+    g->idx = (const int32_t*)sidx->data;
+    g->out = (float*)out->data;
+    g->n_head = heads; g->sd0 = sd0; g->sd1 = sd1;
+    return RAD_OK;
+}
+
 /* ================================================================== kva_rowsel */
 
 extern "C" int kva_rowsel_host(const RadArgs* a, RadStream) {
@@ -264,6 +288,27 @@ extern "C" int kva_correct_host(const RadArgs* a, RadStream) {
                 }
             *applied = g.apply ? scale : 0.0f;
         }
+    }
+    return RAD_OK;
+}
+
+/* ================================================================== kva_state_read */
+
+extern "C" int kva_state_read_host(const RadArgs* a, RadStream) {
+    KvaStateRead g{};
+    const int rc = kva_state_read_parse(a, &g);
+    if (rc != RAD_OK) return rc;
+    for (int64_t s = 0; s < g.n_seq; ++s) {
+        const int32_t slot = g.idx[s * g.idx_pitch];
+        const bool in_pool = slot >= 0 && slot < g.n_states;   /* outside: the sequence reads zeros */
+        for (int64_t h = 0; h < g.n_head; ++h)
+            for (int64_t i = 0; i < g.sd0; ++i)
+                for (int64_t j = 0; j < g.sd1; ++j) {
+                    float* o = g.out + ((s * g.n_head + h) * g.sd0 + i) * g.sd1 + j;
+                    *o = in_pool ? g.state[slot * g.st_slot + h * g.st_head + i * g.st_row +
+                                           j * g.st_col]
+                                 : 0.0f;
+                }
     }
     return RAD_OK;
 }

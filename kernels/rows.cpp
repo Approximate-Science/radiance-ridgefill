@@ -49,6 +49,9 @@ static const RadOperandSpec oCorrect[] = { INOUT("state"), OPD("state_idx"), INO
                                            OPD("applied_idx"), WGT("C"), OPD_O("ND"),
                                            OPD_O("nd_idx") };
 
+static const RadParamSpec pStateRead[] = { P_INT("M"), P_INT("n_head"), P_INT("sd0"), P_INT("sd1") };
+static const RadOperandSpec oStateRead[] = { OPD("state"), OPD("state_idx"), OUT("out") };
+
 static const RadOpSchema kSchemas[] = {
 { "kva_rowsel", ARR(pRowsel), ARR(oRowsel),
   "Which rows of ONE prefill chunk run exact (KVA quality mode). M = n rows (token_ids' extent). "
@@ -80,6 +83,12 @@ static const RadOpSchema kSchemas[] = {
   "the operand carries (linear slots may be padded); applied [n_states, n_head, ...] one f32 a "
   "head; C [n_head, sd0, sd1] f32; ND as kva_rho_update's, optional. `alpha` is read in apply "
   "mode and ignored in undo." },
+{ "kva_state_read", ARR(pStateRead), ARR(oStateRead),
+  "Copy each sequence's GDN state slot out (KVA correction refit captures). M = n_seq "
+  "(state_idx's rows; column 0 is the slot). out[s, h, i, j] = state[slot_s, h, i, j]; a slot "
+  "outside the pool reads zeros. state [n_states, n_head, sd0, sd1] f32 at the strides the "
+  "operand carries (linear slots may be padded); out f32, written densely from its first element "
+  "as [n_seq, n_head, sd0, sd1] (any contiguous operand at least that big)." },
 };
 
 /* ================================================================== operand descriptions
@@ -173,6 +182,17 @@ static int shape_correct(const RadParam* p, int n_p, int operand, RadOpdDesc* ou
     });
 }
 
+static int shape_state_read(const RadParam* p, int n_p, int operand, RadOpdDesc* out) {
+    const int64_t n_seq = param(p, n_p, "M"), heads = param(p, n_p, "n_head");
+    const int64_t sd0 = param(p, n_p, "sd0"), sd1 = param(p, n_p, "sd1");
+    const int64_t slots = n_seq + 2;
+    return pick(out, operand, {
+        opd(RAD_F32, { slots, heads, sd0, sd1 }),
+        opd_idx({ n_seq, 1 }, slots),   /* a read: two sequences may name one slot */
+        opd(RAD_F32, { n_seq, heads, sd0, sd1 }),
+    });
+}
+
 /* ================================================================== the row table */
 
 static const RadConstraint cRowselHost[] = { RAD_CIN("mode", "class random all") };
@@ -197,6 +217,9 @@ ROW_NC("kva_rho_update_host", "kva_rho_update", "per-head decayed approximated s
 ROW("kva_state_correct_host", "kva_state_correct", "GDN state apply / undo, the oracle",
     "any slot strides", "f32 state / applied / C / ND, i32 slots", RAD_DOMAIN_HOST, cCorrect,
     kva_correct_host, shape_correct),
+ROW_NC("kva_state_read_host", "kva_state_read", "GDN state slot copy-out, the oracle",
+       "any slot strides", "f32 state / out, i32 slots", RAD_DOMAIN_HOST, kva_state_read_host,
+       shape_state_read),
 #ifdef KVA_HAVE_HIP
 ROW("kva_rowsel_device", "kva_rowsel", "chunk row selection in one workgroup, keys in LDS",
     "n up to the LDS key budget (KVA_ROWSEL_MAX_ROWS), any cap", "i32 ids / rows / mask, f32 score",
@@ -207,6 +230,9 @@ ROW_NC("kva_rho_update_device", "kva_rho_update", "one thread a head, sequential
 ROW("kva_state_correct_device", "kva_state_correct", "one workgroup per (sequence, head)",
     "any slot strides", "f32 state / applied / C / ND, i32 slots", RAD_DOMAIN_DEVICE, cCorrect,
     kva_correct_device, shape_correct),
+ROW_NC("kva_state_read_device", "kva_state_read", "one workgroup per (head, sequence), a copy",
+       "any slot strides", "f32 state / out, i32 slots", RAD_DOMAIN_DEVICE, kva_state_read_device,
+       shape_state_read),
 #endif
 };
 
@@ -221,7 +247,8 @@ static const RadPluginInfo kInfo = {
     "kva",
     "0.1.0",
     "KVA / RidgeFill prefill ops: kva_rowsel (exact rows of a chunk), kva_rho_update (decayed "
-    "approximated share per GDN head), kva_state_correct (GDN terminal-state correction). A host "
+    "approximated share per GDN head), kva_state_correct (GDN terminal-state correction), "
+    "kva_state_read (GDN state slot copy-out for the correction refit). A host "
     "row (the oracle) and, in a HIP build, a device row each.",
     KVA_BUILD_TARGET
 };

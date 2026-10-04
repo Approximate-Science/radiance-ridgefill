@@ -1,4 +1,4 @@
-# KERNELS lane notes — `kva.so` (kva_rowsel, kva_rho_update, kva_state_correct)
+# KERNELS lane notes — `kva.so` (kva_rowsel, kva_rho_update, kva_state_correct, kva_state_read)
 
 Owner: KERNELS lane. Files: `kernels/` (CMakeLists.txt, kva.h, rows.cpp, host_ref.cpp, rowsel.hip,
 rho.hip, state_correct.hip), `tests/kernel_test.cpp`, `tests/rho_ref.py`, `tests/fixtures/rho_numpy.txt`,
@@ -14,6 +14,7 @@ do not matter to the engine, but every listed param is REQUIRED (except where no
 | `kva_rowsel` | `M` (RAD_RANGE, rows of the chunk) · `cap` (int, CAPACITY role) · `share` (f64, 0..1) · `seed` (int) · `mode` (str: `class`/`random`/`all`) | 0 `token_ids` i32 [n] (`praw(batch->token_ids, RAD_I32, n)`, n = n_tok) · 1 `positions` i32 [n] (`praw(batch->positions, RAD_I32, n)`; a component-major [c, n] operand is also accepted, row 0 read at its strides) · 2 `score` **weight** f32 [vocab] (`kva.rowsel.score`) · 3 `rows_idx` out i32 [cap] · 4 `mask` out i32 [n] |
 | `kva_rho_update` | `M` (RAD_RANGE, rows) · `n_head` (int, this rank's GDN value heads) | 0 `a` bf16 or f32 [n, n_head], read at its own row AND column strides (the in-tree layout puts the a columns first: `bcol(w.ab, 0, H, n)`, radiance `arch/common/rad_block_gdn_fp8.h:481`) · 1 `mask` i32 [n] (kva_rowsel's mask) · 2 `A_log` **weight** f32 [n_head] · 3 `dt_bias` **weight** f32 [n_head] · 4 `ND` inout f32, the LINEAR group `kv_kva_rho` layer cache `[n_states, n_head, 1, 2]` (or any trailing dims whose product is 2) · 5 `state_idx` i32 [1, pitch] (`praw2(st_idx, RAD_I32, 1, st_w)`; exactly ONE sequence) |
 | `kva_state_correct` | `M` (RAD_RANGE, n_seq) · `mode` (str: `undo`/`apply`) · `alpha` (f64; read in apply, ignored in undo, still required) · `n_head` · `sd0` · `sd1` (ints: GDN state per head is sd0×sd1) | 0 `state` inout f32 `RAD_KV(kv_gdn_state, L)` [n_states, n_head, sd0, sd1] (strides read off the operand) · 1 `state_idx` i32 [n_seq, pitch] — **kv_gdn_state's** `state_index` (column 0 used) · 2 `applied` inout f32 `RAD_KV(kv_kva_applied, L)` [n_states, n_head, 1, 1] · 3 `applied_idx` i32 [n_seq, pitch] — **kv_kva_applied's** `state_index` · 4 `C` **weight** f32 [n_head, sd0, sd1] (`kva.st.L`) · 5 `ND`? f32 `RAD_KV(kv_kva_rho, L)` · 6 `nd_idx`? i32 [n_seq, pitch] — **kv_kva_rho's** `state_index`. ND and nd_idx are present or absent TOGETHER (speed mode: `RAD_NONE, RAD_NONE` → rho = 1; one without the other is RAD_E_INVAL). All three index arrays must name the same n_seq rows (else RAD_E_SHAPE). |
+| `kva_state_read` | `M` (RAD_RANGE, n_seq) · `n_head` · `sd0` · `sd1` | 0 `state` in f32 `RAD_KV(kv_gdn_state, L)` [n_states, n_head, sd0, sd1] (strides read off the operand; padded slots fine) · 1 `state_idx` i32 [n_seq, pitch] (column 0; a slot outside the pool, or negative, reads ZEROS) · 2 `out` out f32, written densely as [n_seq, n_head, sd0, sd1] from its first element (any contiguous operand at least that big; smaller is RAD_E_SHAPE) |
 
 Semantics (also in each schema's doc string, `rad-schemas kva.so`):
 
@@ -37,6 +38,9 @@ Semantics (also in each schema's doc string, `rad-schemas kva.so`):
   `undo`: `state -= applied·C; applied = 0`. `apply`: `s = alpha × (ND ? kva_rho(N, D) : 1)` with
   `kva_rho = D > 0 ? clamp(N/D, 0, 1) : 1`; `state += s·C; applied = s`. **When the scale is 0 nothing is
   added** (so `alpha = 0` leaves every state bit alone, incl. the sign of a −0.0 — R22).
+
+- `kva_state_read`: a straight copy, `out[s, h, i, j] = state[slot_s, h, i, j]`; for the Stage 6 correction refit
+  (no ABI call returns a KV-pool pointer). Two sequences may name one slot (it is a read).
 
 Issue order the plan wants per late GDN layer L (HANDOVER Stage 4.2 / 5.3): `kva_state_correct(undo)`
 before the layer's `gdn_conv_prep`; after `gdn_chunk_scan`: `kva_rho_update` (quality mode only), then
@@ -304,3 +308,16 @@ applied and ND bytes. **Device group NOT run** (GPU lock held for engine runs). 
 (index = position of the card's BDFID among rocminfo's GPU agents; 0000:13:00.0 = BDFID 4864 was index 1 today.)
 Bug caught on the way: an edit dropped kva_rho_parse's `state_idx` assignment; `described_operands_launch`
 segfaulted on it before anything was committed.
+
+### kva_state_read (orchestrator request for Stage 6, 2026-10-04)
+Schema exactly as requested (params M, n_head, sd0, sd1; operands state, state_idx, out). Host row + device row
+(state_correct.hip, one workgroup per (head, sequence), kernarg 104 B, no LDS, no dynamic stack). Never a stub:
+implemented directly; the generic cases (descriptions_cover_schemas, stub_refuses, described_operands_launch) now
+iterate it too. Host group 566 checks, all ok: `state_read_semantics` (padded strides, slots 2 / −1 / 9-past-a-
+4-slot-pool / 2 again → exact copies and zero rows, state untouched) and refusals (out too small → SHAPE, bf16 out
+→ DTYPE, missing index → INVAL, n_head mismatch → SHAPE). Mutants M9 (row padding ignored) and M10 (no pool bound
+→ reads past the pool) → FAIL state_read_semantics. `state_read_device_matches_host` (24 heads × 128×128, padded
+strides, slots 4 / −1 / 1 / 7-past-pool / 4) compares the whole output bitwise and checks the out-of-pool rows are
+zero — **not run: the GATES worker holds the GPU lock**. HIP build compiles, `ctest -LE gpu` passes. Device command
+as in the previous entry (`ctest --test-dir build-kernels-hip -L gpu --output-on-failure` in radiance-build with
+all of /dev/dri and ROCR_VISIBLE_DEVICES set to the card's GPU-agent index).

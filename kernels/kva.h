@@ -38,6 +38,7 @@ enum { KVA_MODE_CLASS = 0, KVA_MODE_RANDOM = 1, KVA_MODE_ALL = 2 };
 enum { RS_TOKENS = 0, RS_POS, RS_SCORE, RS_ROWS, RS_MASK };
 enum { RH_A = 0, RH_MASK, RH_ALOG, RH_DTBIAS, RH_ND, RH_SIDX };
 enum { SC_STATE = 0, SC_STATE_IDX, SC_APPLIED, SC_APPLIED_IDX, SC_C, SC_ND, SC_ND_IDX };
+enum { SR_STATE = 0, SR_STATE_IDX, SR_OUT };
 
 /* ---------------------------------------------------------------- the shared definitions */
 
@@ -136,6 +137,15 @@ KVA_HD inline bool kva_correct_slots(const KvaCorrect* g, int64_t s, int64_t* st
            (!g->nd || (*nd >= 0 && *nd < g->nd_states));
 }
 
+/* kva_state_read: each sequence's GDN state slot copied out densely (the Stage 6 correction refit
+ * captures states this way; no ABI call returns a KV-pool pointer). */
+typedef struct KvaStateRead {
+    const float*   state;   int64_t st_slot, st_head, st_row, st_col, n_states;
+    const int32_t* idx;     int64_t idx_pitch;
+    float*         out;                      /* dense [n_seq, n_head, sd0, sd1] */
+    int64_t        n_seq, n_head, sd0, sd1;
+} KvaStateRead;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -144,16 +154,19 @@ extern "C" {
 int kva_rowsel_parse(const RadArgs* a, KvaRowsel* out);
 int kva_rho_parse(const RadArgs* a, KvaRho* out);
 int kva_correct_parse(const RadArgs* a, KvaCorrect* out);
+int kva_state_read_parse(const RadArgs* a, KvaStateRead* out);
 
 /* host_ref.cpp: the host rows (oracles). */
 int kva_rowsel_host(const RadArgs* a, RadStream s);
 int kva_rho_host(const RadArgs* a, RadStream s);
 int kva_correct_host(const RadArgs* a, RadStream s);
+int kva_state_read_host(const RadArgs* a, RadStream s);
 
 /* rowsel.hip, rho.hip, state_correct.hip: the device rows. */
 int kva_rowsel_device(const RadArgs* a, RadStream s);
 int kva_rho_device(const RadArgs* a, RadStream s);
 int kva_correct_device(const RadArgs* a, RadStream s);
+int kva_state_read_device(const RadArgs* a, RadStream s);
 
 #ifdef __cplusplus
 }

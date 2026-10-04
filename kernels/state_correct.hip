@@ -1,5 +1,7 @@
-/* state_correct.hip -- kva_state_correct's device row: one workgroup per (head, sequence). Each
- * pool (state, applied, ND) is addressed through its own slot index (kva_correct_slots).
+/* state_correct.hip -- the device rows that touch a GDN state slot: kva_state_correct (apply /
+ * undo the correction) and kva_state_read (copy the slot out), one workgroup per (head, sequence)
+ * each. kva_state_correct addresses each pool (state, applied, ND) through its own slot index
+ * (kva_correct_slots).
  *
  * Each workgroup adds (apply) or subtracts (undo) scale * C over one head's sd0 x sd1 state, at
  * the strides the operands carry: a linear slot may be padded, so nothing here assumes a dense
@@ -45,5 +47,31 @@ extern "C" int kva_correct_device(const RadArgs* a, RadStream s) {
     if (g.sd0 * g.sd1 > INT_MAX || g.n_head > INT_MAX || g.n_seq > 65535) return RAD_E_SHAPE;
     const dim3 grid((unsigned)g.n_head, (unsigned)g.n_seq);
     kva_correct_kernel<<<grid, KVA_CORRECT_THREADS, 0, (hipStream_t)s>>>(g);
+    return hipGetLastError() == hipSuccess ? RAD_OK : RAD_E_DEVICE;
+}
+
+/* kva_state_read: a straight copy of one head of one sequence's slot into the dense output, zeros
+ * for a slot outside the pool. */
+__global__ void __launch_bounds__(KVA_CORRECT_THREADS) kva_state_read_kernel(KvaStateRead g) {
+    const int64_t h = blockIdx.x, s = blockIdx.y;
+    const int32_t slot = g.idx[s * g.idx_pitch];
+    const bool in_pool = slot >= 0 && slot < g.n_states;
+    const float* state = in_pool ? g.state + slot * g.st_slot + h * g.st_head : g.state;
+    float* out = g.out + (s * g.n_head + h) * g.sd0 * g.sd1;
+    const int cols = (int)g.sd1, cells = (int)(g.sd0 * g.sd1);
+    for (int e = threadIdx.x; e < cells; e += KVA_CORRECT_THREADS) {
+        const int i = e / cols, j = e - i * cols;
+        out[e] = in_pool ? state[i * g.st_row + j * g.st_col] : 0.0f;
+    }
+}
+
+extern "C" int kva_state_read_device(const RadArgs* a, RadStream s) {
+    KvaStateRead g{};
+    const int rc = kva_state_read_parse(a, &g);
+    if (rc != RAD_OK) return rc;
+    if (g.n_seq == 0 || g.n_head == 0) return RAD_OK;
+    if (g.sd0 * g.sd1 > INT_MAX || g.n_head > INT_MAX || g.n_seq > 65535) return RAD_E_SHAPE;
+    const dim3 grid((unsigned)g.n_head, (unsigned)g.n_seq);
+    kva_state_read_kernel<<<grid, KVA_CORRECT_THREADS, 0, (hipStream_t)s>>>(g);
     return hipGetLastError() == hipSuccess ? RAD_OK : RAD_E_DEVICE;
 }
