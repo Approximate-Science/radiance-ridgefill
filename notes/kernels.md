@@ -13,7 +13,7 @@ do not matter to the engine, but every listed param is REQUIRED (except where no
 |---|---|---|
 | `kva_rowsel` | `M` (RAD_RANGE, rows of the chunk) · `cap` (int, CAPACITY role) · `share` (f64, 0..1) · `seed` (int) · `mode` (str: `class`/`random`/`all`) | 0 `token_ids` i32 [n] (`praw(batch->token_ids, RAD_I32, n)`, n = n_tok) · 1 `positions` i32 [n] (`praw(batch->positions, RAD_I32, n)`; a component-major [c, n] operand is also accepted, row 0 read at its strides) · 2 `score` **weight** f32 [vocab] (`kva.rowsel.score`) · 3 `rows_idx` out i32 [cap] · 4 `mask` out i32 [n] |
 | `kva_rho_update` | `M` (RAD_RANGE, rows) · `n_head` (int, this rank's GDN value heads) | 0 `a` bf16 or f32 [n, n_head], read at its own row AND column strides (the in-tree layout puts the a columns first: `bcol(w.ab, 0, H, n)`, radiance `arch/common/rad_block_gdn_fp8.h:481`) · 1 `mask` i32 [n] (kva_rowsel's mask) · 2 `A_log` **weight** f32 [n_head] · 3 `dt_bias` **weight** f32 [n_head] · 4 `ND` inout f32, the LINEAR group `kv_kva_rho` layer cache `[n_states, n_head, 1, 2]` (or any trailing dims whose product is 2) · 5 `state_idx` i32 [1, pitch] (`praw2(st_idx, RAD_I32, 1, st_w)`; exactly ONE sequence) |
-| `kva_state_correct` | `M` (RAD_RANGE, n_seq) · `mode` (str: `undo`/`apply`) · `alpha` (f64; read in apply, ignored in undo, still required) · `n_head` · `sd0` · `sd1` (ints: GDN state per head is sd0×sd1) | 0 `state` inout f32 `RAD_KV(kv_gdn_state, L)` [n_states, n_head, sd0, sd1] (strides read off the operand) · 1 `applied` inout f32 `RAD_KV(kv_kva_applied, L)` [n_states, n_head, 1, 1] · 2 `state_idx` i32 [n_seq, pitch] (column 0 used) · 3 `C` **weight** f32 [n_head, sd0, sd1] (`kva.st.L`) · 4 `ND`? f32 (as above; absent in speed mode → rho = 1) |
+| `kva_state_correct` | `M` (RAD_RANGE, n_seq) · `mode` (str: `undo`/`apply`) · `alpha` (f64; read in apply, ignored in undo, still required) · `n_head` · `sd0` · `sd1` (ints: GDN state per head is sd0×sd1) | 0 `state` inout f32 `RAD_KV(kv_gdn_state, L)` [n_states, n_head, sd0, sd1] (strides read off the operand) · 1 `state_idx` i32 [n_seq, pitch] — **kv_gdn_state's** `state_index` (column 0 used) · 2 `applied` inout f32 `RAD_KV(kv_kva_applied, L)` [n_states, n_head, 1, 1] · 3 `applied_idx` i32 [n_seq, pitch] — **kv_kva_applied's** `state_index` · 4 `C` **weight** f32 [n_head, sd0, sd1] (`kva.st.L`) · 5 `ND`? f32 `RAD_KV(kv_kva_rho, L)` · 6 `nd_idx`? i32 [n_seq, pitch] — **kv_kva_rho's** `state_index`. ND and nd_idx are present or absent TOGETHER (speed mode: `RAD_NONE, RAD_NONE` → rho = 1; one without the other is RAD_E_INVAL). All three index arrays must name the same n_seq rows (else RAD_E_SHAPE). |
 
 Semantics (also in each schema's doc string, `rad-schemas kva.so`):
 
@@ -30,7 +30,10 @@ Semantics (also in each schema's doc string, `rad-schemas kva.so`):
 - `kva_rho_update`: per head, sequentially over the n rows: `g = -exp(A_log)·softplus(a + dt_bias)`
   (softplus threshold 20), `D = e^g·D + 1`, `N = e^g·N + mask[t]`, carried in the ND slot across chunks
   (zeroed at admission by the engine). The slot is `state_idx[0]`; a slot outside the pool writes nothing.
-- `kva_state_correct`: per (sequence, head), slot = `state_idx[s][0]` (outside the pool: skipped).
+- `kva_state_correct`: per (sequence, head), each pool is addressed through ITS OWN index: state slot =
+  `state_idx[s][0]`, applied slot = `applied_idx[s][0]`, ND slot = `nd_idx[s][0]` (the KV manager gives every
+  stateful group the same slot today, radiance `core/mem/kv.cpp:478-484, 676-691`, but that is not a contract).
+  A sequence with ANY slot outside its pool (or negative) is skipped. Pools may have different depths.
   `undo`: `state -= applied·C; applied = 0`. `apply`: `s = alpha × (ND ? kva_rho(N, D) : 1)` with
   `kva_rho = D > 0 ? clamp(N/D, 0, 1) : 1`; `state += s·C; applied = s`. **When the scale is 0 nothing is
   added** (so `alpha = 0` leaves every state bit alone, incl. the sign of a −0.0 — R22).
@@ -280,3 +283,24 @@ change**: the GPU lock was held by the orchestrator's reservation (`flock … sl
 there; I did not wait on it or break it. The device row's change is one line (the hash key read through
 `positions`, same as the host row); `rowsel_device_matches_host` now passes positions at 4096.. and every other
 case as [3, n], so the next gpu run checks it. Run: `ctest --test-dir build-kernels-hip -L gpu` on the card.
+
+### Per-group slot indices for kva_state_correct (orchestrator decision, 2026-10-04)
+Operands are now `state, state_idx, applied, applied_idx, C, ND?, nd_idx?` (each KV operand followed by its own
+group's index, as gdn_recurrent_update pairs `state` with `state_idx`). Host-only build: host group 499 checks, all
+cases ok, incl. new `state_correct_separate_slots` (state slot 3 / applied slot 1 / ND slot 5 in pools of depth
+6 / 4 / 7, a second sequence whose applied slot is outside its pool is skipped; exact hand-computed values; undo
+restores the state bytes) and new refusals (ND without nd_idx → RAD_E_INVAL; index row counts differ →
+RAD_E_SHAPE). Mutants M7 (applied through the state index) and M8 (ND through the state index) → FAIL
+state_correct_separate_slots. HIP build compiles, `ctest -LE gpu` passes; state_correct kernarg 240 B, no
+dynamic stack. `state_correct_device_matches_host` now runs every step twice — shared slots, then own slots
+(state 3 0 5 2, applied 1 3 0 + one outside its 4-slot pool, ND 5 6 2 0 in a 7-slot pool) — comparing state,
+applied and ND bytes. **Device group NOT run** (GPU lock held for engine runs). Command for the orchestrator:
+
+    cd ~/projects/inference/radiance-kva && docker run --rm --security-opt label=disable \
+      --device /dev/kfd --device /dev/dri --group-add video --group-add render --security-opt seccomp=unconfined \
+      -e ROCR_VISIBLE_DEVICES=<GPU-agent index of the card> -v $PWD:/kva -w /kva radiance-build \
+      ctest --test-dir build-kernels-hip -L gpu --output-on-failure
+
+(index = position of the card's BDFID among rocminfo's GPU agents; 0000:13:00.0 = BDFID 4864 was index 1 today.)
+Bug caught on the way: an edit dropped kva_rho_parse's `state_idx` assignment; `described_operands_launch`
+segfaulted on it before anything was committed.

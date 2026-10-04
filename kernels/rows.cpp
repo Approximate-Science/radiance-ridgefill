@@ -43,8 +43,11 @@ static const RadOperandSpec oRho[] = { OPD("a"), OPD("mask"), WGT("A_log"), WGT(
 
 static const RadParamSpec pCorrect[] = { P_INT("M"), P_STR("mode"), P_F64("alpha"),
                                          P_INT("n_head"), P_INT("sd0"), P_INT("sd1") };
-static const RadOperandSpec oCorrect[] = { INOUT("state"), INOUT("applied"), OPD("state_idx"),
-                                           WGT("C"), OPD_O("ND") };
+/* Each KV operand is followed by its own group's slot index, as gdn_recurrent_update pairs
+ * `state` with `state_idx`: the groups need not share a slot per sequence. */
+static const RadOperandSpec oCorrect[] = { INOUT("state"), OPD("state_idx"), INOUT("applied"),
+                                           OPD("applied_idx"), WGT("C"), OPD_O("ND"),
+                                           OPD_O("nd_idx") };
 
 static const RadOpSchema kSchemas[] = {
 { "kva_rowsel", ARR(pRowsel), ARR(oRowsel),
@@ -67,8 +70,10 @@ static const RadOpSchema kSchemas[] = {
   "sequence); a slot outside the pool writes nothing. rho = clamp(N/D, 0, 1) is read by "
   "kva_state_correct. a bf16 or f32; mask i32; A_log, dt_bias, ND f32." },
 { "kva_state_correct", ARR(pCorrect), ARR(oCorrect),
-  "Apply or undo the GDN terminal-state correction (KVA +st) on each sequence's slot. M = n_seq "
-  "(state_idx's rows; column 0 is the slot; a slot outside the pool is skipped). Per (sequence, "
+  "Apply or undo the GDN terminal-state correction (KVA +st) on each sequence's slots. M = n_seq "
+  "(state_idx's rows). Every KV operand has its own group's index after it -- state_idx, "
+  "applied_idx, nd_idx, each [n_seq] or [n_seq, pitch] with column 0 the slot -- and a sequence "
+  "with any slot outside its pool is skipped. ND and nd_idx are present or absent together. Per (sequence, "
   "head): undo: state -= applied * C; applied = 0. apply: s = alpha * (ND ? clamp(N/D, 0, 1) : 1) "
   "(1 also while D is 0); state += s * C; applied = s. Nothing is added when the scale is 0, so "
   "alpha 0 leaves the state's bits alone. state [n_states, n_head, sd0, sd1] f32 with the strides "
@@ -155,13 +160,16 @@ static int shape_correct(const RadParam* p, int n_p, int operand, RadOpdDesc* ou
     const int64_t sd0 = param(p, n_p, "sd0"), sd1 = param(p, n_p, "sd1");
     const int64_t slots = n_seq + 2;   /* slack, so the slot index is not the identity */
     const bool apply = std::strcmp(rad_param_gets(p, n_p, "mode", ""), "apply") == 0;
+    /* Distinct slots: two sequences on one slot would make the update a race. */
+    const RadOpdDesc index = opd_idx({ n_seq, 1 }, slots, RAD_OPD_F_IDX_UNIQUE);
     return pick(out, operand, {
         opd(RAD_F32, { slots, heads, sd0, sd1 }),
+        index,
         opd(RAD_F32, { slots, heads, 1, 1 }),
-        /* Distinct: two sequences on one slot would make the update a race. */
-        opd_idx({ n_seq, 1 }, slots, RAD_OPD_F_IDX_UNIQUE),
+        index,
         opd(RAD_F32, { heads, sd0, sd1 }),
         apply ? opd(RAD_F32, { slots, heads, 1, 2 }, RAD_FILL_SIGMOID) : opd_absent(),
+        apply ? index : opd_absent(),
     });
 }
 

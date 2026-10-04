@@ -1,4 +1,5 @@
-/* state_correct.hip -- kva_state_correct's device row: one workgroup per (head, sequence).
+/* state_correct.hip -- kva_state_correct's device row: one workgroup per (head, sequence). Each
+ * pool (state, applied, ND) is addressed through its own slot index (kva_correct_slots).
  *
  * Each workgroup adds (apply) or subtracts (undo) scale * C over one head's sd0 x sd1 state, at
  * the strides the operands carry: a linear slot may be padded, so nothing here assumes a dense
@@ -15,16 +16,16 @@ enum { KVA_CORRECT_THREADS = 256 };
 
 __global__ void __launch_bounds__(KVA_CORRECT_THREADS) kva_correct_kernel(KvaCorrect g) {
     const int64_t h = blockIdx.x, s = blockIdx.y;
-    const int32_t slot = g.state_idx[s * g.idx_pitch];
-    if (slot < 0 || slot >= g.n_states) return;   /* the same for the whole workgroup */
-    float* applied = g.applied + slot * g.ap_slot + h * g.ap_head;
+    int64_t st_slot = 0, ap_slot = 0, nd_slot = 0;
+    if (!kva_correct_slots(&g, s, &st_slot, &ap_slot, &nd_slot)) return;   /* whole workgroup */
+    float* applied = g.applied + ap_slot * g.ap_slot + h * g.ap_head;
     float scale = *applied;
     if (g.apply) {
-        const float* nd = g.nd ? g.nd + slot * g.nd_slot + h * g.nd_head : nullptr;
+        const float* nd = g.nd ? g.nd + nd_slot * g.nd_slot + h * g.nd_head : nullptr;
         scale = g.alpha * (nd ? kva_rho(nd[0], nd[g.nd_inner]) : 1.0f);
     }
     __syncthreads();   /* every thread has read `applied` before thread 0 rewrites it */
-    float* state = g.state + slot * g.st_slot + h * g.st_head;
+    float* state = g.state + st_slot * g.st_slot + h * g.st_head;
     const float* c = g.c + h * g.c_head;
     const int cols = (int)g.sd1, cells = (int)(g.sd0 * g.sd1);
     for (int e = threadIdx.x; e < cells && scale != 0.0f; e += KVA_CORRECT_THREADS) {

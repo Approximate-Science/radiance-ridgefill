@@ -478,28 +478,36 @@ static float nd_rho(const RhoRun& c, int64_t h) {
  * `head_pad`, slots by `slot_pad`, so a row that assumed a dense pool writes into the padding. */
 struct CorrectRun {
     int64_t slots, heads, sd0, sd1;
-    Buf state, applied, sidx, c, nd;
+    Buf state, sidx, applied, aidx, c, nd, nidx;   /* each pool with its own slot index */
 };
 
+/* One sequence's slot per row in column 0, and a speculation column the op must not read. */
+static Buf slot_index(const std::vector<int32_t>& seq_slots) {
+    Buf b = make(RAD_I32, { (int64_t)seq_slots.size(), 2 });
+    for (size_t s = 0; s < seq_slots.size(); ++s) {
+        seti(b, (int64_t)(2 * s), seq_slots[s]);
+        seti(b, (int64_t)(2 * s + 1), 999);
+    }
+    return b;
+}
+
+/* All three pools `slots` deep and indexed alike unless the caller replaces a pool or an index. */
 static CorrectRun correct_operands(int64_t slots, int64_t heads, int64_t sd0, int64_t sd1,
                                    const std::vector<int32_t>& seq_slots, int64_t pad) {
-    CorrectRun k{ slots, heads, sd0, sd1, {}, {}, {}, {}, {} };
+    CorrectRun k{ slots, heads, sd0, sd1, {}, {}, {}, {}, {}, {}, {} };
     const int64_t row = sd1 + pad, head = sd0 * row + pad, slot = heads * head + pad;
     k.state = make(RAD_F32, { slots, heads, sd0, sd1 }, { slot, head, row, 1 });
     k.applied = make(RAD_F32, { slots, heads, 1, 1 });
-    k.sidx = make(RAD_I32, { (int64_t)seq_slots.size(), 2 });
     k.c = make(RAD_F32, { heads, sd0, sd1 });
     k.nd = make(RAD_F32, { slots, heads, 1, 2 });
-    for (size_t s = 0; s < seq_slots.size(); ++s) {
-        seti(k.sidx, (int64_t)(2 * s), seq_slots[s]);
-        seti(k.sidx, (int64_t)(2 * s + 1), 999);   /* a speculation column the op must not read */
-    }
+    k.sidx = k.aidx = k.nidx = slot_index(seq_slots);
     return k;
 }
 
 static int run_correct(const RadKernelInfo* row, CorrectRun& k, const char* mode, double alpha,
                        bool with_nd) {
-    return run_group(row, { &k.state, &k.applied, &k.sidx, &k.c, with_nd ? &k.nd : nullptr },
+    return run_group(row, { &k.state, &k.sidx, &k.applied, &k.aidx, &k.c,
+                            with_nd ? &k.nd : nullptr, with_nd ? &k.nidx : nullptr },
                      { pint("M", k.sidx.t.shape[0]), pstr("mode", mode), pf64("alpha", alpha),
                        pint("n_head", k.heads), pint("sd0", k.sd0), pint("sd1", k.sd1) });
 }
@@ -611,9 +619,49 @@ TEST(refuses_bad_operands, "both") {
     CHECK_EQ(run_group(rh, {}, { pint("M", 8), pint("n_head", 4) }), RAD_E_INVAL);
     CorrectRun k = correct_operands(3, 2, 4, 4, { 0 }, 0);
     CHECK_EQ(run_correct(sc, k, "redo", 1.0, false), RAD_E_INVAL);
-    CHECK_EQ(run_group(sc, { &k.state, &k.applied, &k.sidx, &k.c, nullptr },
-                       { pint("M", 1), pstr("mode", "apply"), pf64("alpha", 1.0),
-                         pint("n_head", 3), pint("sd0", 4), pint("sd1", 4) }), RAD_E_SHAPE);
+    const std::vector<RadParam> cp = { pint("M", 1), pstr("mode", "apply"), pf64("alpha", 1.0),
+                                       pint("n_head", 2), pint("sd0", 4), pint("sd1", 4) };
+    std::vector<RadParam> bad_heads = cp;
+    bad_heads[3] = pint("n_head", 3);
+    Buf two_rows = slot_index({ 0, 1 });
+    CHECK_EQ(run_group(sc, { &k.state, &k.sidx, &k.applied, &k.aidx, &k.c, nullptr, nullptr },
+                       bad_heads), RAD_E_SHAPE);
+    CHECK_EQ(run_group(sc, { &k.state, &k.sidx, &k.applied, &two_rows, &k.c, nullptr, nullptr },
+                       cp), RAD_E_SHAPE);                   /* applied_idx names 2 sequences, state_idx 1 */
+    CHECK_EQ(run_group(sc, { &k.state, &k.sidx, &k.applied, &k.aidx, &k.c, &k.nd, nullptr }, cp),
+             RAD_E_INVAL);                                  /* ND without its index */
+    CHECK_EQ(run_group(sc, { &k.state, nullptr, &k.applied, &k.aidx, &k.c, nullptr, nullptr }, cp),
+             RAD_E_INVAL);
+}
+
+/* Each pool through its own index: state slot 3, applied slot 1, ND slot 5 -- pools of different
+ * depths -- and a second sequence whose applied slot is outside its pool, which is skipped. A row
+ * that addressed any pool through another pool's index changes a slot this case checks. */
+TEST(state_correct_separate_slots, "host") {
+    const RadKernelInfo* row = find_row("kva_state_correct", RAD_DOMAIN_HOST);
+    REQUIRE(row != nullptr);
+    CorrectRun k = correct_operands(6, 1, 2, 2, { 3, 4 }, 1);
+    k.applied = make(RAD_F32, { 4, 1, 1, 1 });
+    k.nd = make(RAD_F32, { 7, 1, 1, 2 });
+    k.aidx = slot_index({ 1, 4 });
+    k.nidx = slot_index({ 5, 0 });
+    for (int64_t s = 0; s < 6; ++s) for (int64_t e = 0; e < 4; ++e)
+        setf(k.state, st_at(k, s, 0, e / 2, e % 2), (float)(10 * s + e));
+    for (int64_t e = 0; e < 4; ++e) setf(k.c, e, (float)(0.5 + 0.25 * e));
+    for (int64_t s = 0; s < 4; ++s) setf(k.applied, s, 7.0f);
+    for (int64_t s = 0; s < 7; ++s) { setf(k.nd, 2 * s, 4.0f); setf(k.nd, 2 * s + 1, 4.0f); }   /* rho 1 */
+    setf(k.nd, 10, 1.0f);   /* ND slot 5: N 1, D 4 -> rho 0.25 */
+    const CorrectRun before = k;
+    CHECK_EQ(run_correct(row, k, "apply", 0.5, true), RAD_OK);   /* scale 0.5 x 0.25 */
+    for (int64_t s = 0; s < 6; ++s) for (int64_t e = 0; e < 4; ++e)
+        CHECK(getf(k.state, st_at(k, s, 0, e / 2, e % 2)) ==
+              (float)(10 * s + e + (s == 3 ? 0.125 * (0.5 + 0.25 * e) : 0.0)));
+    CHECK(getf(k.applied, 1) == 0.125f);
+    CHECK(getf(k.applied, 0) == 7.0f && getf(k.applied, 2) == 7.0f && getf(k.applied, 3) == 7.0f);
+    CHECK(k.nd.bytes == before.nd.bytes);
+    CHECK_EQ(run_correct(row, k, "undo", 1.0, false), RAD_OK);   /* through applied slot 1 */
+    CHECK(k.state.bytes == before.state.bytes);                  /* exact: short binary fractions */
+    CHECK(getf(k.applied, 1) == 0.0f && getf(k.applied, 3) == 7.0f);
 }
 
 TEST(state_correct_semantics, "host") {
@@ -906,17 +954,33 @@ TEST(state_correct_device_matches_host, "gpu") {
     struct Step { const char* mode; double alpha; bool nd; } steps[] = {
         { "undo", 1.0, false }, { "apply", 0.7, true }, { "undo", 1.0, false },
         { "apply", 1.0, false }, { "apply", 0.0, true } };
-    for (const Step& st : steps) {
-        CorrectRun on_dev = k;
-        CHECK_EQ(run_correct(host, k, st.mode, st.alpha, st.nd), RAD_OK);
-        CHECK_EQ(run_correct(dev, on_dev, st.mode, st.alpha, st.nd), RAD_OK);
-        size_t differ = 0;
-        for (size_t i = 0; i < k.state.bytes.size(); ++i) differ += k.state.bytes[i] != on_dev.state.bytes[i];
-        CHECK_EQ(differ, 0);
-        CHECK(k.applied.bytes == on_dev.applied.bytes);
-        std::fprintf(stderr, "  %-5s alpha %.1f ND %d: %zu state bytes, %zu differ (max abs diff %s)\n",
-                     st.mode, st.alpha, (int)st.nd, k.state.bytes.size(), differ, differ ? ">0" : "0");
+    /* Then the same buffers with every pool on its own index and depth: state slots 3 0 5 2,
+     * applied 1 3 0 and one outside its 4-slot pool, ND 5 6 2 0 in a 7-slot pool. */
+    CorrectRun sep = k;
+    sep.applied = make(RAD_F32, { 4, 24, 1, 1 });
+    sep.nd = make(RAD_F32, { 7, 24, 1, 2 });
+    for (int64_t i = 0; i < rad_tensor_numel(&sep.applied.t); ++i) setf(sep.applied, i, 0.5f + r.normal());
+    for (int64_t i = 0; i < rad_tensor_numel(&sep.nd.t); i += 2) {
+        setf(sep.nd, i + 1, (float)(1.0 + 50.0 * r.uniform()));
+        setf(sep.nd, i, (float)(getf(sep.nd, i + 1) * 1.2 * r.uniform()));
     }
+    sep.sidx = slot_index({ 3, 0, 5, 2 });
+    sep.aidx = slot_index({ 1, 3, 0, 4 });
+    sep.nidx = slot_index({ 5, 6, 2, 0 });
+    for (int pass = 0; pass < 2; ++pass)
+        for (const Step& st : steps) {
+            CorrectRun& h = pass ? sep : k;
+            CorrectRun on_dev = h;
+            CHECK_EQ(run_correct(host, h, st.mode, st.alpha, st.nd), RAD_OK);
+            CHECK_EQ(run_correct(dev, on_dev, st.mode, st.alpha, st.nd), RAD_OK);
+            size_t differ = 0;
+            for (size_t i = 0; i < h.state.bytes.size(); ++i) differ += h.state.bytes[i] != on_dev.state.bytes[i];
+            CHECK_EQ(differ, 0);
+            CHECK(h.applied.bytes == on_dev.applied.bytes && h.nd.bytes == on_dev.nd.bytes);
+            std::fprintf(stderr, "  %s %-5s alpha %.1f ND %d: %zu state bytes, %zu differ (max abs diff %s)\n",
+                         pass ? "own slots  " : "shared slots", st.mode, st.alpha, (int)st.nd,
+                         h.state.bytes.size(), differ, differ ? ">0" : "0");
+        }
 }
 
 /* R33's device leg: the device row equals the host row on chunks with many ties, non-matching

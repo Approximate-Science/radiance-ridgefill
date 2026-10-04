@@ -123,11 +123,13 @@ extern "C" int kva_rho_parse(const RadArgs* a, KvaRho* g) {
 
 extern "C" int kva_correct_parse(const RadArgs* a, KvaCorrect* g) {
     const RadTensor* st = rad_arg_in(a, SC_STATE);
+    const RadTensor* sidx = rad_arg_in(a, SC_STATE_IDX);
     const RadTensor* ap = rad_arg_in(a, SC_APPLIED);
-    const RadTensor* sidx = rad_arg_in(a, SC_SIDX);
+    const RadTensor* aidx = rad_arg_in(a, SC_APPLIED_IDX);
     const RadTensor* c = rad_arg_in(a, SC_C);
-    const RadTensor* nd = rad_arg_in(a, SC_ND);   /* optional */
-    if (!st || !ap || !sidx || !c) return RAD_E_INVAL;
+    const RadTensor* nd = rad_arg_in(a, SC_ND);        /* optional, with its index */
+    const RadTensor* nidx = rad_arg_in(a, SC_ND_IDX);
+    if (!st || !sidx || !ap || !aidx || !c || !nd != !nidx) return RAD_E_INVAL;
     if (st->dtype != RAD_F32 || ap->dtype != RAD_F32 || c->dtype != RAD_F32 ||
         (nd && nd->dtype != RAD_F32)) return RAD_E_DTYPE;
     static const char* const modes[] = { "undo", "apply" };
@@ -136,8 +138,12 @@ extern "C" int kva_correct_parse(const RadArgs* a, KvaCorrect* g) {
     const double alpha = rad_args_getf_or(a, "alpha", NAN);
     if (g->apply < 0 || !rad_args_geti(a, "n_head", &heads) || !rad_args_geti(a, "sd0", &sd0) ||
         !rad_args_geti(a, "sd1", &sd1) || (g->apply && !std::isfinite(alpha))) return RAD_E_INVAL;
-    const int rc = index_rows(sidx, &g->n_seq, &g->idx_pitch);
+    int64_t ap_rows = 0, nd_rows = 0;
+    int rc = index_rows(sidx, &g->n_seq, &g->st_pitch);
+    if (rc == RAD_OK) rc = index_rows(aidx, &ap_rows, &g->ap_pitch);
+    if (rc == RAD_OK && nidx) rc = index_rows(nidx, &nd_rows, &g->nd_pitch);
     if (rc != RAD_OK) return rc;
+    if (ap_rows != g->n_seq || (nidx && nd_rows != g->n_seq)) return RAD_E_SHAPE;
     if (st->rank != 4 || st->shape[1] != heads || st->shape[2] != sd0 || st->shape[3] != sd1 ||
         c->rank != 3 || c->shape[0] != heads || c->shape[1] != sd0 || c->shape[2] != sd1 ||
         ap->rank < 2 || ap->shape[1] != heads || per_head(ap) != 1 ||
@@ -147,16 +153,18 @@ extern "C" int kva_correct_parse(const RadArgs* a, KvaCorrect* g) {
     g->st_row = st->stride[2];  g->st_col = st->stride[3];
     g->applied = (float*)ap->data;
     g->ap_slot = ap->stride[0]; g->ap_head = ap->stride[1];
-    g->state_idx = (const int32_t*)sidx->data;
     g->c = (const float*)c->data;
     g->c_head = c->stride[0]; g->c_row = c->stride[1]; g->c_col = c->stride[2];
     g->nd = nd ? (const float*)nd->data : nullptr;
     g->nd_slot = nd ? nd->stride[0] : 0;
     g->nd_head = nd ? nd->stride[1] : 0;
     g->nd_inner = nd ? pair_stride(nd) : 0;
-    /* A slot is valid only inside every pool it indexes. */
-    g->n_states = st->shape[0] < ap->shape[0] ? st->shape[0] : ap->shape[0];
-    if (nd && nd->shape[0] < g->n_states) g->n_states = nd->shape[0];
+    g->st_idx = (const int32_t*)sidx->data;
+    g->ap_idx = (const int32_t*)aidx->data;
+    g->nd_idx = nidx ? (const int32_t*)nidx->data : nullptr;
+    g->st_states = st->shape[0];
+    g->ap_states = ap->shape[0];
+    g->nd_states = nd ? nd->shape[0] : 0;
     g->n_head = heads; g->sd0 = sd0; g->sd1 = sd1;
     g->alpha = (float)alpha;
     return RAD_OK;
@@ -237,16 +245,16 @@ extern "C" int kva_correct_host(const RadArgs* a, RadStream) {
     const int rc = kva_correct_parse(a, &g);
     if (rc != RAD_OK) return rc;
     for (int64_t s = 0; s < g.n_seq; ++s) {
-        const int32_t slot = g.state_idx[s * g.idx_pitch];
-        if (slot < 0 || slot >= g.n_states) continue;
+        int64_t st_slot = 0, ap_slot = 0, nd_slot = 0;
+        if (!kva_correct_slots(&g, s, &st_slot, &ap_slot, &nd_slot)) continue;
         for (int64_t h = 0; h < g.n_head; ++h) {
-            float* applied = g.applied + slot * g.ap_slot + h * g.ap_head;
+            float* applied = g.applied + ap_slot * g.ap_slot + h * g.ap_head;
             float scale = *applied;
             if (g.apply) {
-                const float* nd = g.nd ? g.nd + slot * g.nd_slot + h * g.nd_head : nullptr;
+                const float* nd = g.nd ? g.nd + nd_slot * g.nd_slot + h * g.nd_head : nullptr;
                 scale = g.alpha * (nd ? kva_rho(nd[0], nd[g.nd_inner]) : 1.0f);
             }
-            float* state = g.state + slot * g.st_slot + h * g.st_head;
+            float* state = g.state + st_slot * g.st_slot + h * g.st_head;
             const float* c = g.c + h * g.c_head;
             for (int64_t i = 0; i < g.sd0 && scale != 0.0f; ++i)
                 for (int64_t j = 0; j < g.sd1; ++j) {

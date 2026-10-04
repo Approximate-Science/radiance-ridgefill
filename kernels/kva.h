@@ -37,7 +37,7 @@ enum { KVA_MODE_CLASS = 0, KVA_MODE_RANDOM = 1, KVA_MODE_ALL = 2 };
 /* Operand positions, in schema order (rows.cpp holds the schemas). */
 enum { RS_TOKENS = 0, RS_POS, RS_SCORE, RS_ROWS, RS_MASK };
 enum { RH_A = 0, RH_MASK, RH_ALOG, RH_DTBIAS, RH_ND, RH_SIDX };
-enum { SC_STATE = 0, SC_APPLIED, SC_SIDX, SC_C, SC_ND };
+enum { SC_STATE = 0, SC_STATE_IDX, SC_APPLIED, SC_APPLIED_IDX, SC_C, SC_ND, SC_ND_IDX };
 
 /* ---------------------------------------------------------------- the shared definitions */
 
@@ -110,16 +110,31 @@ typedef struct KvaRho {
     int64_t        n, n_head;
 } KvaRho;
 
+/* Each KV operand comes with ITS OWN group's slot index: the KV manager hands every stateful group
+ * the same slot per sequence today, but that is not a contract, so nothing here relies on it. */
 typedef struct KvaCorrect {
     float*         state;   int64_t st_slot, st_head, st_row, st_col;
     float*         applied; int64_t ap_slot, ap_head;
-    const int32_t* state_idx; int64_t idx_pitch;
     const float*   c;       int64_t c_head, c_row, c_col;
     const float*   nd;      int64_t nd_slot, nd_head, nd_inner;   /* nd null: rho = 1 */
-    int64_t        n_seq, n_states, n_head, sd0, sd1;
+    const int32_t* st_idx;  const int32_t* ap_idx;  const int32_t* nd_idx;
+    int64_t        st_pitch, ap_pitch, nd_pitch;      /* row pitch of each index; column 0 is used */
+    int64_t        st_states, ap_states, nd_states;   /* each pool's slot count */
+    int64_t        n_seq, n_head, sd0, sd1;
     float          alpha;
     int            apply;                    /* 1 apply, 0 undo */
 } KvaCorrect;
+
+/* Sequence s's slot in each pool. False when any of them is outside its pool: the sequence is
+ * skipped (a negative slot is how a sequence with no state is spelled). */
+KVA_HD inline bool kva_correct_slots(const KvaCorrect* g, int64_t s, int64_t* st, int64_t* ap,
+                                     int64_t* nd) {
+    *st = g->st_idx[s * g->st_pitch];
+    *ap = g->ap_idx[s * g->ap_pitch];
+    *nd = g->nd ? g->nd_idx[s * g->nd_pitch] : 0;
+    return *st >= 0 && *st < g->st_states && *ap >= 0 && *ap < g->ap_states &&
+           (!g->nd || (*nd >= 0 && *nd < g->nd_states));
+}
 
 #ifdef __cplusplus
 extern "C" {
