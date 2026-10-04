@@ -29,7 +29,7 @@ Paths below assume the repo at `~/projects/inference/radiance-kva`, radiance at 
 | R18 | Fill quality measured with controls | 3 | `--kld-ref evidence/stage0/ref` with `score_from = N − T`: mean KL, NLL ratio and top-1 vs exact on the quick set, per-doc paired, bootstrap CI; positive control KL(fill) ≫ noise floor (R3); `--max-num-seqs 1`; the plugin's approximate-step count in the log equals Σ_docs (N_d − T)/2048 (otherwise some bulk chunks ran exact and the row is red); prediction registered in `labbook` BEFORE the run |
 | R19 | Speed measured | 3 | `scripts/speed.sh speed` → median of 5 after warm-up at 9216/16384/32768, same boot as R1, `--no-prefix-cache`, MTP off; table with speedup vs R1 |
 | R20 | New op: host row ≡ device row | 4 | `tests/kernel_test` runs both rows on random operands with padded slot strides and a nonzero flag; max abs diff 0 (f32 add is exact for equal inputs) |
-| R21 | New op: no allocation / getenv / sync on the launch path | 4 | `grep -nE 'hipMalloc|getenv|hipDeviceSynchronize|hipStreamSynchronize' kernels/` is empty |
+| R21 | New op: no allocation / getenv / sync on the launch path | 4 | `grep -rnE 'hipMalloc|getenv|hipDeviceSynchronize|hipStreamSynchronize' kernels/` is empty |
 | R22 | Correction neutral at alpha = 0 | 4 | `RADIANCE_KVA_ALPHA=0` output byte-identical to Stage 3 (`ident.sh`) |
 | R23 | Correction helps (positive control) | 4 | paired per-doc NLL, correction on vs off, CI excludes 0 in the improving direction; prediction registered first |
 | R24 | Head-order check (negative control) | 4 | a sidecar built with the two rank halves swapped does NOT beat correction off (CI includes 0 or worsens) |
