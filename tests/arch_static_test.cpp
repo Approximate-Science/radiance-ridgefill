@@ -553,11 +553,12 @@ TEST(quality_declares_the_selected_row_table_and_kva_rowsel) {
  * 128 rows is past qk_fuse_rows (64), where the stock attention takes the unfused prologue too. */
 Batch one_prefill(const RadBuilder& bld, int64_t T, int64_t ahead, int32_t ctx) {
     static int32_t ids[2048], pos[2048], cu[2] = {0, 0}, slot[2048], table[4096];
-    static int32_t used[1], state[3], qlen[1], ctxl[1], acc[1];
+    static int32_t used[1], state[3 * 64], qlen[1], ctxl[1], acc[1];
     Batch x = make_batch(bld, true);
-    for (RadKVGroupBatch& k : x.kv) {
+    for (size_t g = 0; g < x.kv.size(); ++g) {   /* every group its own slot rows */
+        RadKVGroupBatch& k = x.kv[g];
         k.slot_mapping = slot; k.block_table = table; k.block_table_pitch = 1024;
-        k.seqused = used; k.state_index = state; k.state_index_pitch = 3; k.max_blocks = 1024;
+        k.seqused = used; k.state_index = state + 3 * g; k.state_index_pitch = 3; k.max_blocks = 1024;
     }
     cu[1] = (int32_t)T;
     RadBatch& b = x.b;
@@ -781,11 +782,13 @@ TEST(speed_fills_late_layers_with_their_cache_writing_ops_only) {
         if (!lay.full) {
             /* Stage 4: undo right before the conv/scan, apply right after, on this layer's slots. */
             const RadOperand state = kv_cache(m.kv_state, l), applied = kv_cache(k.kv_applied, l);
-            const RadOperand idx = praw2(bk.b.kv[m.kv_state - 1].state_index, RAD_I32, 1, 3);
+            const RadOperand st_idx = praw2(bk.b.kv[m.kv_state - 1].state_index, RAD_I32, 1, 3);
+            const RadOperand ap_idx = praw2(bk.b.kv[k.kv_applied - 1].state_index, RAD_I32, 1, 3);
             RadOperand heads = RAD_W(k.st[(size_t)l]);   /* rank 0 of 1: every head, from 0 */
             heads.rows = m.gcfg.n_head_v;
-            const RecIssue undo{k.op_undo[(size_t)l], {state, applied, idx, heads, RAD_NONE}, 1};
-            const RecIssue apply{k.op_apply[(size_t)l], {state, applied, idx, heads, RAD_NONE}, 1};
+            const std::vector<RadOperand> opd = {state, st_idx, applied, ap_idx, heads, RAD_NONE, RAD_NONE};
+            const RecIssue undo{k.op_undo[(size_t)l], opd, 1};
+            const RecIssue apply{k.op_apply[(size_t)l], opd, 1};
             size_t conv = 0;
             while (conv < keep.size() && keep[conv].op != lay.gdn.op_conv_prep) ++conv;
             keep.insert(keep.begin() + (long)conv, undo);
@@ -852,10 +855,10 @@ TEST(at_tp2_each_rank_corrects_its_own_heads) {
         for (const RecIssue& i : r.issues) {
             if (i.op != k.op_undo[kSplit] && i.op != k.op_apply[kSplit]) continue;
             ++seen;
-            REQUIRE_EQ(i.opd.size(), (size_t)5);
-            CHECK_EQ(i.opd[3].handle, k.st[kSplit]);
-            CHECK_EQ(i.opd[3].rows, m.gcfg.n_head_v);
-            CHECK_EQ(i.opd[3].offset, (int64_t)rank * m.gcfg.n_head_v * m.gcfg.head_v * m.gcfg.head_k);
+            REQUIRE_EQ(i.opd.size(), (size_t)7);
+            CHECK_EQ(i.opd[4].handle, k.st[kSplit]);
+            CHECK_EQ(i.opd[4].rows, m.gcfg.n_head_v);
+            CHECK_EQ(i.opd[4].offset, (int64_t)rank * m.gcfg.n_head_v * m.gcfg.head_v * m.gcfg.head_k);
         }
         CHECK_EQ(seen, 2);
     }

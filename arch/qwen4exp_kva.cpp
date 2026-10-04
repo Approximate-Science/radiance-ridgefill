@@ -143,14 +143,26 @@ static RadOperand correction_heads(const qwen4exp_fp8::Model& m, rad_weight w) {
     return o;
 }
 
+/* A group's slot rows for this step's sequences: its own state_index, at its own pitch. */
+static RadOperand slots(const RadBatch* batch, rad_kvgroup g) {
+    const RadKVGroupBatch* kb = kv_batch(batch, g);
+    const int64_t pitch = kb && kb->state_index_pitch > 0 ? kb->state_index_pitch : 1;
+    return praw2(kb ? kb->state_index : nullptr, RAD_I32, batch->n_seq, pitch);
+}
+
+/* kva_state_correct's operands (kernels/rows.cpp): every KV operand followed by ITS OWN group's
+ * slot rows, so no group has to share another's slot numbers. ND and its index come in quality
+ * mode only (Stage 5); speed passes neither and rho is 1. */
 static void correct(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li, rad_op op,
-                    const RadBatch* batch) {
+                    const RadBatch* batch, bool with_nd) {
     if (!op) return;
-    const RadKVGroupBatch* st = kv_batch(batch, m.kv_state);
-    const int64_t pitch = st && st->state_index_pitch > 0 ? st->state_index_pitch : 1;
-    RAD_ISSUE_N(c, op, batch->n_seq, kv_cache(m.kv_state, (int)li), kv_cache(k.kv_applied, (int)li),
-                praw2(st ? st->state_index : nullptr, RAD_I32, batch->n_seq, pitch),
-                correction_heads(m, k.st[(size_t)li]), RAD_NONE);
+    const int L = (int)li;
+    RAD_ISSUE_N(c, op, batch->n_seq,
+                kv_cache(m.kv_state, L), slots(batch, m.kv_state),
+                kv_cache(k.kv_applied, L), slots(batch, k.kv_applied),
+                correction_heads(m, k.st[(size_t)li]),
+                with_nd ? kv_cache(k.kv_rho, L) : RAD_NONE,
+                with_nd ? slots(batch, k.kv_rho) : RAD_NONE);
 }
 
 /* A filled late layer: the projector writes the block input `x` from the stream entering layer S,
@@ -171,9 +183,9 @@ static void fill_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int64_t 
         attn_kv(c, l.attn, batch);
     } else {
         gdn_project(c, l.gdn, T);
-        correct(c, k, m, li, k.op_undo[(size_t)li], batch);
+        correct(c, k, m, li, k.op_undo[(size_t)li], batch, false);
         gdn_scan(c, l.gdn, batch);
-        correct(c, k, m, li, k.op_apply[(size_t)li], batch);
+        correct(c, k, m, li, k.op_apply[(size_t)li], batch, false);
     }
 }
 

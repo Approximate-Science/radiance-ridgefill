@@ -34,6 +34,8 @@ struct Kva {
     /* What each sequence's late delta-net layer had added to its state at its last approximate
      * chunk end (PLAN D7): one f32 a head, zeroed by the engine at admission. */
     rad_kvgroup kv_applied = 0;
+    /* Quality mode's running decay sums N and D per head (kva_rho_update), same lifetime. */
+    rad_kvgroup kv_rho = 0;
     /* The fill (Stage 3): a projector GEMM per late layer, and the quantiser that writes the
      * projected block input's codes. */
     std::vector<rad_op> op_proj;              /* [n_layer]: 0 below S */
@@ -151,11 +153,7 @@ static int decl_every_copy(RadBuilder* b, const qwen4exp_fp8::Model& m, Kva& k) 
  * issues depend on host state that is not in the pass key, and "was a correction applied at this
  * sequence's last chunk end" is per-sequence, per-layer state. A LINEAR group gives each sequence
  * one slot the engine zeroes at admission and keeps for the sequence's life: [heads, 1, 1] f32,
- * bound to every late delta-net layer. kva_state_correct indexes it with the delta-net state's
- * slot row (one state_idx operand, kernels/rows.cpp), which names the same slot because the KV
- * manager allocates every stateful group's slot together from identically initialised free lists
- * (radiance core/mem/kv.cpp:478-484, 676-691); a schema with its own index operand would not rely
- * on that. */
+ * bound to every late delta-net layer. kva_state_correct takes it with its own slot rows. */
 static int decl_applied(RadBuilder* b, const qwen4exp_fp8::Model& m, Kva& k) {
     RadKVGroupDecl d{};
     d.kind         = RAD_KV_LINEAR;
