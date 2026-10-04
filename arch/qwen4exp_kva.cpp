@@ -144,8 +144,8 @@ static int decl_every_copy(RadBuilder* b, const qwen4exp_fp8::Model& m, Kva& k) 
                       RAD_SHARD_ROW, grp);
         }
     }
-    decl_score(b, k.nm, m, "kva.rowsel.score");
-    decl_score(b, k.nm, m, "kva.rowsel.score_none");
+    for (const char* t : { "kva.rowsel.score", "kva.rowsel.score_none", "kva.rowsel.score_all" })
+        decl_score(b, k.nm, m, t);
     return RAD_OK;
 }
 

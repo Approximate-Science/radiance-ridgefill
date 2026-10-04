@@ -399,6 +399,7 @@ TEST(declare_all_declares_every_held_copy_and_no_op) {
     RadBuilder stock, kva;
     hold_kva(kva, {"kva.proj", "kva.projr", "kva.st", "kva.stswap", "kva.str"});
     hold_score(kva, "kva.rowsel.score");
+    hold_score(kva, "kva.rowsel.score_all");
     REQUIRE_EQ(qwen4exp_fp8::declare(&stock, &meta, &c), RAD_OK);
     REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
     CHECK_EQ(kva.ops.size(), stock.ops.size());
@@ -440,6 +441,7 @@ TEST(declare_all_declares_every_held_copy_and_no_op) {
     REQUIRE(sc != nullptr);
     CHECK_EQ(sc->shape[0], meta.n_vocab);
     CHECK_EQ(sc->shard, RAD_SHARD_NONE);
+    CHECK(weight(kva, "kva.rowsel.score_all") != nullptr);
     CHECK(weight(kva, "kva.rowsel.score_none") == nullptr);   /* not held, not declared */
 }
 
@@ -477,6 +479,39 @@ TEST(speed_declares_the_selected_copy_and_its_kernel_ops) {
         CHECK_EQ(undo, 3);    /* delta-net layers 4, 5, 6 */
         CHECK_EQ(apply, 3);
     }
+}
+
+/* Quality declares the selected row table and the kva_rowsel op over it, with the cap the share
+ * derives (0.25 * 2048 = 512) and the rule the switch names. */
+TEST(quality_declares_the_selected_row_table_and_kva_rowsel) {
+    RadModelMeta meta = flash_next_meta();
+    RadBuildCtx c = served_ctx();
+    Env env({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_ROWSEL_TABLE", "none"},
+             {"RADIANCE_KVA_ROWSEL", "random"}});
+    RadBuilder kva;
+    hold_kva(kva, {"kva.proj", "kva.st"});
+    for (const char* t : {"kva.rowsel.score", "kva.rowsel.score_none", "kva.rowsel.score_all"})
+        hold_score(kva, t);
+    int st = RAD_OK;
+    const std::string err = stderr_of([&] { st = qwen4exp_kva::declare(&kva, &meta, &c); });
+    CHECK_EQ(st, RAD_E_UNSUPPORTED);
+    CHECK(has(err, "not implemented"));
+    CHECK(weight(kva, "kva.rowsel.score_none") != nullptr);
+    CHECK(weight(kva, "kva.rowsel.score") == nullptr);
+    CHECK(weight(kva, "kva.rowsel.score_all") == nullptr);
+    int rowsel = 0;
+    for (const RecOp& o : kva.ops) {
+        if (o.op != "kva_rowsel") continue;
+        ++rowsel;
+        REQUIRE_EQ(o.w.size(), (size_t)1);
+        CHECK_EQ(kva.weights[o.w[0] - 1].first, std::string("kva.rowsel.score_none"));
+        for (const RecParam& p : o.p) {
+            if (p.key == "cap")  CHECK_EQ(p.ival, 512LL);
+            if (p.key == "mode") CHECK_EQ(p.sval, std::string("random"));
+            if (p.key == "M")    CHECK_EQ(p.ihi, 2048LL);
+        }
+    }
+    CHECK_EQ(rowsel, 1);
 }
 
 /* ==================================================================== refusals (R31) */

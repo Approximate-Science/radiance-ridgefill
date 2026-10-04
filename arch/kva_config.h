@@ -19,7 +19,8 @@
  *
  *   env RADIANCE_KVA_PROJ         shipped -> kva.proj.L.{weight,bias}   refit -> kva.projr.L.*
  *   env RADIANCE_KVA_ST           shipped -> kva.st.L   swap -> kva.stswap.L (R24)   refit -> kva.str.L
- *   env RADIANCE_KVA_ROWSEL_TABLE class   -> kva.rowsel.score   none -> kva.rowsel.score_none (R41)
+ *   env RADIANCE_KVA_ROWSEL_TABLE class -> kva.rowsel.score   none -> kva.rowsel.score_none (R41)
+ *                                 all   -> kva.rowsel.score_all (every id a match: R35)
  *   env RADIANCE_KVA_DECLARE      all: declare EVERY kva.* tensor the model holds, which is what
  *                                 rad-convert must see (it writes only declared weights, and an
  *                                 --in-place append drops any old entry the declare did not name).
@@ -122,9 +123,10 @@ inline int read_variants(Config* c) {
     RAD_ARCH_TRY(read_choice(nullptr, nullptr, "RADIANCE_KVA_ST", { "shipped", "swap", "refit" },
                              "shipped|swap|refit", &v));
     c->st = v == 0 ? "kva.st" : v == 1 ? "kva.stswap" : "kva.str";
-    RAD_ARCH_TRY(read_choice(nullptr, nullptr, "RADIANCE_KVA_ROWSEL_TABLE", { "class", "none" },
-                             "class|none", &v));
-    c->score = v == 0 ? "kva.rowsel.score" : "kva.rowsel.score_none";
+    RAD_ARCH_TRY(read_choice(nullptr, nullptr, "RADIANCE_KVA_ROWSEL_TABLE",
+                             { "class", "none", "all" }, "class|none|all", &v));
+    c->score = v == 0 ? "kva.rowsel.score" : v == 1 ? "kva.rowsel.score_none"
+                                                    : "kva.rowsel.score_all";
     RAD_ARCH_TRY(read_choice(nullptr, nullptr, "RADIANCE_KVA_DECLARE", { "selected", "all" },
                              "all (rad-convert) or unset (serving)", &v));
     c->declare_all = v == 1;
