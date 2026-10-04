@@ -52,6 +52,9 @@ constexpr int64_t kCapQuantum = 64;
 
 struct Config {
     int         mode        = MODE_OFF;
+    /* T: the method's measured exact tail (PLAN D9; tcc's DYLUHN_KVA_TAIL default, KVA-FACTS §5) --
+     * an operating choice, not a model or machine number. Changing it is Dylan's call (HANDOVER
+     * §2.4.5); kva.tail / RADIANCE_KVA_TAIL override it. */
     int64_t     tail        = 2048;
     double      alpha       = 1.0;
     int         rowsel      = ROWSEL_CLASS;

@@ -200,7 +200,55 @@ Cost: `x`, `x.q8`, `x.s8` marked concurrent (≈16 MiB at 2048 rows, live nearly
 `kva_bi` + codes (≈16 MiB more). Risk: none found; the in-tree blocks already treat `x` as scratch between the
 read and the write.
 
-## 7. Open / for other lanes
+## 7. Stages 3-5 (2026-10-04, commits 35adbe3, bb582ea, 8b4266e, 387405b, ca8b01f)
+
+Status: **implemented and statically tested**; nothing below is measured. Engine gates are the orchestrator's.
+
+- **a_x instead of kva_bi (approved deviation from PLAN D4).** The projector writes the model's block input `x`
+  (`a_x.x`) and the in-tree `QuantFP8` writes x's codes (int8 on the served formats); every in-tree op then runs on
+  its stock operands. `b_h`, `x`, `x.q8`, `x.s8` are `rad_buf_concurrent`. Cost: arena MiB to be read off
+  `--debug-placement` (orchestrator's Stage 3 run); expected ≈ 0, since all four are live nearly the whole step anyway.
+- **Approximate decision** (`qwen4exp_kva.cpp approximate()`): mode != off, have_proj, !enc, draft_pass == 0,
+  n_seq_decode == 0 (via batch_split, so a phase-only batch counts), n_seq == 1, n_spec == 0, n_ahead >= T. Each is
+  either a pass-key field or fixed at declare (R15). Static test: the five non-approximate shapes issue the stock
+  sequence exactly.
+- **Speed late layer** = projector, codes, then the stock block filtered to its cache-writing handles (§6), with
+  Stage 4's undo before conv_prep and apply after the scan. **Plumb** = the stock layer with the block issued through
+  the same pieces (kva_fill.h) fed the real `x`: equal to stock issue for issue except two moves inside each late
+  attention block (indexer q-prep/score/select after its block-key half; K/V before the q path). Plumb declares no
+  op and no correction.
+- **kva.st is replicated, not ROW-sharded** (deviation from PLAN D6, found at the first TP2 load: the loader has no
+  ROW share of a rank-3 weight, `core/format/share.cpp:56`). Each rank holds [48,128,128] (3 MiB a layer, 54 MiB a
+  rank) and passes its heads as a weight row slice (offset rank·24·128·128, rows 24; `issue.cpp:661-698` narrows
+  and bounds-checks it).
+- **kva_state_correct operands** (KERNELS schema 141015c): state, state_idx, applied, applied_idx, C, ND?, nd_idx? —
+  each index is its own group's `state_index` at its own pitch, so no group relies on another's slot numbers.
+- **Quality layer** (`quality_layer`): projector over all rows; the layer's connection read issued over `h_R` into
+  `x_R`/`inj_R` (codes absent: libr4d's hc_read takes q/scale as optional, `r4d_hc_bf16.hip:3351-3374`);
+  scatter_rows(x_R → x); codes; the whole block over all rows (stock `qsa.step`+`attn.step`; delta net: project,
+  undo, scan, kva_rho_update, apply with ND, tail); gather_rows(x → y_R); the connection write into `h_R` at cap rows
+  (decided with T = n_tok, as the block decided its all-reduce); the ffn read over h_R, ONE `MoeFP8::pass(cap, 0,
+  cap)` with its routing report, the ffn write (all decided with T = cap). Once per chunk: kva_rowsel (token ids,
+  positions, score → rows_idx [cap], mask [n_tok]) and gather_rows(b_h → h_R). Buffers (plugin, concurrent):
+  rows_idx [cap] i32, mask [max_tok] i32, h_R [cap,10240], x_R/y_R [cap,2560], inj_R [cap,4] bf16; plus the in-tree
+  `gdn_ab` concurrent (rho reads its a columns). At cap 512: h_R 10 MiB, x_R+y_R 5 MiB. kv_kva_rho [heads,1,2] f32
+  only when a correction is held.
+- **The quality oracle is the in-tree code**: the static test builds each late layer's expected issues by running
+  `HyperConn::read/write` and `MoeFP8::pass` on scratch contexts and swapping only the stream operand, at TP1 and
+  TP2. 13 mutants across Stages 3-5, each caught.
+- **Padding rows** (k < cap): rows_idx −1 → zero rows in h_R; the connection read of a zero row is 0 (norm of zero
+  times rsqrt(eps)), the scatter skips it, MoE on a zero row adds 0. They cost compute and add to the routing counts.
+- **RADIANCE_KVA_ST=refit with no kva.str.* held** = speed without correction: have_st false, no group, no ops,
+  no issues (static test `the_correction_is_declared_and_issued_only_when_held`).
+- **Log**: rank 0 prints one `radiance: qwen4exp_kva: kva: approximate step (<mode>, <n> tokens, <ahead> ahead)` per
+  approximate step. **Dump**: RADIANCE_KVA_DUMP=<dir> (rank 0, syncs, debug only): boundary.p<P>.npy (f32
+  [n_tok,10240]) + boundary.jsonl every approximate chunk (R17); rows.jsonl in quality mode (R39 format,
+  notes/sidecar.md §6).
+- Greps (arch/): R15 — one hit, `static thread_local Kva probe_kva` (declare-only sizing scratch, same as the
+  in-tree's); R27 empty; R28 — `tail = 2048` only, commented as the method's operating choice (PLAN D9). Every
+  getenv is in a declare-time function.
+
+## 8. Open / for other lanes
 
 - SIDECAR/orchestrator: add `-e RADIANCE_KVA_DECLARE=all` to every rad-convert run with the KVA home (§4).
 - KERNELS: `kva_kernels_host` was red at 17:24 (stub test vs rows in progress).

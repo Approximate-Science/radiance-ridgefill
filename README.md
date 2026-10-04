@@ -63,7 +63,8 @@ Container metadata (`rad-convert --set`) first, environment overrides; `arch/kva
 | `RADIANCE_KVA_ROWSEL` | `class`, `random`, `all` | quality mode's exact-row rule |
 | `RADIANCE_KVA_SHARE` / `kva.rowsel.share` | (0, 1], default 0.25 | share of a chunk's class matches kept exact; the row cap derives from it |
 | `RADIANCE_KVA_PROJ`, `RADIANCE_KVA_ST`, `RADIANCE_KVA_ROWSEL_TABLE` | `shipped`/`refit`, `shipped`/`swap`/`refit`, `class`/`none`/`all` | which copy of each fitted tensor is served (controls and refits share the container) |
+| `RADIANCE_KVA_DUMP` | a directory | debug only, synchronises mid-step: the layer-S stream of every approximate chunk (`boundary.p<P>.npy` + `boundary.jsonl`) and, in quality mode, the selected rows (`rows.jsonl`) |
 | `RADIANCE_KVA_DECLARE` | `all` | **set it for every `rad-convert` run with this plugin**: rad-convert writes only declared tensors, and an `--in-place` append drops any it was not shown |
 
 A mode that cannot run refuses at startup by name (tail longer than a step, no projector, quality without its
-row table, kva.so missing). In this build `quality` still refuses as not implemented (Stage 5).
+row table, kva.so missing). Each approximate step logs one `kva: approximate step` line (rank 0).
