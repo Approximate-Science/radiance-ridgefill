@@ -10,12 +10,14 @@
  * contract (R6, R7), and tests/arch_static_test.cpp checks the declared graph and the issued
  * sequence against the in-tree plugin's.
  *
- * WHAT IS DONE (Stage 2.2): the fitted tensors are declared, optional, by the names
- * tools/kva_sidecar.py writes (kva_config.h lists them and the switches that pick a copy); S is
- * the lowest projected layer the model holds; every refusal a mode needs is made at declare, by
- * name (R31). WHAT IS NOT: the fill path (Stage 3), the correction (Stage 4) and the exact rows
- * (Stage 5). Until they exist every mode but `off` refuses at declare -- a mode that served stock
- * output while saying `speed` would be the silent fallback HANDOVER §2.1 forbids.
+ * WHAT IS DONE: the fitted tensors are declared, optional, by the names tools/kva_sidecar.py writes
+ * (kva_config.h lists them and the switches that pick a copy); S is the lowest projected layer the
+ * model holds; every refusal a mode needs is made at declare, by name (R31; kva_declare.h). The
+ * fill path (Stage 3): an approximate chunk runs the stock prologue and layers 0..S-1, then for each
+ * late layer the projector into the block input `x`, its codes, and only the block's cache-writing
+ * pieces (kva_fill.h); `plumb` runs every late layer exactly through those same pieces, fed the real
+ * block input. NOT YET: the correction (Stage 4) and the exact rows (Stage 5) -- quality refuses at
+ * declare until then, because nothing unimplemented returns success.
  *
  * Included by tests/arch_static_test.cpp too, which defines RAD_ARCH_NO_EXPORTS itself; then
  * neither plugin's exports are emitted and the test calls both namespaces directly.
@@ -26,232 +28,13 @@
 #endif
 #include <qwen4exp_fp8/qwen4exp_fp8.cpp>
 
-#include "kva_config.h"
+#include "kva_declare.h"
+#include "kva_dump.h"
+#include "kva_fill.h"
 
 namespace qwen4exp_kva {
 
 using namespace rad::arch;
-
-struct Kva {
-    Config  cfg{};
-    /* Its own name pool: declared names must outlive declare (rad_arch.h's Names), and a sizing
-     * declare runs on its own thread, so it must not append to the real model's pool. */
-    Names   nm{""};
-    int64_t split = -1;          /* S: the lowest projected layer, -1 when no projector is held */
-    bool    have_proj = false, have_st = false, have_rowsel = false;
-    std::vector<rad_weight> proj_w, proj_b;   /* [n_layer]: 0 below S */
-    std::vector<rad_weight> st;               /* [n_layer]: 0 below S and on attention layers */
-    rad_weight score = 0;
-    /* kva_state_correct per late delta-net layer (Stage 4 issues them), and kva_rowsel (Stage 5).
-     * Declared now because "kva.so is missing" has to be a refusal at startup (R31), and the only
-     * way to ask whether an op resolves is to declare it. */
-    std::vector<rad_op> op_undo, op_apply;
-    rad_op  op_rowsel = 0;
-};
-
-static Kva g_kva[MAX_RANKS];
-
-/* `name` declared when the model holds it; 0 when it does not. The name map comes first because a
- * checkpoint is searched through it (rad_weight_encoding); a container is searched by the declared
- * name, which is the same string. A map for an absent tensor is inert: name maps are read only for
- * declared weights (radiance core/format/checkpoint.cpp:525-541). */
-static rad_weight decl_held(RadBuilder* b, Names& nm, const char* name, uint32_t dtype,
-                            std::initializer_list<int64_t> shape, int shard, RadWeightGroup grp) {
-    const char* d = nm.f("%s", name);
-    if (map_copy(b, d, nm.ckpt("%s", name)) < 0) return 0;
-    RadEncoding e{};
-    if (!weight_enc(b, name, &e)) return 0;
-    return decl_w(b, d, dtype, shape, RAD_ACCESS_PER_TOKEN, shard, grp, 1);
-}
-
-/* One projector copy (`kva.proj` or `kva.projr`): [n_embd, hc*n_embd] bf16 and its bias, replicated
- * on every rank (PLAN D5), PER_TOKEN so the planner keeps it resident (HANDOVER Stage 2.2). S is
- * the lowest layer held, and every layer from S up must be held with its bias -- a projector with
- * a hole is refused rather than run with one layer computed exactly by accident. */
-static int decl_projector(RadBuilder* b, Names& nm, const qwen4exp_fp8::Model& m,
-                          const char* base, Kva& k) {
-    const int64_t n = m.g.n_embd, wide = m.hccfg.hc * m.g.n_embd;
-    for (int64_t l = 0; l < m.g.n_layer; ++l) {
-        char wn[96], bn[96];
-        std::snprintf(wn, sizeof wn, "%s.%lld.weight", base, (long long)l);
-        std::snprintf(bn, sizeof bn, "%s.%lld.bias", base, (long long)l);
-        const rad_weight w = decl_held(b, nm, wn, RAD_BF16, {n, wide}, RAD_SHARD_NONE, grp_layer((int)l));
-        const rad_weight bias = decl_held(b, nm, bn, RAD_BF16, {n}, RAD_SHARD_NONE, grp_layer((int)l));
-        if (k.split < 0 && (w || bias)) k.split = l;
-        if (k.split < 0) continue;
-        if (!w || !bias) {
-            std::fprintf(stderr, "radiance: qwen4exp_kva: the projector '%s' starts at layer %lld "
-                                 "and has no %s; every layer from S to the last needs its weight "
-                                 "and bias\n", base, (long long)k.split, w ? bn : wn);
-            return RAD_E_INVAL;
-        }
-        k.proj_w[(size_t)l] = w;
-        k.proj_b[(size_t)l] = bias;
-    }
-    k.have_proj = k.split >= 0;
-    return RAD_OK;
-}
-
-/* One correction copy (`kva.st`, `kva.stswap` or `kva.str`): [value heads, head_v, head_k] f32 a
- * late delta-net layer, row-sharded by head (PLAN D6) -- the state's own layout, kv_gdn_state.
- * All of the late delta-net layers or none. */
-static int decl_correction(RadBuilder* b, Names& nm, const qwen4exp_fp8::Model& m,
-                           const char* base, int64_t from, Kva& k) {
-    int held = 0, want = 0;
-    for (int64_t l = from; l < m.g.n_layer; ++l) {
-        if (m.layers[(size_t)l].full) continue;
-        char sn[96];
-        std::snprintf(sn, sizeof sn, "%s.%lld", base, (long long)l);
-        k.st[(size_t)l] = decl_held(b, nm, sn, RAD_F32,
-                                    {m.gcfg.n_head_v, m.gcfg.head_v, m.gcfg.head_k},
-                                    RAD_SHARD_ROW, grp_layer((int)l));
-        held += k.st[(size_t)l] != 0;
-        ++want;
-    }
-    if (held && held != want) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: the correction '%s' covers %d of the %d "
-                             "delta-net layers from %lld up; it is all of them or none\n",
-                     base, held, want, (long long)from);
-        return RAD_E_INVAL;
-    }
-    k.have_st = held > 0;
-    return RAD_OK;
-}
-
-static rad_weight decl_score(RadBuilder* b, Names& nm, const qwen4exp_fp8::Model& m,
-                             const char* name) {
-    return decl_held(b, nm, name, RAD_F32, {m.g.n_vocab_all}, RAD_SHARD_NONE, grp_model());
-}
-
-/* rad-convert's view (RADIANCE_KVA_DECLARE=all): every copy the model holds, and nothing else --
- * no ops, no completeness checks, no refusals, because converting is not serving; the serving
- * declare checks what it selects. */
-static int decl_every_copy(RadBuilder* b, const qwen4exp_fp8::Model& m, Kva& k) {
-    const int64_t n = m.g.n_embd, wide = m.hccfg.hc * m.g.n_embd;
-    char name[96];
-    for (int64_t l = 0; l < m.g.n_layer; ++l) {
-        const RadWeightGroup grp = grp_layer((int)l);
-        for (const char* p : { "kva.proj", "kva.projr" }) {
-            std::snprintf(name, sizeof name, "%s.%lld.weight", p, (long long)l);
-            decl_held(b, k.nm, name, RAD_BF16, {n, wide}, RAD_SHARD_NONE, grp);
-            std::snprintf(name, sizeof name, "%s.%lld.bias", p, (long long)l);
-            decl_held(b, k.nm, name, RAD_BF16, {n}, RAD_SHARD_NONE, grp);
-        }
-        if (m.layers[(size_t)l].full) continue;
-        for (const char* s : { "kva.st", "kva.stswap", "kva.str" }) {
-            std::snprintf(name, sizeof name, "%s.%lld", s, (long long)l);
-            decl_held(b, k.nm, name, RAD_F32, {m.gcfg.n_head_v, m.gcfg.head_v, m.gcfg.head_k},
-                      RAD_SHARD_ROW, grp);
-        }
-    }
-    for (const char* t : { "kva.rowsel.score", "kva.rowsel.score_none", "kva.rowsel.score_all" })
-        decl_score(b, k.nm, m, t);
-    return RAD_OK;
-}
-
-/* The ops the mode issues from kva.so, declared per PLAN §5's schemas. A handle that comes back
- * null means no kernel library serves the op: kva.so is not on the search path, or declines this
- * machine. Refused here, by name, rather than at the first approximate chunk -- or, worse, served
- * without the correction (R31). */
-static int decl_kernel_ops(RadBuilder* b, const qwen4exp_fp8::Model& m, bool probe, Kva& k) {
-    const Config& c = k.cfg;
-    const char* missing = nullptr;
-    const bool corrects = k.have_st && (c.mode == MODE_SPEED || c.mode == MODE_QUALITY);
-    for (int64_t l = k.split; corrects && l < m.g.n_layer; ++l) {
-        if (m.layers[(size_t)l].full) continue;
-        for (int apply = 0; apply < 2; ++apply) {
-            const rad_op h = RAD_OP(b, "kva_state_correct",
-                RAD_PARAMS(RAD_RANGE("M", 1, m.g.max_seqs), RAD_STR("mode", apply ? "apply" : "undo"),
-                           RAD_F64("alpha", c.alpha), RAD_INT("n_head", m.gcfg.n_head_v),
-                           RAD_INT("sd0", m.gcfg.head_v), RAD_INT("sd1", m.gcfg.head_k)),
-                RAD_WEIGHTS(k.st[(size_t)l]));
-            (apply ? k.op_apply : k.op_undo)[(size_t)l] = h;
-            if (!h) missing = "kva_state_correct";
-        }
-    }
-    if (c.mode == MODE_QUALITY) {
-        k.op_rowsel = RAD_OP(b, "kva_rowsel",
-            RAD_PARAMS(RAD_RANGE("M", 1, m.g.max_tok), RAD_INT("cap", c.cap),
-                       RAD_F64("share", c.share), RAD_INT("seed", c.seed),
-                       RAD_STR("mode", kRowselNames[c.rowsel])),
-            RAD_WEIGHTS(k.score));
-        if (!k.op_rowsel) missing = "kva_rowsel";
-    }
-    if (missing && !probe) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: mode %s issues '%s' and no kernel library "
-                             "serves it -- kva.so is missing from $RADIANCE_HOME or declines this "
-                             "machine. Refusing rather than serving without it.\n",
-                     kModeNames[c.mode], missing);
-        return RAD_E_UNSUPPORTED;
-    }
-    return RAD_OK;
-}
-
-/* The refusals a serving mode needs before anything is issued (R31). Each names the number or the
- * tensor that refused it. */
-static int check_mode(const Kva& k, int64_t max_tok) {
-    const Config& c = k.cfg;
-    const char* mode = kModeNames[c.mode];
-    if (!k.have_proj) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: mode %s needs the projector '%s.L.weight' "
-                             "and the model holds none of it\n", mode, c.proj);
-        return RAD_E_UNSUPPORTED;
-    }
-    /* n_ahead is capped at max_tok (radiance core/sched/batch.cpp:1066-1080), so a tail longer
-     * than one step could never be satisfied and no chunk would ever be approximated. */
-    if (c.tail > max_tok) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: kva.tail is %lld tokens and the largest step "
-                             "is %lld (--max-num-batched-tokens); a chunk is approximated only "
-                             "when %lld prompt tokens follow it, and the scheduler never reports "
-                             "more than %lld. Lower the tail or raise the step.\n",
-                     (long long)c.tail, (long long)max_tok, (long long)c.tail, (long long)max_tok);
-        return RAD_E_UNSUPPORTED;
-    }
-    if (c.tail < kMinTail) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: kva.tail is %lld tokens; the shortest exact "
-                             "tail this method was measured at is %lld\n",
-                     (long long)c.tail, (long long)kMinTail);
-        return RAD_E_INVAL;
-    }
-    if (c.mode == MODE_QUALITY && !k.have_rowsel) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: mode quality selects exact rows from the "
-                             "table '%s' and the model does not hold it\n", c.score);
-        return RAD_E_UNSUPPORTED;
-    }
-    return RAD_OK;
-}
-
-static void note_config(RadBuilder* b, const Kva& k) {
-    const Config& c = k.cfg;
-    rad_note(b, "KVA: mode %s from layer %lld, tail %lld; projector %s, correction %s (alpha %g), "
-                "row table %s, rows %s share %g cap %lld seed %lld",
-             kModeNames[c.mode], (long long)k.split, (long long)c.tail, c.proj,
-             k.have_st ? c.st : "absent", c.alpha, k.have_rowsel ? c.score : "absent",
-             kRowselNames[c.rowsel], c.share, (long long)c.cap, (long long)c.seed);
-}
-
-/* The selected set, its kernel ops and its refusals. Under a sizing declare the cap is the real
- * declare's -- it is an op parameter, and a fixed parameter that follows max_tok is refused by the
- * arena's level check -- and nothing is refused: the real declare already decided. */
-static int decl_selected(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx,
-                         Kva& k) {
-    RAD_ARCH_TRY(decl_projector(b, k.nm, m, k.cfg.proj, k));
-    if (k.have_proj) RAD_ARCH_TRY(decl_correction(b, k.nm, m, k.cfg.st, k.split, k));
-    k.score = decl_score(b, k.nm, m, k.cfg.score);
-    k.have_rowsel = k.score != 0;
-    if (ctx->shape_probe) k.cfg.cap = g_kva[ctx->rank].cfg.cap;
-    else RAD_ARCH_TRY(check_mode(k, m.g.max_tok));
-    RAD_ARCH_TRY(decl_kernel_ops(b, m, ctx->shape_probe != 0, k));
-    note_config(b, k);
-    /* NOTHING UNIMPLEMENTED RETURNS SUCCESS. Stages 3-5 replace this with the step paths. */
-    if (!ctx->shape_probe) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: mode %s is not implemented in this build "
-                             "(the fill path is Stage 3); run with RADIANCE_KVA=off\n",
-                     kModeNames[k.cfg.mode]);
-        return RAD_E_UNSUPPORTED;
-    }
-    return RAD_OK;
-}
 
 static int declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* ctx) {
     RAD_ARCH_TRY(qwen4exp_fp8::declare(b, meta, ctx));
@@ -267,6 +50,8 @@ static int declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* c
     if (m.layers.empty()) return RAD_E_STATE;
     RAD_ARCH_TRY(read_config(meta, m.g.max_tok, &k.cfg));
     if (!k.cfg.declare_all && k.cfg.mode == MODE_OFF) return RAD_OK;
+    const char* dump = std::getenv("RADIANCE_KVA_DUMP");
+    k.dump_dir = dump ? dump : "";
 
     k.nm = Names(ctx->scope ? ctx->scope : "");
     k.proj_w.assign(m.layers.size(), 0);
@@ -278,8 +63,130 @@ static int declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* c
     return decl_selected(b, m, ctx, k);
 }
 
+/* ================================================================== step */
+
+/* AN APPROXIMATE STEP IS ONE PREFILL CHUNK OF ONE SEQUENCE WITH AT LEAST T PROMPT TOKENS AFTER IT
+ * (PLAN §3, D3). Every field read here is in the pass key (radiance core/runtime/ctx.cpp:979-1013)
+ * or fixed at declare, so a replayed pass issues what a fresh one would (R15). Anything else --
+ * a mixed step, two prefills, a draft pass, the last chunks -- is the stock step. */
+static bool approximate(const Kva& k, const RadBatch* b) {
+    int64_t n_seq_decode = 0, n_tok_decode = 0;
+    batch_split(b, &n_seq_decode, &n_tok_decode);
+    return k.cfg.mode != MODE_OFF && k.have_proj && !b->enc && b->draft_pass == 0 &&
+           n_seq_decode == 0 && b->n_seq == 1 && b->n_spec == 0 && b->n_ahead >= k.cfg.tail;
+}
+
+/* qwen4exp_fp8.cpp:1391-1404, verbatim: embedding, media rows, PLE hash, the stream's first value,
+ * the rope table. */
+static void prologue(RadCtx* c, qwen4exp_fp8::Model& m, const RadBatch* batch) {
+    const int64_t T = batch->n_tok;
+    RAD_ISSUE(c, m.op_embed, praw(batch->token_ids, RAD_I32, T), RAD_W(m.w_tok), brows(m.a_x.x, T));
+    m.mrows.step(c, batch, m.a_x.x, T);
+    if (m.op_embed_ar) RAD_ISSUE_N(c, m.op_embed_ar, T * m.g.n_embd, brows(m.a_x.x, T), RAD_NONE);
+    if (m.ple_layer >= 0) m.ple.ids(c, batch);
+    m.enter.step(c, T);
+    if (m.op_rope_cs && T <= qk_fuse_rows(m.g) && !rope_mixed(batch))
+        RAD_ISSUE_N(c, m.op_rope_cs, T, rope_pos1(batch, T), RAD_B(m.b_rope_cs));
+}
+
+/* qwen4exp_fp8.cpp:1407-1425 for one layer, with the mixer's block issued by `block`. */
+template <class Block>
+static void layer(RadCtx* c, qwen4exp_fp8::Model& m, int64_t li, const RadBatch* batch, Block block) {
+    const qwen4exp_fp8::Layer& l = m.layers[(size_t)li];
+    const int64_t T = batch->n_tok;
+    if (li == m.ple_layer) m.ple.step(c, batch);
+    l.hc_mix.read(c, T, 0, T);
+    block(l);
+    l.hc_mix.write(c, T, 0, T);
+    dbg_resid(c, (int)li, "mix", m.g.n_embd, m.b_h, m.a_x.x);
+    l.hc_ffn.read(c, T, 0, T);
+    l.mlp.step(c, batch);
+    l.hc_ffn.write(c, T, 0, T);
+    dbg_resid(c, (int)li, "ffn", m.g.n_embd, m.b_h, m.a_x.x);
+}
+
+/* The stock block (qwen4exp_fp8.cpp:1415-1416), and plumb's: the same ops through the fill's
+ * pieces, fed the real block input, so a fill piece that issues anything wrong shows up as a
+ * difference from stock (R14). */
+static void stock_block(RadCtx* c, const qwen4exp_fp8::Layer& l, const RadBatch* batch) {
+    if (l.full) { l.qsa.step(c, l.attn.w.h, batch); l.attn.step(c, batch); }
+    else        l.gdn.step(c, batch);
+}
+
+static void plumb_block(RadCtx* c, const qwen4exp_fp8::Layer& l, const RadBatch* batch) {
+    if (l.full) {
+        qsa_keys(c, l.qsa, l.attn.w.h, batch);
+        qsa_select(c, l.qsa, batch);
+        attn_kv(c, l.attn, batch);
+        attn_tail(c, l.attn, batch);
+    } else {
+        gdn_project(c, l.gdn, batch->n_tok);
+        gdn_scan(c, l.gdn, batch);
+        gdn_tail(c, l.gdn, batch->n_tok);
+    }
+}
+
+/* A filled late layer: the projector writes the block input `x` from the stream entering layer S,
+ * the quantiser writes its codes as the connection read would (QuantFP8::step without its
+ * matvec-only guard: an int8 linear always reads the codes), then only the cache-writing pieces.
+ * No connection read or write and no MoE: `b_h` stays the layer-S stream for every projector. */
+static void fill_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int64_t li,
+                       const RadBatch* batch) {
+    const qwen4exp_fp8::Layer& l = m.layers[(size_t)li];
+    const int64_t T = batch->n_tok, n = m.g.n_embd;
+    RAD_ISSUE_N(c, k.op_proj[(size_t)li], T, brows(m.b_h, T), RAD_W(k.proj_w[(size_t)li]),
+                RAD_W(k.proj_b[(size_t)li]), RAD_NONE, brows(m.a_x.x, T));
+    if (k.quant.op)
+        RAD_ISSUE(c, k.quant.op, brow_slice(m.a_x.x, 0, T, n), brow_slice(m.a_x.cq(), 0, T, n),
+                  brow_slice(m.a_x.cs(), 0, T, n / RAD_FP8_BLOCK));
+    if (l.full) {
+        qsa_keys(c, l.qsa, l.attn.w.h, batch);
+        attn_kv(c, l.attn, batch);
+    } else {
+        gdn_project(c, l.gdn, T);
+        gdn_scan(c, l.gdn, batch);
+    }
+}
+
+/* qwen4exp_fp8.cpp:1428-1437: the 97th connection and, when the chunk asks for them, logits. On a
+ * filled chunk those rows are not the model's (KL mode scores only the exact tail). */
+static void epilogue(RadCtx* c, qwen4exp_fp8::Model& m, const RadBatch* batch) {
+    const int64_t T = batch->n_tok;
+    m.mixer.read(c, T, 0, T);
+    if (batch->n_out <= 0) return;
+    RAD_ISSUE_N(c, m.op_gather, batch->n_out, brows(m.a_x.x, T),
+                praw(batch->out_ids, RAD_I32, batch->n_out), brows(m.b_hout, batch->n_out));
+    RAD_ISSUE_N(c, m.op_logits, batch->n_out, brows(m.b_hout, batch->n_out), RAD_W(m.w_lm_head),
+                brows(m.b_logits, batch->n_out));
+}
+
+static void approximate_step(RadCtx* c, const Kva& k, const RadBatch* batch) {
+    const int rank = rad_rank(c);
+    qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
+    prologue(c, m, batch);
+    for (int64_t li = 0; li < k.split; ++li)
+        layer(c, m, li, batch, [&](const qwen4exp_fp8::Layer& l) { stock_block(c, l, batch); });
+    if (rank == 0 && !k.dump_dir.empty())
+        dump_boundary(c, k.dump_dir, m.b_h, m.hccfg.hc * m.g.n_embd, batch);
+    for (int64_t li = k.split; li < m.g.n_layer; ++li) {
+        if (k.cfg.mode == MODE_PLUMB)
+            layer(c, m, li, batch, [&](const qwen4exp_fp8::Layer& l) { plumb_block(c, l, batch); });
+        else
+            fill_layer(c, k, m, li, batch);
+    }
+    epilogue(c, m, batch);
+    /* ONE LINE AN APPROXIMATE STEP, rank 0: scripts/grade.sh counts them against the bulk-chunk
+     * count (R18), which is what proves no bulk chunk silently ran exact. */
+    if (rank == 0)
+        std::fprintf(stderr, "radiance: qwen4exp_kva: kva: approximate step (%s, %lld tokens, %lld "
+                             "ahead)\n", kModeNames[k.cfg.mode], (long long)batch->n_tok,
+                     (long long)batch->n_ahead);
+}
+
 static void step(RadCtx* c, const RadBatch* batch) {
-    qwen4exp_fp8::step(c, batch);
+    const Kva& k = g_kva[rad_rank(c)];
+    if (approximate(k, batch)) approximate_step(c, k, batch);
+    else                       qwen4exp_fp8::step(c, batch);
 }
 
 /* The in-tree probe's answers hold here: the draft depth is the model's, and this declare writes

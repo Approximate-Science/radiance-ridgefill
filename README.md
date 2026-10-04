@@ -66,4 +66,4 @@ Container metadata (`rad-convert --set`) first, environment overrides; `arch/kva
 | `RADIANCE_KVA_DECLARE` | `all` | **set it for every `rad-convert` run with this plugin**: rad-convert writes only declared tensors, and an `--in-place` append drops any it was not shown |
 
 A mode that cannot run refuses at startup by name (tail longer than a step, no projector, quality without its
-row table, kva.so missing). In this build every mode but `off` still refuses as not implemented.
+row table, kva.so missing). In this build `quality` still refuses as not implemented (Stage 5).
