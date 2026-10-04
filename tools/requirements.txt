@@ -1,0 +1,7 @@
+# Python for tools/ and tests/test_*.py. Versions are the ones the tools were tested with (2026-10-04);
+# any torch build works (CPU is enough: nothing here touches a GPU).
+numpy==2.5.3
+safetensors==0.8.0
+torch==2.11.0
+transformers==5.18.0
+pytest==9.1.1
