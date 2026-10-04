@@ -248,6 +248,60 @@ Status: **implemented and statically tested**; nothing below is measured. Engine
   in-tree's); R27 empty; R28 — `tail = 2048` only, commented as the method's operating choice (PLAN D9). Every
   getenv is in a declare-time function.
 
+## Capture (Stage 6 step 1) — file layout, written before the code
+
+Two debug switches, read at declare. Both SYNCHRONISE the stream and copy device memory to pageable host memory;
+neither changes the issue sequence of the step it observes (only host copies are added), and with both unset no
+device→host copy exists anywhere in the plugin. "Single-sequence prefill chunk" = `n_seq == 1`, `n_seq_decode == 0`,
+`n_spec == 0`, not an encoder or draft pass; any `n_ahead`. `P` = the absolute position of the chunk's first row
+(`positions[0]`). `H16` = FNV-1a 64 of the chunk's int32 token ids, 16 hex digits — it keeps two prompts' chunks at
+the same `P` apart without any host counter. bf16 tensors are stored as `'<u2'` raw bits: f32 = `(u2 as u32) << 16`.
+
+### `RADIANCE_KVA_CAPTURE=<dir>` — the projector's fitting data (mode must be `off`; rank 0 only)
+
+On the served formats the stock connection read writes BOTH the bf16 block input `x` (`a_x.x`, always — it is a
+required output of `hc_read`) and its int8 codes, from the same values in the same kernel. The bf16 consumers
+(`op_ab`, the indexer projection) read `x`; the int8 linears read the codes. **`x` is the projector's target**, read
+right after layer L's `hc_mix` read and before the block overwrites it with its output. Per chunk:
+
+| file | dtype, shape | content |
+|---|---|---|
+| `<dir>/chunk.p<P>.h<H16>.boundary.npy` | `'<u2'` [R, hc·n_embd] = [R, 10240] | `b_h` entering layer S (after layer S−1's ffn write) at the captured rows |
+| `<dir>/chunk.p<P>.h<H16>.bi.<L>.npy`, L = S … n_layer−1 | `'<u2'` [R, n_embd] = [R, 2560] | `x` right after layer L's connection read, same rows |
+| `<dir>/chunk.p<P>.h<H16>.rows.npy` | `'<i4'` [R] | chunk-relative indices of the captured rows: every i with (P + i) % 8 == 0, ascending |
+| `<dir>/chunk.p<P>.h<H16>.ids.npy` | `'<i4'` [n_tok] | ALL of the chunk's token ids |
+| `<dir>/chunk.p<P>.h<H16>.pos.npy` | `'<i4'` [n_tok] | ALL of the chunk's positions (1-D; on a text pass the rotary position equals it) |
+| `<dir>/capture.jsonl` | one line a chunk | `{"prefix": "chunk.p<P>.h<H16>", "chunk_start": P, "n_tok": n, "stride": 8, "rows": R, "split": S, "layers": [S, …, 47], "hidden": 2560, "hc": 4, "dtype": "bf16"}` |
+
+S is the lowest `kva.proj.*` layer the container holds, else its `kva.split` metadata; capture refuses if neither.
+Stride 8 from the rows whose position is a multiple of 8 (tcc's capture). At 2048 rows: R = 256, 5 MiB + 24 × 1.25
+MiB = 35 MiB a chunk. Not captured: tcc's `final_multi_hidden` (the `final` map feeds only MTP, out of v1).
+
+**HC check.** `bi.S` is the engine's own `hc_read` of exactly the captured `boundary` rows, so
+`HC_read(boundary) == bi.S` holds in the engine by construction; the offline check of a CPU HC implementation needs
+layer S's connection weights from the container: `blk.S.attn_hc.norm.weight` (bf16), `blk.S.attn_hc_down.weight`
+and `blk.S.attn_hc_up.weight` (E4M3 rows with an f32 scale per group of 128 / 80 on the served recipe — dequantise
+from `rad-info -v` planes), eps 1e-6, `1 + w` gain (rad_block_hc.h:12-18 for the formula). Comparing
+`bi.L` across the captured layers with the fit's targets needs nothing more.
+
+### `RADIANCE_KVA_CAPTURE_STATE=<dir>` — the correction's fitting data (any mode; every rank)
+
+At the end of every single-sequence prefill chunk, each rank copies its late delta-net layers' recurrent state slot
+(this rank's value heads), after the layer's scan and BEFORE any correction apply (in speed/quality with a held
+correction the copy is taken between the scan and the apply; run the fit's speed arm with `RADIANCE_KVA_ST=refit`
+on a container without `kva.str.*` and nothing is applied anyway). Per (chunk, rank):
+
+| file | dtype, shape | content |
+|---|---|---|
+| `<dir>/state.p<P>.h<H16>.r<rank>.npy` | `'<f4'` [n_late_gdn, H_local, 128 (V), 128 (K)] | layers in ascending order (24,25,26,28,…,46); heads `[rank·H_local, (rank+1)·H_local)` of the model's 48 — the contiguous split of the delta net's own weights; the state's own [heads, V, K] layout (`kv_gdn_state`, = tcc's) |
+| `<dir>/state.jsonl` | one line a (chunk, rank) | `{"file", "chunk_start": P, "last_position": P + n_tok − 1, "n_tok", "rank", "world", "heads": [lo, hi], "layers": [...], "approximate": bool, "mode": "off|plumb|speed|quality", "applied_before_copy": false}` |
+
+28 MB a chunk a rank. **Needs a 4th op in kva.so** (KERNELS lane): no ABI call returns a KV-pool pointer
+(RADIANCE-FACTS §5), so the slot is copied into a plugin buffer by `kva_state_read` first; the capture refuses at
+declare, by name, when kva.so does not serve it. Proposed schema: params `M` (range n_seq) `n_head` `sd0` `sd1`;
+operands `state` in f32 RAD_KV [n_states, n_head, sd0, sd1] (strides off the operand), `state_idx` i32
+[n_seq, pitch] (column 0; a slot outside the pool reads zeros), `out` out f32 [n_seq, n_head, sd0, sd1] (dense).
+
 ## 8. Open / for other lanes
 
 - SIDECAR/orchestrator: add `-e RADIANCE_KVA_DECLARE=all` to every rad-convert run with the KVA home (§4).
