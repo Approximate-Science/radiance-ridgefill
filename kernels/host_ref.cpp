@@ -48,12 +48,13 @@ static int parse_mode(const char* s, const char* const* names, int n) {
 
 extern "C" int kva_rowsel_parse(const RadArgs* a, KvaRowsel* g) {
     const RadTensor* tok = rad_arg_in(a, RS_TOKENS);
+    const RadTensor* pos = rad_arg_in(a, RS_POS);
     const RadTensor* score = rad_arg_in(a, RS_SCORE);
     const RadTensor* rows = rad_arg_in(a, RS_ROWS);
     const RadTensor* mask = rad_arg_in(a, RS_MASK);
-    if (!tok || !score || !rows || !mask) return RAD_E_INVAL;
-    if (tok->dtype != RAD_I32 || score->dtype != RAD_F32 || rows->dtype != RAD_I32 ||
-        mask->dtype != RAD_I32) return RAD_E_DTYPE;
+    if (!tok || !pos || !score || !rows || !mask) return RAD_E_INVAL;
+    if (tok->dtype != RAD_I32 || pos->dtype != RAD_I32 || score->dtype != RAD_F32 ||
+        rows->dtype != RAD_I32 || mask->dtype != RAD_I32) return RAD_E_DTYPE;
     if (!dense(tok) || !dense(score) || !dense(rows) || !dense(mask)) return RAD_E_STRIDE;
     static const char* const modes[] = { "class", "random", "all" };
     long long cap = -1, seed = 0;
@@ -65,8 +66,14 @@ extern "C" int kva_rowsel_parse(const RadArgs* a, KvaRowsel* g) {
     g->vocab = rad_tensor_numel(score);
     /* `cap` is a CAPACITY: written by the operand's extent, bounded by the parameter. */
     g->cap = cap < rad_tensor_numel(rows) ? cap : rad_tensor_numel(rows);
-    if (cap < 0 || rad_tensor_numel(mask) < g->n) return RAD_E_SHAPE;
+    /* Positions: [n], or component-major [c, n] whose row 0 is the index (RadBatch::rope_pos's
+     * layout); token t is at t * the last axis' stride either way. */
+    if (pos->rank < 1 || pos->rank > 2) return RAD_E_SHAPE;
+    g->pos_stride = pos->stride[pos->rank - 1];
+    if (cap < 0 || rad_tensor_numel(mask) < g->n || pos->shape[pos->rank - 1] < g->n)
+        return RAD_E_SHAPE;
     g->tokens = (const int32_t*)tok->data;
+    g->positions = (const int32_t*)pos->data;
     g->score = (const float*)score->data;
     g->rows = (int32_t*)rows->data;
     g->mask = (int32_t*)mask->data;
@@ -168,7 +175,7 @@ extern "C" int kva_rowsel_host(const RadArgs* a, RadStream) {
         const int32_t id = g.tokens[i];
         const float s = id >= 0 && id < g.vocab ? g.score[id] : -INFINITY;
         key[(size_t)i] = std::isfinite(s) ? s : -INFINITY;
-        hash[(size_t)i] = kva_row_hash(g.seed, (uint32_t)i);
+        hash[(size_t)i] = kva_row_hash(g.seed, (uint32_t)g.positions[i * g.pos_stride]);
         matches += std::isfinite(s) ? 1 : 0;
     }
     const int64_t k = g.mode == KVA_MODE_ALL ? g.n : (int64_t)std::rint(g.share * (double)matches);

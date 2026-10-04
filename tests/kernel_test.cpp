@@ -371,17 +371,22 @@ static const int32_t kSentinel = 0x5A5A5A5A;
 
 struct RowselOut { int rc = 0; std::vector<int32_t> rows, mask; };
 
+/* Positions are first_pos, first_pos + 1, ... (one sequence's chunk). components > 1 lays them out
+ * component-major [components, n] like RadBatch::rope_pos, row 0 the index and the rest junk. */
 static RowselOut run_rowsel(const RadKernelInfo* row, const std::vector<int32_t>& ids,
                             const std::vector<float>& table, int64_t cap, double share,
-                            long long seed, const char* mode) {
+                            long long seed, const char* mode, int32_t first_pos = 0,
+                            int64_t components = 1) {
     const int64_t n = (int64_t)ids.size();
     Buf tok = make(RAD_I32, { n }), score = make(RAD_F32, { (int64_t)table.size() });
     Buf rows = make(RAD_I32, { cap }), mask = make(RAD_I32, { n });
+    Buf pos = components > 1 ? make(RAD_I32, { components, n }) : make(RAD_I32, { n });
+    for (int64_t i = 0; i < components * n; ++i) seti(pos, i, i < n ? first_pos + (int32_t)i : 7777 + (int32_t)i);
     for (int64_t i = 0; i < n; ++i) { seti(tok, i, ids[(size_t)i]); seti(mask, i, kSentinel); }
     for (size_t i = 0; i < table.size(); ++i) setf(score, (int64_t)i, table[i]);
     for (int64_t i = 0; i < cap; ++i) seti(rows, i, kSentinel);
     RowselOut o;
-    o.rc = run_group(row, { &tok, &score, &rows, &mask },
+    o.rc = run_group(row, { &tok, &pos, &score, &rows, &mask },
                      { pint("M", n), pint("cap", cap), pf64("share", share), pint("seed", seed),
                        pstr("mode", mode) });
     for (int64_t i = 0; i < cap; ++i) o.rows.push_back(geti(rows, i));
@@ -558,6 +563,30 @@ TEST(rowsel_random_and_all_semantics, "host") {
     CHECK(all_cut.mask == (std::vector<int32_t>{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1 }));
 }
 
+/* The random control keys on the ABSOLUTE position: two chunks of one prompt with the same tokens
+ * keep the same count but different offsets; the same seed and positions keep the same rows; the
+ * index row of a component-major [3, n] positions operand reads like [n]; class mode ignores it. */
+TEST(rowsel_random_keys_on_position, "host") {
+    const RadKernelInfo* row = find_row("kva_rowsel", RAD_DOMAIN_HOST);
+    REQUIRE(row != nullptr);
+    std::vector<float> table(64, -INFINITY);
+    for (int i = 0; i < 64; i += 2) table[(size_t)i] = (float)(i % 7);
+    std::vector<int32_t> ids(2048);
+    for (int i = 0; i < 2048; ++i) ids[(size_t)i] = (i * 37) % 64;   /* half the rows match */
+    const RowselOut first = run_rowsel(row, ids, table, 512, 0.25, 3, "random", 0);
+    const RowselOut second = run_rowsel(row, ids, table, 512, 0.25, 3, "random", 2048);
+    const RowselOut again = run_rowsel(row, ids, table, 512, 0.25, 3, "random", 2048);
+    const RowselOut planes = run_rowsel(row, ids, table, 512, 0.25, 3, "random", 2048, 3);
+    CHECK_EQ(kept_rows(first).size(), 256);    /* 1024 matches x 0.25, every chunk */
+    CHECK_EQ(kept_rows(second).size(), 256);
+    CHECK(kept_rows(first) != kept_rows(second));   /* not the same in-chunk offsets */
+    CHECK(second.rows == again.rows && second.mask == again.mask);
+    CHECK(planes.rows == second.rows);
+    CHECK(rowsel_consistent(first) && rowsel_consistent(second));
+    CHECK(run_rowsel(row, ids, table, 512, 0.25, 3, "class", 0).rows ==
+          run_rowsel(row, ids, table, 512, 0.25, 3, "class", 2048).rows);
+}
+
 /* Refusals by name; the parse is shared with the device row. */
 TEST(refuses_bad_operands, "both") {
     if (!group_runnable()) return;
@@ -570,11 +599,15 @@ TEST(refuses_bad_operands, "both") {
     CHECK_EQ(run_rowsel(rs, { 0, 1 }, table, 2, 1.5, 0, "class").rc, RAD_E_INVAL);
     Buf tok = make(RAD_I32, { 4 }), score16 = make(RAD_BF16, { 2 }), rows = make(RAD_I32, { 2 });
     Buf mask = make(RAD_I32, { 4 }), short_mask = make(RAD_I32, { 3 }), score = make(RAD_F32, { 2 });
+    Buf pos = make(RAD_I32, { 4 }), short_pos = make(RAD_I32, { 3 }), pos16 = make(RAD_BF16, { 4 });
     const std::vector<RadParam> p = { pint("M", 4), pint("cap", 2), pf64("share", 0.5),
                                       pint("seed", 0), pstr("mode", "class") };
-    CHECK_EQ(run_group(rs, { &tok, &score16, &rows, &mask }, p), RAD_E_DTYPE);
-    CHECK_EQ(run_group(rs, { &tok, &score, nullptr, &mask }, p), RAD_E_INVAL);
-    CHECK_EQ(run_group(rs, { &tok, &score, &rows, &short_mask }, p), RAD_E_SHAPE);
+    CHECK_EQ(run_group(rs, { &tok, &pos, &score16, &rows, &mask }, p), RAD_E_DTYPE);
+    CHECK_EQ(run_group(rs, { &tok, &pos16, &score, &rows, &mask }, p), RAD_E_DTYPE);
+    CHECK_EQ(run_group(rs, { &tok, &pos, &score, nullptr, &mask }, p), RAD_E_INVAL);
+    CHECK_EQ(run_group(rs, { &tok, nullptr, &score, &rows, &mask }, p), RAD_E_INVAL);
+    CHECK_EQ(run_group(rs, { &tok, &pos, &score, &rows, &short_mask }, p), RAD_E_SHAPE);
+    CHECK_EQ(run_group(rs, { &tok, &short_pos, &score, &rows, &mask }, p), RAD_E_SHAPE);
     CHECK_EQ(run_group(rh, {}, { pint("M", 8), pint("n_head", 4) }), RAD_E_INVAL);
     CorrectRun k = correct_operands(3, 2, 4, 4, { 0 }, 0);
     CHECK_EQ(run_correct(sc, k, "redo", 1.0, false), RAD_E_INVAL);
@@ -906,8 +939,9 @@ TEST(rowsel_device_matches_host, "gpu") {
         for (const char* mode : modes)
             for (int64_t cap : { (int64_t)3, (int64_t)512, n })
                 for (double share : { 0.25, 1.0 }) {
-                    const RowselOut h = run_rowsel(host, ids, table, cap, share, 12345, mode);
-                    const RowselOut d = run_rowsel(dev, ids, table, cap, share, 12345, mode);
+                    const int64_t comps = cases_run % 2 ? 3 : 1;   /* every other case [3, n] */
+                    const RowselOut h = run_rowsel(host, ids, table, cap, share, 12345, mode, 4096, comps);
+                    const RowselOut d = run_rowsel(dev, ids, table, cap, share, 12345, mode, 4096, comps);
                     CHECK_EQ(d.rc, RAD_OK);
                     CHECK(d.rows == h.rows && d.mask == h.mask);
                     CHECK(rowsel_consistent(d));
@@ -916,9 +950,11 @@ TEST(rowsel_device_matches_host, "gpu") {
     }
     std::vector<int32_t> ids(2048);
     for (int32_t& id : ids) id = (int32_t)r.below(1000);
-    const RowselOut once = run_rowsel(dev, ids, table, 512, 0.25, 99, "random");
-    const RowselOut again = run_rowsel(dev, ids, table, 512, 0.25, 99, "random");
-    CHECK(once.rows == again.rows && once.mask == again.mask);   /* deterministic for a seed */
+    const RowselOut once = run_rowsel(dev, ids, table, 512, 0.25, 99, "random", 2048);
+    const RowselOut again = run_rowsel(dev, ids, table, 512, 0.25, 99, "random", 2048);
+    const RowselOut next = run_rowsel(dev, ids, table, 512, 0.25, 99, "random", 4096);
+    CHECK(once.rows == again.rows && once.mask == again.mask);   /* deterministic: seed + positions */
+    CHECK(kept_rows(next).size() == kept_rows(once).size() && kept_rows(next) != kept_rows(once));
     std::fprintf(stderr, "  %d configurations: device rows_idx and mask == host\n", cases_run);
 }
 

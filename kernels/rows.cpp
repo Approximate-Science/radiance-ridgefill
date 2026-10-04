@@ -34,8 +34,8 @@
 
 static const RadParamSpec pRowsel[] = { P_INT("M"), P_CAP("cap"), P_F64("share"), P_INT("seed"),
                                         P_STR("mode") };
-static const RadOperandSpec oRowsel[] = { OPD("token_ids"), WGT("score"), OUT("rows_idx"),
-                                          OUT("mask") };
+static const RadOperandSpec oRowsel[] = { OPD("token_ids"), OPD("positions"), WGT("score"),
+                                          OUT("rows_idx"), OUT("mask") };
 
 static const RadParamSpec pRho[] = { P_INT("M"), P_INT("n_head") };
 static const RadOperandSpec oRho[] = { OPD("a"), OPD("mask"), WGT("A_log"), WGT("dt_bias"),
@@ -52,10 +52,12 @@ static const RadOpSchema kSchemas[] = {
   "A row matches when score[token_ids[i]] is finite (an id outside the table does not match). "
   "k = rint(share * matches), half to even (Python's round). mode class: row i is kept iff it "
   "matches and fewer than k matching rows rank before it by (score descending, row ascending); "
-  "mode random: the same k over ALL rows, ranked by a 32-bit hash of (seed, row) ascending; mode "
+  "mode random: the same k over ALL rows, ranked by a 32-bit hash of (seed, absolute position) ascending, ties by row; mode "
   "all: k = n, ranked by row. At most min(cap, rows_idx extent) rows are kept (the best). "
   "rows_idx = kept rows ascending, -1 padded; mask[i] = 1 for every row NOT kept (approximated). "
-  "i32 ids, rows and mask; f32 score table." },
+  "`positions` is the batch's token index in its sequence (RadBatch::positions), [n] or "
+  "component-major [c, n] (row 0 is read, at the operand's strides); only random mode reads it. "
+  "i32 ids, positions, rows and mask; f32 score table." },
 { "kva_rho_update", ARR(pRho), ARR(oRho),
   "The decayed share of approximated rows in each GDN head's state, carried across one "
   "sequence's chunks (KVA quality mode). Per head h, sequentially over the n rows of `a` "
@@ -128,6 +130,7 @@ static int shape_rowsel(const RadParam* p, int n_p, int operand, RadOpdDesc* out
     const int64_t vocab = 4 * n;   /* ids repeat a little, so ties and repeated tokens occur */
     return pick(out, operand, {
         opd_idx({ n }, vocab),
+        opd_idx({ n }, 64 * n, RAD_OPD_F_IDX_UNIQUE),   /* distinct, as a sequence's positions are */
         opd(RAD_F32, { vocab }),
         opd_idx({ cap }, n),
         opd_idx({ n }, 2),

@@ -35,7 +35,7 @@ enum { KVA_ROWSEL_MAX_ROWS = 8192, KVA_ROWSEL_THREADS = 256 };
 enum { KVA_MODE_CLASS = 0, KVA_MODE_RANDOM = 1, KVA_MODE_ALL = 2 };
 
 /* Operand positions, in schema order (rows.cpp holds the schemas). */
-enum { RS_TOKENS = 0, RS_SCORE, RS_ROWS, RS_MASK };
+enum { RS_TOKENS = 0, RS_POS, RS_SCORE, RS_ROWS, RS_MASK };
 enum { RH_A = 0, RH_MASK, RH_ALOG, RH_DTBIAS, RH_ND, RH_SIDX };
 enum { SC_STATE = 0, SC_APPLIED, SC_SIDX, SC_C, SC_ND };
 
@@ -50,12 +50,14 @@ KVA_HD inline uint32_t kva_mix32(uint32_t x) {
     return x;
 }
 
-/* The random selector's rank key for row `row` of a chunk under `seed`: the k rows with the
- * smallest key are kept, ties by lower row. */
-KVA_HD inline uint32_t kva_row_hash(long long seed, uint32_t row) {
+/* The random selector's rank key for the token at absolute prompt position `position` under
+ * `seed`: the k rows with the smallest key are kept, ties by lower row. Keyed on the ABSOLUTE
+ * position, not the row in the chunk, so successive chunks of one prompt draw different offsets
+ * and the control is not periodic in the chunk length. */
+KVA_HD inline uint32_t kva_row_hash(long long seed, uint32_t position) {
     const unsigned long long s = (unsigned long long)seed;
     const uint32_t mixed_seed = kva_mix32((uint32_t)s ^ kva_mix32((uint32_t)(s >> 32)));
-    return kva_mix32(mixed_seed ^ (row * 0x9E3779B9U + 0x7F4A7C15U));
+    return kva_mix32(mixed_seed ^ (position * 0x9E3779B9U + 0x7F4A7C15U));
 }
 
 /* rho = clamp(N / D, 0, 1), and 1 while nothing has been accumulated (D == 0): the correction is
@@ -89,6 +91,7 @@ KVA_HD inline float kva_bf16_to_f32(uint16_t h) {
 
 typedef struct KvaRowsel {
     const int32_t* tokens;  int64_t n;       /* [n] token ids of the chunk */
+    const int32_t* positions; int64_t pos_stride;  /* token t's absolute position: positions[t * pos_stride] */
     const float*   score;   int64_t vocab;   /* [vocab] per-id score; non-finite = not a match */
     int32_t*       rows;    int64_t cap;     /* [cap] selected rows, ascending, -1 padded */
     int32_t*       mask;                     /* [n] 1 = approximated (not selected) */

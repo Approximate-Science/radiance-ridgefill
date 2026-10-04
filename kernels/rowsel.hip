@@ -48,7 +48,8 @@ __global__ void __launch_bounds__(KVA_ROWSEL_THREADS) kva_rowsel_kernel(KvaRowse
         const float s = id >= 0 && id < g.vocab ? g.score[id] : -INFINITY;
         matches += isfinite(s) ? 1 : 0;
         if (g.mode == KVA_MODE_CLASS) key.score[i] = isfinite(s) ? s : -INFINITY;
-        if (g.mode == KVA_MODE_RANDOM) key.hash[i] = kva_row_hash(g.seed, (uint32_t)i);
+        if (g.mode == KVA_MODE_RANDOM)
+            key.hash[i] = kva_row_hash(g.seed, (uint32_t)g.positions[(int64_t)i * g.pos_stride]);
     }
     count[t] = matches;
     __syncthreads();

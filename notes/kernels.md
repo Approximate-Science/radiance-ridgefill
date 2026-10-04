@@ -11,7 +11,7 @@ do not matter to the engine, but every listed param is REQUIRED (except where no
 
 | op | params | operands (in order) |
 |---|---|---|
-| `kva_rowsel` | `M` (RAD_RANGE, rows of the chunk) · `cap` (int, CAPACITY role) · `share` (f64, 0..1) · `seed` (int) · `mode` (str: `class`/`random`/`all`) | 0 `token_ids` i32 [n] (praw of `batch->token_ids`, n = n_tok) · 1 `score` **weight** f32 [vocab] (`kva.rowsel.score`) · 2 `rows_idx` out i32 [cap] · 3 `mask` out i32 [n] |
+| `kva_rowsel` | `M` (RAD_RANGE, rows of the chunk) · `cap` (int, CAPACITY role) · `share` (f64, 0..1) · `seed` (int) · `mode` (str: `class`/`random`/`all`) | 0 `token_ids` i32 [n] (`praw(batch->token_ids, RAD_I32, n)`, n = n_tok) · 1 `positions` i32 [n] (`praw(batch->positions, RAD_I32, n)`; a component-major [c, n] operand is also accepted, row 0 read at its strides) · 2 `score` **weight** f32 [vocab] (`kva.rowsel.score`) · 3 `rows_idx` out i32 [cap] · 4 `mask` out i32 [n] |
 | `kva_rho_update` | `M` (RAD_RANGE, rows) · `n_head` (int, this rank's GDN value heads) | 0 `a` bf16 or f32 [n, n_head], read at its own row AND column strides (the in-tree layout puts the a columns first: `bcol(w.ab, 0, H, n)`, radiance `arch/common/rad_block_gdn_fp8.h:481`) · 1 `mask` i32 [n] (kva_rowsel's mask) · 2 `A_log` **weight** f32 [n_head] · 3 `dt_bias` **weight** f32 [n_head] · 4 `ND` inout f32, the LINEAR group `kv_kva_rho` layer cache `[n_states, n_head, 1, 2]` (or any trailing dims whose product is 2) · 5 `state_idx` i32 [1, pitch] (`praw2(st_idx, RAD_I32, 1, st_w)`; exactly ONE sequence) |
 | `kva_state_correct` | `M` (RAD_RANGE, n_seq) · `mode` (str: `undo`/`apply`) · `alpha` (f64; read in apply, ignored in undo, still required) · `n_head` · `sd0` · `sd1` (ints: GDN state per head is sd0×sd1) | 0 `state` inout f32 `RAD_KV(kv_gdn_state, L)` [n_states, n_head, sd0, sd1] (strides read off the operand) · 1 `applied` inout f32 `RAD_KV(kv_kva_applied, L)` [n_states, n_head, 1, 1] · 2 `state_idx` i32 [n_seq, pitch] (column 0 used) · 3 `C` **weight** f32 [n_head, sd0, sd1] (`kva.st.L`) · 4 `ND`? f32 (as above; absent in speed mode → rho = 1) |
 
@@ -20,7 +20,10 @@ Semantics (also in each schema's doc string, `rad-schemas kva.so`):
 - `kva_rowsel`: a row MATCHES when `score[token_ids[i]]` is finite (an id outside `[0, vocab)` does not
   match). `k = rint(share × matches)` — round half to EVEN, exactly Python's `round()` in `fnlev/rules.py`.
   `class`: row kept iff it matches and fewer than k matching rows precede it by (score desc, row asc).
-  `random`: same k, over ALL n rows, ranked by `kva_row_hash(seed, row)` ascending (ties by row).
+  `random`: same k, over ALL n rows, ranked by `kva_row_hash(seed, absolute position)` ascending (ties by
+  row), the position read from `positions`. Pass `batch->positions` (the token's index in its sequence,
+  `abi/rad_runtime.h:51`), NOT `batch->rope_pos`: rope_pos is the [3, n] rotary position, which runs behind the
+  index after an image (`abi/rad_runtime.h:170-185`). Only random mode reads `positions`.
   `all`: k = n, ranked by row. At most `min(k, cap, rows_idx extent)` rows are kept — the best ones
   (the truncation case). `rows_idx` = kept rows ascending, `-1` padded to its extent; `mask[i] = 1` for
   rows NOT kept (approximated), 0 for kept. Rows are CHUNK-relative (0..n-1).
@@ -196,8 +199,9 @@ Numbers (all from the outputs above):
   pitch 48, exact shares 0.056 / 0.5 / 0): max |Δrho| 2.68e-7, max rel ΔN/ΔD 7.67e-7. rho == 1 to the bit when no
   row is exact (host and device; N and D take identical operations). Raw N/D ∈ [0, 1] over 20 random cases ×
   3 chunks (each step is monotone and mask ≤ 1, so N ≤ D holds exactly, not just within tolerance).
-- R21: `grep -rnE 'hipMalloc|getenv|hipDeviceSynchronize|hipStreamSynchronize' kernels/` empty. NOTE: the
-  REQUIREMENTS command as written (`grep -nE … kernels/`, no `-r`) exits 2 "Is a directory"; it needs `-r`.
+- R21: `grep -rnE 'hipMalloc|getenv|hipDeviceSynchronize|hipStreamSynchronize' kernels/` empty. The
+  REQUIREMENTS command was `grep -nE … kernels/` (no `-r`: exits 2 "Is a directory"); fixed to `-rnE` in
+  REQUIREMENTS.md (commit 03702f0).
 - R27 grep over kernels/, tests/kernel_test.cpp, tests/rho_ref.py: empty. R28 grep `\b(48|24|2560|10240|128|2048)\b`
   over kernels/*: empty (no model number in the kernels; all extents come from operands/params).
 
@@ -245,17 +249,19 @@ segment 0, `uses_dynamic_stack: false`, 0 VGPR/SGPR spills, no hostcall buffer; 
   parameter. Making it optional would let an apply op resolve without one.
 - Nothing is added when the scale is 0 (both modes). Cost: one compare; buys R22's byte identity at alpha 0
   (x + 0 would turn a −0.0 state element into +0.0).
-- Undo is `state − s·C`, not a restore of a saved copy (D7). It is exact only up to one rounding per element per
+- Undo is `state − s·C`, not a restore of a saved copy (D7; accepted by the orchestrator 2026-10-04). It is exact only up to one rounding per element per
   apply/undo pair (≤ 1 ulp of the state, derived, not measured), accumulating at most once per approximate chunk.
   tcc restored a saved copy; matching it bit for bit would need a second LINEAR group the size of the GDN state
   (24 heads × 128×128 f32 = 1.5 MiB per late GDN layer per sequence per rank, ×18 layers = 27 MiB/seq/rank) and a
   copy op. Not done; negligible next to the approximation it corrects.
 - `kva_rho_update` takes exactly one sequence (state_idx rows == 1, else RAD_E_SHAPE): the op is issued only on
   single-sequence approximate steps (PLAN §3). A multi-sequence form would need cu_seqlens.
-- Random mode's "position" is the chunk-relative row (the schema has no positions operand), so with one seed every
-  chunk keeps the same in-chunk offsets. It is still count-matched and blind to content, so it is a valid
-  control in expectation, but its rows are periodic in the chunk. Per-chunk variation would need a `positions`
-  operand (a schema change). Flagged, not changed.
+- Random mode keys on the ABSOLUTE position (orchestrator decision, 2026-10-04): the first version hashed the
+  chunk-relative row, so one seed kept the same in-chunk offsets in every chunk — periodic in the chunk, rejected
+  as the control. Fix: a `positions` operand right after `token_ids` (schema change, operand order above) and
+  `kva_row_hash(seed, positions[t])`. Test `rowsel_random_keys_on_position`: two chunks of the same tokens at
+  positions 0.. and 2048.. keep exactly k = 256 rows each at different offsets; same seed + positions → same
+  rows; [3, n] positions read like [n]; class mode unaffected. Mutant M6 (hash the row again) fails it.
 - The truncation count (k − cap) is not an output (not in the schema). With `cap = ceil(share × max_tok / 64) × 64`
   and n ≤ max_tok, k = rint(share × matches) ≤ cap always, so it can only happen when `kva.rowsel.cap` is set
   below that; the debug dump HANDOVER 5.1 mentions has nothing to report at the default.
@@ -265,3 +271,12 @@ segment 0, `uses_dynamic_stack: false`, 0 VGPR/SGPR spills, no hostcall buffer; 
   oracle rounds `x + s·c` twice like the device does; R20's 0-byte result depends on it.
 - `tests/kernel_test.cpp` is ~1000 lines, over the ~400 guideline: one binary with two ctest entries (host / gpu)
   as the brief asks; it splits cleanly into a host file and a gpu file if a reviewer wants it.
+
+### `positions` operand for kva_rowsel (orchestrator decision, 2026-10-04)
+Host-only build: host group 462 checks, all cases ok (new `rowsel_random_keys_on_position`; quick9 9/9 unchanged:
+class mode does not read positions). Mutant M6 (hash the chunk row instead of the position) → FAIL
+rowsel_random_keys_on_position. HIP build: compiles, `ctest -LE gpu` passes. **Device group NOT re-run for this
+change**: the GPU lock was held by the orchestrator's reservation (`flock … sleep 86400`, 17:40) when I got
+there; I did not wait on it or break it. The device row's change is one line (the hash key read through
+`positions`, same as the host row); `rowsel_device_matches_host` now passes positions at 4096.. and every other
+case as [3, n], so the next gpu run checks it. Run: `ctest --test-dir build-kernels-hip -L gpu` on the card.
