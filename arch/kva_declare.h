@@ -46,6 +46,11 @@ struct Kva {
     rad_op  op_gather_h = 0, op_scatter_x = 0, op_gather_y = 0;
     std::vector<rad_op> op_rho;               /* [n_layer]: late delta-net layers, have_st only */
     std::string dump_dir;                     /* RADIANCE_KVA_DUMP, empty when unset */
+    /* Stage 6 captures (debug; notes/arch.md "Capture"): RADIANCE_KVA_CAPTURE and
+     * RADIANCE_KVA_CAPTURE_STATE, and the copy op the state capture needs. */
+    std::string capture_dir, state_dir;
+    rad_buf     b_state = 0;
+    rad_op      op_state_read = 0;
 };
 
 static Kva g_kva[MAX_RANKS];
@@ -373,6 +378,47 @@ static int decl_quality(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBu
         return RAD_E_UNSUPPORTED;
     }
     if (k.have_st && !(k.kv_rho = decl_rho(b, m, k))) return RAD_E_INVAL;
+    return RAD_OK;
+}
+
+/* WHERE THE LATE LAYERS START FOR A CAPTURE, which in `off` mode nothing else has asked: the lowest
+ * projector layer the container holds -- what every other mode calls S -- else its `kva.split`
+ * metadata. Probing adds only name maps, which are inert. */
+static int capture_split(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadModelMeta* meta, Kva& k) {
+    for (int64_t l = 0; l < m.g.n_layer && k.split < 0; ++l) {
+        char name[96];
+        std::snprintf(name, sizeof name, "kva.proj.%lld.weight", (long long)l);
+        if (map_copy(b, k.nm.f("%s", name), k.nm.ckpt("%s", name)) < 0) return RAD_E_INVAL;
+        RadEncoding e{};
+        if (weight_enc(b, name, &e)) k.split = l;
+    }
+    if (k.split < 0) k.split = rad_meta_geti(meta, "kva.split", -1);
+    if (k.split <= m.ple_layer || k.split >= m.g.n_layer) {
+        std::fprintf(stderr, "radiance: qwen4exp_kva: a capture needs the split layer S: the container "
+                             "holds no kva.proj.* and its kva.split is %lld\n", (long long)k.split);
+        return RAD_E_UNSUPPORTED;
+    }
+    return RAD_OK;
+}
+
+/* THE STATE CAPTURE'S COPY. No ABI call returns a KV-pool pointer (RADIANCE-FACTS §5), so a late
+ * layer's slot is copied by kva.so's kva_state_read into this rank's [1, heads, V, K] buffer and
+ * read from there. Declared only when RADIANCE_KVA_CAPTURE_STATE is set. */
+static int decl_state_read(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva& k) {
+    const GdnFP8::Config& g = m.gcfg;
+    k.b_state = decl_b(b, k.nm.f("kva_state_copy"), RAD_F32, {1, g.n_head_v, g.head_v, g.head_k});
+    if (!k.b_state) return RAD_E_INVAL;
+    RAD_ARCH_TRY(rad_buf_concurrent(b, k.b_state));
+    k.op_state_read = rw(b, RAD_OP(b, "kva_state_read",
+                                RAD_PARAMS(RAD_RANGE("M", 1, 1), RAD_INT("n_head", g.n_head_v),
+                                           RAD_INT("sd0", g.head_v), RAD_INT("sd1", g.head_k)),
+                                RAD_NOWEIGHTS), {}, {k.b_state});
+    if (!k.op_state_read && !ctx->shape_probe) {
+        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE_STATE copies the delta-net "
+                             "state with kva_state_read, and no kernel library serves it -- kva.so is "
+                             "missing or too old\n");
+        return RAD_E_UNSUPPORTED;
+    }
     return RAD_OK;
 }
 

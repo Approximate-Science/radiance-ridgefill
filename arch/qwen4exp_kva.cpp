@@ -52,9 +52,20 @@ static int declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* c
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[ctx->rank];
     if (m.layers.empty()) return RAD_E_STATE;
     RAD_ARCH_TRY(read_config(meta, m.g.max_tok, &k.cfg));
-    if (!k.cfg.declare_all && k.cfg.mode == MODE_OFF) return RAD_OK;
-    const char* dump = std::getenv("RADIANCE_KVA_DUMP");
-    k.dump_dir = dump ? dump : "";
+    for (auto [env, dir] : { std::pair<const char*, std::string*>{"RADIANCE_KVA_DUMP", &k.dump_dir},
+                             {"RADIANCE_KVA_CAPTURE", &k.capture_dir},
+                             {"RADIANCE_KVA_CAPTURE_STATE", &k.state_dir} }) {
+        const char* v = std::getenv(env);
+        *dir = v ? v : "";
+    }
+    /* The projector's fitting data comes from EXACT runs only (HANDOVER Stage 6.1). */
+    if (!k.capture_dir.empty() && k.cfg.mode != MODE_OFF) {
+        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE records exact runs and the "
+                             "mode is %s; run it with RADIANCE_KVA=off\n", kModeNames[k.cfg.mode]);
+        return RAD_E_INVAL;
+    }
+    const bool capturing = !k.capture_dir.empty() || !k.state_dir.empty();
+    if (!k.cfg.declare_all && k.cfg.mode == MODE_OFF && !capturing) return RAD_OK;
 
     k.nm = Names(ctx->scope ? ctx->scope : "");
     k.proj_w.assign(m.layers.size(), 0);
@@ -63,7 +74,10 @@ static int declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* c
     k.op_undo.assign(m.layers.size(), 0);
     k.op_apply.assign(m.layers.size(), 0);
     if (k.cfg.declare_all) return decl_every_copy(b, m, k);
-    return decl_selected(b, m, ctx, k);
+    if (k.cfg.mode == MODE_OFF) RAD_ARCH_TRY(capture_split(b, m, meta, k));
+    else                        RAD_ARCH_TRY(decl_selected(b, m, ctx, k));
+    if (!k.state_dir.empty()) RAD_ARCH_TRY(decl_state_read(b, m, ctx, k));
+    return RAD_OK;
 }
 
 /* ================================================================== step */
@@ -152,6 +166,25 @@ static RadOperand slots(const RadBatch* batch, rad_kvgroup g) {
     return praw2(kb ? kb->state_index : nullptr, RAD_I32, batch->n_seq, pitch);
 }
 
+/* RADIANCE_KVA_CAPTURE_STATE: layer li's state slot of this step's one sequence, copied by
+ * kva_state_read into the plugin's buffer and from there to the host. Debug: synchronises. */
+static void read_state(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li,
+                       const RadBatch* batch, StateDump* sd) {
+    if (!sd || !k.op_state_read) return;
+    const GdnFP8::Config& g = m.gcfg;
+    const int64_t n = g.n_head_v * g.head_v * g.head_k;
+    RAD_ISSUE_N(c, k.op_state_read, 1, kv_cache(m.kv_state, (int)li), slots(batch, m.kv_state),
+                brows(k.b_state, 1));
+    const size_t at = sd->data.size();
+    sd->data.resize(at + (size_t)n);
+    if (!dump_read(c, sd->data.data() + at, rad_buf_ptr(c, k.b_state), n * 4)) {
+        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE_STATE: device read failed\n");
+        sd->data.resize(at);
+        return;
+    }
+    sd->layers.push_back((int)li);
+}
+
 /* kva_state_correct's operands (kernels/rows.cpp): every KV operand followed by ITS OWN group's
  * slot rows, so no group has to share another's slot numbers. ND and its index come in quality
  * mode only (Stage 5); speed passes neither and rho is 1. */
@@ -185,7 +218,7 @@ static void quantise(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int6
 /* A filled late layer (speed): the projection and its codes, then only the cache-writing pieces.
  * No connection read or write and no MoE: `b_h` stays the layer-S stream for every projector. */
 static void fill_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int64_t li,
-                       const RadBatch* batch) {
+                       const RadBatch* batch, StateDump* sd) {
     const qwen4exp_fp8::Layer& l = m.layers[(size_t)li];
     const int64_t T = batch->n_tok;
     project(c, k, m, li, T);
@@ -197,6 +230,7 @@ static void fill_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int64_t 
         gdn_project(c, l.gdn, T);
         correct(c, k, m, li, k.op_undo[(size_t)li], batch, false);
         gdn_scan(c, l.gdn, batch);
+        read_state(c, k, m, li, batch, sd);   /* before the apply: S_pred, uncorrected */
         correct(c, k, m, li, k.op_apply[(size_t)li], batch, false);
     }
 }
@@ -221,7 +255,7 @@ static void decay_sums(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, in
  * on the cap compacted rows alone. The block decides its all-reduce with T = n_tok, so the write
  * behind it asks the same T; the feed-forward pass and its write both decide with T = cap. */
 static void quality_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int64_t li,
-                          const RadBatch* batch) {
+                          const RadBatch* batch, StateDump* sd) {
     const qwen4exp_fp8::Layer& l = m.layers[(size_t)li];
     const HyperConn& mix = l.hc_mix;
     const int64_t T = batch->n_tok, cap = k.cfg.cap;
@@ -239,6 +273,7 @@ static void quality_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int64
         gdn_project(c, l.gdn, T);
         correct(c, k, m, li, k.op_undo[(size_t)li], batch, false);
         gdn_scan(c, l.gdn, batch);
+        read_state(c, k, m, li, batch, sd);
         decay_sums(c, k, m, li, batch);
         correct(c, k, m, li, k.op_apply[(size_t)li], batch, k.kv_rho != 0);
         gdn_tail(c, l.gdn, T);
@@ -273,7 +308,7 @@ static void epilogue(RadCtx* c, qwen4exp_fp8::Model& m, const RadBatch* batch) {
                 brows(m.b_logits, batch->n_out));
 }
 
-static void approximate_step(RadCtx* c, const Kva& k, const RadBatch* batch) {
+static void approximate_step(RadCtx* c, const Kva& k, const RadBatch* batch, StateDump* sd) {
     const int rank = rad_rank(c);
     qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
     prologue(c, m, batch);
@@ -289,9 +324,9 @@ static void approximate_step(RadCtx* c, const Kva& k, const RadBatch* batch) {
         if (k.cfg.mode == MODE_PLUMB)
             layer(c, m, li, batch, [&](const qwen4exp_fp8::Layer& l) { plumb_block(c, l, batch); });
         else if (k.cfg.mode == MODE_QUALITY)
-            quality_layer(c, k, m, li, batch);
+            quality_layer(c, k, m, li, batch, sd);
         else
-            fill_layer(c, k, m, li, batch);
+            fill_layer(c, k, m, li, batch, sd);
     }
     epilogue(c, m, batch);
     /* ONE LINE AN APPROXIMATE STEP, rank 0: scripts/grade.sh counts them against the bulk-chunk
@@ -302,10 +337,61 @@ static void approximate_step(RadCtx* c, const Kva& k, const RadBatch* batch) {
                      (long long)batch->n_ahead);
 }
 
+/* ONE SEQUENCE'S PREFILL CHUNK, whatever is ahead of it: what the captures record. */
+static bool single_prefill(const RadBatch* b) {
+    int64_t n_seq_decode = 0, n_tok_decode = 0;
+    batch_split(b, &n_seq_decode, &n_tok_decode);
+    return !b->enc && b->draft_pass == 0 && n_seq_decode == 0 && b->n_seq == 1 && b->n_spec == 0;
+}
+
+/* RADIANCE_KVA_CAPTURE (mode off, rank 0): the stock step, issued through the same pieces as
+ * every other path here (the static test holds them to the in-tree step), with host copies of the
+ * stream entering layer S and of every late layer's block input `x`, read right after its
+ * connection read and before the block writes its output over it. */
+static void capture_step(RadCtx* c, const Kva& k, const RadBatch* batch) {
+    qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
+    const int64_t T = batch->n_tok, n = m.g.n_embd;
+    Capture cap;
+    const bool ok = capture_begin(c, batch, k.capture_dir, &cap);
+    if (!ok) std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE: device read failed\n");
+    prologue(c, m, batch);
+    for (int64_t li = 0; li < m.g.n_layer; ++li) {
+        if (ok && li == k.split) capture_rows(c, cap, "boundary", m.b_h, T, m.hccfg.hc * n);
+        layer(c, m, li, batch, [&](const qwen4exp_fp8::Layer& l) {
+            if (ok && li >= k.split) {
+                capture_rows(c, cap, "bi." + std::to_string(li), m.a_x.x, T, n);
+                cap.layers.push_back((int)li);
+            }
+            stock_block(c, l, batch);
+        });
+    }
+    epilogue(c, m, batch);
+    if (ok) capture_end(cap, k.split, n, m.hccfg.hc);
+}
+
+/* RADIANCE_KVA_CAPTURE_STATE: whatever late delta-net layer the step did not already copy (an
+ * exact or plumb chunk copies here, after the step; nothing touches a layer's state after its
+ * scan), then one file for this (chunk, rank). */
+static void finish_state(RadCtx* c, const Kva& k, const RadBatch* batch, StateDump& sd, bool approx) {
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
+    for (int64_t li = k.split; li < m.g.n_layer; ++li)
+        if (!m.layers[(size_t)li].full &&
+            std::find(sd.layers.begin(), sd.layers.end(), (int)li) == sd.layers.end())
+            read_state(c, k, m, li, batch, &sd);
+    state_end(c, k.state_dir, batch, sd, m.gcfg.n_head_v, m.gcfg.head_v, m.gcfg.head_k, rad_rank(c),
+              m.g.world, approx, kModeNames[k.cfg.mode]);
+}
+
 static void step(RadCtx* c, const RadBatch* batch) {
     const Kva& k = g_kva[rad_rank(c)];
-    if (approximate(k, batch)) approximate_step(c, k, batch);
-    else                       qwen4exp_fp8::step(c, batch);
+    const bool approx = approximate(k, batch);
+    const bool capture = !k.capture_dir.empty() && rad_rank(c) == 0 && single_prefill(batch);
+    const bool states = !k.state_dir.empty() && single_prefill(batch);
+    StateDump sd;
+    if (approx)       approximate_step(c, k, batch, states ? &sd : nullptr);
+    else if (capture) capture_step(c, k, batch);
+    else              qwen4exp_fp8::step(c, batch);
+    if (states) finish_state(c, k, batch, sd, approx);
 }
 
 /* The in-tree probe's answers hold here: the draft depth is the model's, and this declare writes

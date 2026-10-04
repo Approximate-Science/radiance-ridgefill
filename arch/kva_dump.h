@@ -1,11 +1,17 @@
-/* kva_dump.h -- RADIANCE_KVA_DUMP=<dir>: debug copies of what a filled chunk computed, to the host.
+/* kva_dump.h -- the debug copies to the host: RADIANCE_KVA_DUMP (what a filled chunk computed) and
+ * the Stage 6 captures RADIANCE_KVA_CAPTURE / RADIANCE_KVA_CAPTURE_STATE (the refit's data).
+ * notes/arch.md "Capture" is the file layout the fitting side reads; this file writes exactly it.
  *
  * DEBUG ONLY, AND IT COSTS: every record SYNCHRONISES the stream mid-step and copies device memory to
- * pageable host memory. The directory is read at declare; with it unset none of this runs, and no
- * measured run sets it. Written by rank 0 only (the boundary stream and the selected rows are the
- * same on every rank). A recorded pass replayed later does not call step(), so a dump run should
- * use prompts whose chunks do not repeat a pass key (every prefill chunk of a fresh prompt is issued
- * live: radiance core/runtime/ctx.cpp:1305-1316).
+ * pageable host memory. The directories are read at declare; with them unset none of this runs, and
+ * no measured run sets them. The issue sequence is never changed except by the state capture's own
+ * kva_state_read copies (no ABI call returns a KV-pool pointer).
+ *
+ * ONLY A PASS ISSUED LIVE IS RECORDED. A pass the engine replays from its recording does not call
+ * step() (radiance core/runtime/ctx.cpp:1258-1278): a prefill pass is recorded the second time its
+ * key is seen and played after that, unless the expert stager arms it live. Every record therefore
+ * carries the chunk's identity, and a reader checks the count; a run that comes up short is rerun
+ * with --profile-ops, which turns recording off (ctx.cpp:120).
  *
  *   <dir>/boundary.p<P>.npy  f32 [n_tok, hc*n_embd]: the residual stream entering layer S of the
  *                            approximate chunk whose first row is at absolute position P (R17)
@@ -16,9 +22,11 @@
 #ifndef QWEN4EXP_KVA_DUMP_H
 #define QWEN4EXP_KVA_DUMP_H
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <initializer_list>
 #include <vector>
 
 namespace qwen4exp_kva {
@@ -55,28 +63,34 @@ inline void dump_line(const std::string& path, const std::string& line) {
     }
 }
 
-/* A bf16 [rows, cols] plane as a little-endian f32 .npy, which numpy loads with no help. */
-inline bool dump_npy_f32(const std::string& path, const std::vector<uint16_t>& bf16, int64_t rows,
-                         int64_t cols) {
+/* One .npy: `descr` is numpy's ("<u2" for bf16 bits, "<i4", "<f4"), the data row-major. */
+inline bool dump_npy(const std::string& path, const char* descr, std::initializer_list<int64_t> shape,
+                     const void* data, int64_t bytes) {
     FILE* f = std::fopen(path.c_str(), "wb");
     if (!f) return false;
-    std::string hdr = "{'descr': '<f4', 'fortran_order': False, 'shape': (" + std::to_string(rows) +
-                      ", " + std::to_string(cols) + "), }";
+    std::string dims;
+    for (int64_t d : shape) dims += std::to_string(d) + ", ";
+    std::string hdr = std::string("{'descr': '") + descr + "', 'fortran_order': False, 'shape': (" +
+                      dims + "), }";
     while ((10 + hdr.size() + 1) % 64) hdr += ' ';
     hdr += '\n';
     const uint16_t hl = (uint16_t)hdr.size();
     std::fwrite("\x93NUMPY\x01\x00", 1, 8, f);
     std::fwrite(&hl, 2, 1, f);
     std::fwrite(hdr.data(), 1, hdr.size(), f);
-    std::vector<float> row((size_t)cols);
-    for (int64_t r = 0; r < rows; ++r) {
-        for (int64_t j = 0; j < cols; ++j) {
-            const uint32_t bits = (uint32_t)bf16[(size_t)(r * cols + j)] << 16;
-            std::memcpy(&row[(size_t)j], &bits, 4);
-        }
-        std::fwrite(row.data(), 4, (size_t)cols, f);
-    }
+    std::fwrite(data, 1, (size_t)bytes, f);
     return std::fclose(f) == 0;
+}
+
+/* A bf16 [rows, cols] plane as an f32 .npy (the R17 boundary, read with no help). */
+inline bool dump_npy_f32(const std::string& path, const std::vector<uint16_t>& bf16, int64_t rows,
+                         int64_t cols) {
+    std::vector<float> f((size_t)(rows * cols));
+    for (size_t i = 0; i < f.size(); ++i) {
+        const uint32_t bits = (uint32_t)bf16[i] << 16;
+        std::memcpy(&f[i], &bits, 4);
+    }
+    return dump_npy(path, "<f4", {rows, cols}, f.data(), (int64_t)f.size() * 4);
 }
 
 /* R17: the stream entering layer S (b_h after layer S-1's ffn write), every approximate chunk. */
@@ -114,6 +128,117 @@ inline void dump_rows(RadCtx* c, const std::string& dir, rad_buf rows_idx, int64
               "{\"chunk_start\": " + std::to_string(start) + ", \"n_tok\": " +
               std::to_string(b->n_tok) + ", \"rows_idx\": " + dump_ids_json(rows) +
               ", \"token_ids\": " + dump_ids_json(ids) + "}");
+}
+
+/* ================================================================== Stage 6 captures
+ * (notes/arch.md "Capture"). Keyed by the chunk's first position and FNV-1a 64 of its token ids,
+ * so two prompts' chunks at one position never collide and no host counter is kept. */
+constexpr int64_t kCaptureStride = 8;   /* tcc's capture stride (KVA-FACTS §8 step 1) */
+
+inline std::string chunk_key(int32_t start, const std::vector<int32_t>& ids) {
+    uint64_t h = 1469598103934665603ull;
+    for (int32_t v : ids)
+        for (int b = 0; b < 4; ++b) { h ^= (uint8_t)((uint32_t)v >> (8 * b)); h *= 1099511628211ull; }
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "p%d.h%016llx", start, (unsigned long long)h);
+    return buf;
+}
+
+struct Capture {
+    std::string            dir, prefix;
+    int32_t                start = -1;
+    std::vector<int32_t>   ids, pos, rows;
+    std::vector<int>       layers;
+};
+
+/* The chunk's ids and positions, and which rows a stride-8 capture keeps (position % 8 == 0). */
+inline bool capture_begin(RadCtx* c, const RadBatch* b, const std::string& dir, Capture* cap) {
+    cap->dir = dir;
+    cap->ids.assign((size_t)b->n_tok, 0);
+    cap->pos.assign((size_t)b->n_tok, 0);
+    if (!dump_read(c, cap->ids.data(), b->token_ids, b->n_tok * 4) ||
+        !dump_read(c, cap->pos.data(), b->positions, b->n_tok * 4))
+        return false;
+    cap->start = cap->pos.empty() ? -1 : cap->pos[0];
+    cap->prefix = "chunk." + chunk_key(cap->start, cap->ids);
+    for (int64_t i = 0; i < b->n_tok; ++i)
+        if (cap->pos[(size_t)i] % kCaptureStride == 0) cap->rows.push_back((int32_t)i);
+    return true;
+}
+
+/* The captured rows of a bf16 [n_tok, width] buffer, as `<prefix>.<name>.npy` ('<u2'). */
+inline bool capture_rows(RadCtx* c, const Capture& cap, const std::string& name, rad_buf buf,
+                         int64_t n_tok, int64_t width) {
+    std::vector<uint16_t> all((size_t)(n_tok * width)), kept;
+    if (!dump_read(c, all.data(), rad_buf_ptr(c, buf), (int64_t)all.size() * 2)) return false;
+    kept.reserve(cap.rows.size() * (size_t)width);
+    for (int32_t r : cap.rows)
+        kept.insert(kept.end(), all.begin() + (long)r * width, all.begin() + (long)(r + 1) * width);
+    return dump_npy(cap.dir + "/" + cap.prefix + "." + name + ".npy", "<u2",
+                    {(int64_t)cap.rows.size(), width}, kept.data(), (int64_t)kept.size() * 2);
+}
+
+inline std::string ints_json(const std::vector<int>& v) {
+    std::string out = "[";
+    for (size_t i = 0; i < v.size(); ++i) out += (i ? ", " : "") + std::to_string(v[i]);
+    return out + "]";
+}
+
+inline void capture_end(const Capture& cap, int64_t split, int64_t hidden, int64_t hc) {
+    const std::string base = cap.dir + "/" + cap.prefix;
+    const int64_t n = (int64_t)cap.ids.size(), r = (int64_t)cap.rows.size();
+    const bool ok = dump_npy(base + ".rows.npy", "<i4", {r}, cap.rows.data(), r * 4) &&
+                    dump_npy(base + ".ids.npy", "<i4", {n}, cap.ids.data(), n * 4) &&
+                    dump_npy(base + ".pos.npy", "<i4", {n}, cap.pos.data(), n * 4);
+    if (!ok) std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE: cannot write %s.*\n",
+                          base.c_str());
+    dump_line(cap.dir + "/capture.jsonl",
+              "{\"prefix\": \"" + cap.prefix + "\", \"chunk_start\": " + std::to_string(cap.start) +
+              ", \"n_tok\": " + std::to_string(n) + ", \"stride\": " + std::to_string(kCaptureStride) +
+              ", \"rows\": " + std::to_string(r) + ", \"split\": " + std::to_string(split) +
+              ", \"layers\": " + ints_json(cap.layers) + ", \"hidden\": " + std::to_string(hidden) +
+              ", \"hc\": " + std::to_string(hc) + ", \"dtype\": \"bf16\"}");
+}
+
+/* One rank's late delta-net states for one chunk, gathered layer by layer. */
+struct StateDump {
+    std::vector<int>   layers;
+    std::vector<float> data;    /* [layers.size(), heads, V, K] in `layers` order */
+};
+
+inline void state_end(RadCtx* c, const std::string& dir, const RadBatch* b, const StateDump& sd,
+                      int64_t heads, int64_t v, int64_t k, int rank, int world, bool approximate,
+                      const char* mode) {
+    int32_t start = -1;
+    std::vector<int32_t> ids;
+    if (!dump_chunk(c, b, &start, &ids)) {
+        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE_STATE: device read failed\n");
+        return;
+    }
+    /* Ascending layer order whatever order the reads came in. */
+    std::vector<size_t> order(sd.layers.size());
+    for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::sort(order.begin(), order.end(), [&](size_t a, size_t z) { return sd.layers[a] < sd.layers[z]; });
+    const size_t per = (size_t)(heads * v * k);
+    std::vector<float> out;
+    std::vector<int> layers;
+    for (size_t i : order) {
+        layers.push_back(sd.layers[i]);
+        out.insert(out.end(), sd.data.begin() + (long)(i * per), sd.data.begin() + (long)((i + 1) * per));
+    }
+    const std::string file = "state." + chunk_key(start, ids) + ".r" + std::to_string(rank) + ".npy";
+    if (!dump_npy(dir + "/" + file, "<f4", {(int64_t)layers.size(), heads, v, k}, out.data(),
+                  (int64_t)out.size() * 4))
+        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE_STATE: cannot write %s/%s\n",
+                     dir.c_str(), file.c_str());
+    dump_line(dir + "/state.jsonl",
+              "{\"file\": \"" + file + "\", \"chunk_start\": " + std::to_string(start) +
+              ", \"last_position\": " + std::to_string(start + b->n_tok - 1) + ", \"n_tok\": " +
+              std::to_string(b->n_tok) + ", \"rank\": " + std::to_string(rank) + ", \"world\": " +
+              std::to_string(world) + ", \"heads\": [" + std::to_string(rank * heads) + ", " +
+              std::to_string((rank + 1) * heads) + "], \"layers\": " + ints_json(layers) +
+              ", \"approximate\": " + (approximate ? "true" : "false") + ", \"mode\": \"" + mode +
+              "\", \"applied_before_copy\": false}");
 }
 
 }  /* namespace qwen4exp_kva */

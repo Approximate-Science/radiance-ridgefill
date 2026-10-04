@@ -296,11 +296,29 @@ on a container without `kva.str.*` and nothing is applied anyway). Per (chunk, r
 | `<dir>/state.p<P>.h<H16>.r<rank>.npy` | `'<f4'` [n_late_gdn, H_local, 128 (V), 128 (K)] | layers in ascending order (24,25,26,28,…,46); heads `[rank·H_local, (rank+1)·H_local)` of the model's 48 — the contiguous split of the delta net's own weights; the state's own [heads, V, K] layout (`kv_gdn_state`, = tcc's) |
 | `<dir>/state.jsonl` | one line a (chunk, rank) | `{"file", "chunk_start": P, "last_position": P + n_tok − 1, "n_tok", "rank", "world", "heads": [lo, hi], "layers": [...], "approximate": bool, "mode": "off|plumb|speed|quality", "applied_before_copy": false}` |
 
-28 MB a chunk a rank. **Needs a 4th op in kva.so** (KERNELS lane): no ABI call returns a KV-pool pointer
-(RADIANCE-FACTS §5), so the slot is copied into a plugin buffer by `kva_state_read` first; the capture refuses at
-declare, by name, when kva.so does not serve it. Proposed schema: params `M` (range n_seq) `n_head` `sd0` `sd1`;
-operands `state` in f32 RAD_KV [n_states, n_head, sd0, sd1] (strides off the operand), `state_idx` i32
-[n_seq, pitch] (column 0; a slot outside the pool reads zeros), `out` out f32 [n_seq, n_head, sd0, sd1] (dense).
+28 MB a chunk a rank. **Needs kva.so's `kva_state_read`** (KERNELS afce51b): no ABI call returns a KV-pool pointer
+(RADIANCE-FACTS §5), so the slot is copied into the plugin buffer `kva_state_copy` [1, H, 128, 128] f32 (declared
+only with this switch) and read from there; the capture refuses at declare, by name, when kva.so does not serve it.
+Schema: params `M` (range n_seq, issued at 1) `n_head` `sd0` `sd1`; operands `state` RAD_KV(kv_gdn_state, L),
+`state_idx` (that group's own slot row), `out`.
+
+### Implemented (commit in the report): what to know when running it
+
+- **Only passes issued live are captured.** A replayed pass does not call `step()` (radiance
+  `core/runtime/ctx.cpp:1258-1278`; a prefill key is recorded the second time it is seen and played after). In the
+  Stage 3 KL run every bulk chunk logged its line (67/67), i.e. prefill was issued live there, but nothing guarantees
+  it for many same-length prompts. **Check `capture.jsonl` / `state.jsonl` line counts against the chunks sent; if
+  short, rerun with `--profile-ops`** (recording off whenever profiling is on, `ctx.cpp:120`).
+- `RADIANCE_KVA_CAPTURE` refuses at declare unless the mode is `off`. Rank 1 issues the stock step untouched; rank 0
+  issues the stock sequence (static test: identical) with the reads interleaved. Reads are full-chunk copies,
+  subsampled on the host (≈280 MiB device→host per 2048-row chunk; debug).
+- `RADIANCE_KVA_CAPTURE_STATE` works in any mode, on every rank. In speed/quality the copy sits immediately after
+  each late layer's `gdn_chunk_scan` and before its `kva_state_correct(apply)` (static test pins the position); on an
+  exact or plumb chunk all late layers are copied after the step. One `kva_state_read` issue per copy.
+- Static tests (arch_static_test, 29 cases): the capture's read positions (b_h before layer S's first issue, `x` one
+  issue after each late connection read), the file names/shapes/dtypes and jsonl fields, rank 1 and two-sequence
+  steps untouched, the state copy's operands and position, refusals. Two mutants (read `x` after the block; copy the
+  state after the apply) each caught.
 
 ## 8. Open / for other lanes
 

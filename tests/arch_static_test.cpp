@@ -22,7 +22,10 @@
 
 #include <cstdarg>
 #include <algorithm>
+#include <filesystem>
+#include <fstream>
 #include <functional>
+#include <sstream>
 #include <set>
 #include <string>
 #include <vector>
@@ -60,6 +63,9 @@ struct RadCtx {
     std::vector<RecIssue> issues;
     std::string           step_fail;
     int                   device_calls = 0;   /* a step that moves bytes itself is not stock */
+    /* Each device read: its source and how many issues preceded it -- which is what pins a
+     * capture to the point in the step it claims to read. */
+    std::vector<std::pair<const void*, size_t>> reads;
 };
 
 static RadCtx* g_ctx = nullptr;   /* for the device API, which carries no context */
@@ -149,8 +155,17 @@ void* rad_buf_ptr(RadCtx*, rad_buf b) { return (void*)(uintptr_t)(b * 64 + 16); 
 
 void* rad_dev_alloc(int64_t, int) { ++g_ctx->device_calls; return nullptr; }
 void  rad_dev_free(void*, int) { ++g_ctx->device_calls; }
-int   rad_stream_sync(RadStream) { ++g_ctx->device_calls; return RAD_E_UNSUPPORTED; }
-int   rad_memcpy_async(void*, const void*, int64_t, RadStream) { ++g_ctx->device_calls; return RAD_E_UNSUPPORTED; }
+/* The debug paths' device reads. rad_buf_ptr hands out small fake addresses (below), which read as
+ * zeros; a batch field is real host memory here and is copied, so a capture sees the batch's own
+ * ids and positions. */
+int   rad_stream_sync(RadStream) { ++g_ctx->device_calls; return RAD_OK; }
+int   rad_memcpy_async(void* dst, const void* src, int64_t n, RadStream) {
+    ++g_ctx->device_calls;
+    g_ctx->reads.push_back({src, g_ctx->issues.size()});
+    if ((uintptr_t)src < (1u << 20)) std::memset(dst, 0, (size_t)n);
+    else                             std::memcpy(dst, src, (size_t)n);
+    return RAD_OK;
+}
 int   rad_memset_async(void*, int, int64_t, RadStream) { ++g_ctx->device_calls; return RAD_E_UNSUPPORTED; }
 }  /* extern "C" */
 
@@ -560,6 +575,7 @@ Batch one_prefill(const RadBuilder& bld, int64_t T, int64_t ahead, int32_t ctx) 
         k.seqused = used; k.state_index = state + 3 * g; k.state_index_pitch = 3; k.max_blocks = 1024;
     }
     cu[1] = (int32_t)T;
+    for (int64_t i = 0; i < T; ++i) { ids[i] = (int32_t)(1000 + i); pos[i] = ctx + (int32_t)i; }
     RadBatch& b = x.b;
     b.kv = x.kv.data();
     b.n_tok = T; b.n_seq = 1; b.n_ahead = ahead;
@@ -574,6 +590,7 @@ struct Run {
     std::vector<RecIssue> issues;
     std::string           log;
     int                   device_calls = 0;
+    std::vector<std::pair<const void*, size_t>> reads;
 };
 
 Run run_step(void (*step)(RadCtx*, const RadBatch*), const RadBatch& b, int rank = 0) {
@@ -586,6 +603,7 @@ Run run_step(void (*step)(RadCtx*, const RadBatch*), const RadBatch& b, int rank
     g_ctx = nullptr;
     r.issues = c.issues;
     r.device_calls = c.device_calls;
+    r.reads = c.reads;
     return r;
 }
 
@@ -1005,6 +1023,199 @@ TEST(quality_runs_the_selected_rows_exactly_on_cap_compacted_rows) {
     }
 }
 
+/* ==================================================================== Stage 6 captures */
+
+/* A scratch directory, removed with the object. */
+struct TempDir {
+    std::filesystem::path path;
+    TempDir() {
+        std::string t = (std::filesystem::temp_directory_path() / "kva_capture_XXXXXX").string();
+        path = mkdtemp(t.data()) ? t : std::string();
+    }
+    ~TempDir() { if (!path.empty()) std::filesystem::remove_all(path); }
+};
+
+std::string slurp(const std::filesystem::path& p) {
+    std::ifstream f(p, std::ios::binary);
+    std::stringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
+
+/* The `shape` of an .npy file's header, and its descr ("<u2", "<i4", "<f4"). */
+std::vector<int64_t> npy_shape(const std::filesystem::path& p, std::string* descr) {
+    const std::string s = slurp(p);
+    std::vector<int64_t> shape;
+    const size_t d = s.find("'descr': '"), sh = s.find("'shape': (");
+    if (s.size() < 10 || d == std::string::npos || sh == std::string::npos) return shape;
+    *descr = s.substr(d + 10, 3);
+    for (size_t i = sh + 10; i < s.size() && s[i] != ')';) {
+        if (std::isdigit((unsigned char)s[i])) { size_t e = 0; shape.push_back(std::stoll(s.substr(i), &e)); i += e; }
+        else ++i;
+    }
+    return shape;
+}
+
+/* The one file in `dir` whose name starts with `head` and ends with `tail`. */
+std::filesystem::path find_file(const std::filesystem::path& dir, const std::string& head,
+                                const std::string& tail) {
+    for (const auto& e : std::filesystem::directory_iterator(dir)) {
+        const std::string n = e.path().filename().string();
+        if (n.rfind(head, 0) == 0 && n.size() >= tail.size() &&
+            n.compare(n.size() - tail.size(), tail.size(), tail) == 0)
+            return e.path();
+    }
+    return {};
+}
+
+/* RADIANCE_KVA_CAPTURE (off): on rank 0 a single-sequence prefill chunk issues the stock sequence
+ * exactly and writes the layout notes/arch.md documents -- the stream entering S and every late
+ * layer's block input at the rows whose position is a multiple of 8, all ids and positions, one
+ * jsonl line. Rank 1 and a two-sequence step capture nothing and copy nothing. */
+TEST(capture_records_an_exact_chunk_and_issues_the_stock_sequence) {
+    TempDir dir;
+    REQUIRE(!dir.path.empty());
+    RadModelMeta meta = flash_next_meta();
+    RadBuildCtx c = served_ctx();
+    RadBuilder stock, kva;
+    served(stock);
+    served(kva);
+    hold_kva(kva, {"kva.proj", "kva.st"});
+    REQUIRE_EQ(qwen4exp_fp8::declare(&stock, &meta, &c), RAD_OK);
+    Env env({{"RADIANCE_KVA_CAPTURE", dir.path.c_str()}});
+    REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
+    CHECK_EQ(kva.ops.size(), stock.ops.size());
+    CHECK_EQ(qwen4exp_kva::g_kva[0].split, (int64_t)kSplit);
+    Batch bs = one_prefill(stock, 128, 300, 4100);   /* positions 4100..4227 */
+    Batch bk = one_prefill(kva, 128, 300, 4100);
+    const Run want = run_step(qwen4exp_fp8::step, bs.b);
+    const Run got = run_step(qwen4exp_kva::step, bk.b);
+    CHECK_EQ(differ(got.issues, want.issues), 0);
+    CHECK(got.device_calls > 0);
+    /* WHERE each read sits: b_h just before layer S's first issue, and x just after each late
+     * layer's connection read -- before the block overwrites it with its output. */
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
+    auto first_issue = [&](rad_op h) {
+        size_t i = 0;
+        while (i < got.issues.size() && got.issues[i].op != h) ++i;
+        return i;
+    };
+    std::vector<size_t> x_reads, h_reads;
+    for (const auto& [src, at] : got.reads) {
+        if (src == rad_buf_ptr(nullptr, m.a_x.x)) x_reads.push_back(at);
+        if (src == rad_buf_ptr(nullptr, m.b_h)) h_reads.push_back(at);
+    }
+    REQUIRE_EQ(h_reads.size(), (size_t)1);
+    CHECK_EQ(h_reads[0], first_issue(m.layers[kSplit].hc_mix.op_read));
+    REQUIRE_EQ(x_reads.size(), (size_t)(8 - kSplit));
+    for (int l = kSplit; l < 8; ++l)
+        CHECK_EQ(x_reads[(size_t)(l - kSplit)], first_issue(m.layers[(size_t)l].hc_mix.op_read) + 1);
+    const std::string head = "chunk.p4100.h";
+    std::string descr;
+    const std::filesystem::path bnd = find_file(dir.path, head, ".boundary.npy");
+    REQUIRE(!bnd.empty());
+    CHECK(npy_shape(bnd, &descr) == std::vector<int64_t>({16, 10240}));
+    CHECK_EQ(descr, std::string("<u2"));
+    for (int l = kSplit; l < 8; ++l) {
+        const std::filesystem::path bi = find_file(dir.path, head, ".bi." + std::to_string(l) + ".npy");
+        REQUIRE(!bi.empty());
+        CHECK(npy_shape(bi, &descr) == std::vector<int64_t>({16, 2560}));
+    }
+    CHECK(find_file(dir.path, head, ".bi.3.npy").empty());
+    const std::filesystem::path rows = find_file(dir.path, head, ".rows.npy");
+    REQUIRE(!rows.empty());
+    CHECK(npy_shape(rows, &descr) == std::vector<int64_t>({16}));
+    CHECK_EQ(descr, std::string("<i4"));
+    const std::string rb = slurp(rows);
+    int32_t first = -1, second = -1;
+    std::memcpy(&first, rb.data() + rb.size() - 64, 4);
+    std::memcpy(&second, rb.data() + rb.size() - 60, 4);
+    CHECK_EQ(first, 4);    /* 4100 + 4 = 4104 is the first multiple of 8 */
+    CHECK_EQ(second, 12);
+    CHECK(npy_shape(find_file(dir.path, head, ".ids.npy"), &descr) == std::vector<int64_t>({128}));
+    CHECK(npy_shape(find_file(dir.path, head, ".pos.npy"), &descr) == std::vector<int64_t>({128}));
+    const std::string line = slurp(dir.path / "capture.jsonl");
+    CHECK_EQ(count(line, "\n"), 1);
+    CHECK(has(line, "\"chunk_start\": 4100") && has(line, "\"split\": 4") && has(line, "\"rows\": 16") &&
+          has(line, "\"layers\": [4, 5, 6, 7]") && has(line, "\"stride\": 8"));
+    /* rank 1, and a two-sequence step: the stock step, nothing read */
+    const Run r1 = run_step(qwen4exp_kva::step, bk.b, 1);
+    CHECK_EQ(r1.device_calls, 0);
+    Batch two = one_prefill(kva, 128, 300, 4100);
+    two.b.n_seq = 2;
+    CHECK_EQ(run_step(qwen4exp_kva::step, two.b).device_calls, 0);
+    CHECK_EQ(count(slurp(dir.path / "capture.jsonl"), "\n"), 1);
+}
+
+
+/* RADIANCE_KVA_CAPTURE_STATE: on an approximate chunk each late delta-net layer's slot is copied
+ * right after its scan and BEFORE the correction's apply; on an exact chunk after the step. Each is
+ * one kva_state_read issue on the layer's own slot, and the step's other issues are unchanged. */
+TEST(state_capture_copies_each_late_state_before_the_apply) {
+    TempDir dir;
+    REQUIRE(!dir.path.empty());
+    Pair p;
+    declare_pair(p, "speed");
+    REQUIRE_EQ(p.st, RAD_OK);
+    std::vector<std::vector<RecIssue>> plain;   /* the same chunks without the switch */
+    for (int64_t ahead : {2048, 100}) {
+        Batch ref = one_prefill(p.kva, 128, ahead, 2048);
+        plain.push_back(run_step(qwen4exp_kva::step, ref.b).issues);
+    }
+    const RadModelMeta meta = flash_next_meta();
+    RadBuildCtx c = served_ctx();
+    RadBuilder kva;
+    served(kva);
+    hold_kva(kva, {"kva.proj", "kva.st"});
+    hold_score(kva, "kva.rowsel.score");
+    Env env({{"RADIANCE_KVA", "speed"}, {"RADIANCE_KVA_CAPTURE_STATE", dir.path.c_str()}});
+    REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
+    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+    REQUIRE(k.op_state_read != 0);
+    CHECK(kva.concurrent.count(k.b_state) == 1);
+    for (int64_t ahead : {2048, 100}) {   /* approximate, then exact */
+        Batch bk = one_prefill(kva, 128, ahead, 2048);
+        const std::vector<RecIssue>& want = plain[ahead == 2048 ? 0 : 1];
+        const Run got = run_step(qwen4exp_kva::step, bk.b);
+        std::vector<RecIssue> reads, rest;
+        for (const RecIssue& i : got.issues) (i.op == k.op_state_read ? reads : rest).push_back(i);
+        CHECK_EQ(differ(rest, want), 0);    /* the sequence without the copies is the plain one */
+        REQUIRE_EQ(reads.size(), (size_t)3);
+        for (size_t j = 0; j < reads.size(); ++j) {
+            const int l = std::vector<int>{4, 5, 6}[j];
+            CHECK_EQ(reads[j].n, 1);
+            CHECK(same_operand(reads[j].opd[0], kv_cache(m.kv_state, l)));
+            CHECK(same_operand(reads[j].opd[1], praw2(bk.b.kv[m.kv_state - 1].state_index, RAD_I32, 1, 3)));
+            CHECK_EQ(reads[j].opd[2].handle, k.b_state);
+        }
+        if (ahead == 2048) {   /* each copy sits between its layer's scan and its apply */
+            for (int l : {4, 5, 6}) {
+                size_t scan = 0, read = 0, apply = 0;
+                for (size_t i = 0; i < got.issues.size(); ++i) {
+                    if (got.issues[i].op == m.layers[(size_t)l].gdn.op_scan) scan = i;
+                    if (got.issues[i].op == k.op_state_read &&
+                        same_operand(got.issues[i].opd[0], kv_cache(m.kv_state, l))) read = i;
+                    if (got.issues[i].op == k.op_apply[(size_t)l]) apply = i;
+                }
+                CHECK(scan < read && read < apply);
+                CHECK_EQ(read, scan + 1);
+            }
+        }
+    }
+    const std::string lines = slurp(dir.path / "state.jsonl");
+    CHECK_EQ(count(lines, "\n"), 2);
+    CHECK_EQ(count(lines, "\"approximate\": true"), 1);
+    CHECK_EQ(count(lines, "\"approximate\": false"), 1);
+    CHECK(has(lines, "\"layers\": [4, 5, 6]") && has(lines, "\"last_position\": 2175"));
+    std::string descr;
+    const std::filesystem::path f = find_file(dir.path, "state.p2048.h", ".r0.npy");
+    REQUIRE(!f.empty());
+    CHECK(npy_shape(f, &descr) == std::vector<int64_t>({3, m.gcfg.n_head_v, 128, 128}));
+    CHECK_EQ(descr, std::string("<f4"));
+}
+
+
 /* Speed declares the projector per late layer and one quantiser, after the whole in-tree graph and
  * nothing in between: the in-tree op list is a prefix of the KVA one. */
 TEST(speed_adds_its_ops_after_the_in_tree_graph) {
@@ -1197,6 +1408,23 @@ TEST(a_split_at_or_below_the_ple_layer_is_refused) {
     std::string err;
     CHECK_EQ(refused({{"RADIANCE_KVA", "speed"}}, b, &err), RAD_E_UNSUPPORTED);
     CHECK(has(err, "n-gram"));
+}
+
+TEST(capture_refuses_a_serving_mode) {
+    RadBuilder b;
+    hold_kva(b, {"kva.proj"});
+    std::string err;
+    CHECK_EQ(refused({{"RADIANCE_KVA", "speed"}, {"RADIANCE_KVA_CAPTURE", "x"}}, b, &err), RAD_E_INVAL);
+    CHECK(has(err, "RADIANCE_KVA=off"));
+}
+
+TEST(state_capture_without_kva_state_read_is_refused) {
+    RadBuilder b;
+    hold_kva(b, {"kva.proj"});
+    b.refuse = {"kva_state_read"};
+    std::string err;
+    CHECK_EQ(refused({{"RADIANCE_KVA_CAPTURE_STATE", "x"}}, b, &err), RAD_E_UNSUPPORTED);
+    CHECK(has(err, "kva_state_read"));
 }
 
 RAD_TEST_MAIN()
