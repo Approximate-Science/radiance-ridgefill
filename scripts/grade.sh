@@ -67,8 +67,8 @@ model_arg="/models/$(basename "$RK_MODEL")"
 if [ "$1" = record ]; then
     [ "$#" -eq 3 ] || usage
     rk_require_model
-    ref_dir=$2
-    corpus=$3
+    ref_dir=$(realpath -m -- "$2")   # docker -v needs absolute host paths
+    corpus=$(realpath -m -- "$3")
     [ -r "$corpus" ] || rk_die "the corpus is not a readable file: $corpus"
     if [ -d "$ref_dir" ] && [ -n "$(ls -A "$ref_dir" 2>/dev/null)" ]; then
         rk_die "refusing to overwrite an existing reference dir: $ref_dir"
@@ -94,8 +94,8 @@ fi
 
 [ "$#" -eq 3 ] || usage
 mode=$1
-ref_dir=$2
-out=$3
+ref_dir=$(realpath -m -- "$2")   # docker -v needs absolute host paths
+out=$(realpath -m -- "$3")
 rk_mode_validate "$mode"
 rk_require_model
 [ -f "$ref_dir/kld.json" ] || rk_die "not a finished reference (no kld.json): $ref_dir"
