@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """The gate before `rad-convert --reuse C --in-place`: compare the run's plan with what C holds.
 
-  plan_diff.py --plan PLAN.log --container RAD_INFO_V.txt --expect-new SHARD.safetensors [--out R.json]
+  plan_diff.py --plan PLAN.log --container RAD_INFO_V.txt [--expect-new SHARD.safetensors ...] [--out R.json]
 
 PLAN.log is the stderr of `rad-convert ... --plan-only -v`; RAD_INFO_V.txt is the stdout of `rad-info -v C`.
---expect-new names the shard(s) whose tensors are the only weights allowed to be new (repeatable).
+--expect-new names the shard(s) whose tensors are the only weights allowed to be new (repeatable); without it
+no weight may be new, which is the check AFTER an append: the extended container must hold exactly the plan.
 
 Why it is needed: --plan-only prints every planned weight but not which are new, reused or missing, and the
 in-place writer refuses a weight whose encoding changed but NOT one that is missing from the plan -- the new
@@ -64,7 +65,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--plan", required=True, help="stderr of rad-convert --plan-only -v")
     ap.add_argument("--container", required=True, help="stdout of rad-info -v on the container")
-    ap.add_argument("--expect-new", action="append", required=True, help="shard whose tensors may be new")
+    ap.add_argument("--expect-new", action="append", default=[], help="shard whose tensors may be new")
     ap.add_argument("--out", help="report JSON")
     args = ap.parse_args(argv)
     for path in [args.plan, args.container, *args.expect_new]:
@@ -74,7 +75,7 @@ def main(argv=None):
     held = container_rows(Path(args.container).read_text(encoding="utf-8", errors="replace"))
     if not plan or not held:
         raise SystemExit(f"parsed {len(plan)} plan rows and {len(held)} container rows; need both (was -v given?)")
-    expected = set().union(*(shard_names(p) for p in args.expect_new))
+    expected = set().union(set(), *(shard_names(p) for p in args.expect_new))
     report = diff(plan, held, expected)
     ok = not (report["dropped"] or report["changed"] or report["unexpected_new"] or report["expected_missing"])
     for key in ("new", "dropped", "changed", "unexpected_new", "expected_missing"):

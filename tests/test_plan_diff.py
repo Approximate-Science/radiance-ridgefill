@@ -64,3 +64,13 @@ def test_an_expected_weight_absent_from_the_plan_fails(tmp_path):
 def test_unparseable_input_is_refused(tmp_path):
     with pytest.raises(SystemExit, match="parsed 0 plan rows"):
         D.main(write(tmp_path, plan="nothing here\n"))
+
+
+def test_after_the_append_the_container_holds_exactly_the_plan(tmp_path):
+    held = HELD + "      kva.st.24             f32              1           3.0 MiB  @9999999   checkpoint\n"
+    args = write(tmp_path, held=held)
+    assert D.main(args[:4]) == 0          # no --expect-new: nothing may be new
+
+
+def test_without_expected_new_weights_any_new_weight_fails(tmp_path):
+    assert D.main(write(tmp_path)[:4]) == 1
