@@ -260,3 +260,81 @@ All three: `matches qwen4exp ... 0 warning(s)` and both ranks hold 1228.1 MiB.
 | R143 | **green**: plumb, speed, quality KL rows byte-identical to the append runs; TTFT 16K/32K within noise (all CIs include 0) | sessions 1, 3 |
 | R148 | **measured**: zero-copy 2.7× exact ⇒ the DD-L staging ring built (default for host), +6% / +10% vs vram, level with exact at 16K, −25% at 32K; bytes identical (ring and zero-copy) | sessions 2b, 3 |
 | R144 | **NOT run** (the orchestrator's): restore with `evidence/stage6/pre-append.stage2`; the published file pre-checked to fingerprint identically (§3c) | -- |
+
+## R144 -- re-run on the PUBLISHED model file (2026-10-05, after the orchestrator's restore and merge 87994fe)
+
+**Provenance.** Model `~/models/rad/qwen3.8-next-flash-fp8-iq4r-moe.rad`, 121,969,901,568 B, sha256
+`0af5e96244e80c21ac8edca1719dae49b8a201b94a2f3994c3e24026ceaa4d20` (the orchestrator's restore check; size and the
+`RAD1` magic re-read at session start; no kva.* weights or keys). Projector at Dylan's user layout
+`~/models/rad/projector/` (28 files + kva.json, 0644; kva.json identical to data/projector-qwen38fn's), found by
+DISCOVERY (serve.sh mounts the model directory at /models). Plugin home `data/home-0d75987` (arch f44a4bbb…, kva.so
+e73dc71b… -- kva.so unchanged since A′), commit 0d75987 = merge + the guard default below. Boot
+75e3e39b-cc5b-49de-8087-a4791f372a92 (KL references valid). Image stilldeadcode/radiance:1.0.8, RK_FLAGS
+(--gpu-headroom-mib 3072). Scripts: evidence/aprime/scripts/r144_s{1,2}.sh; logs evidence/aprime/r144/.
+
+### The guard default (commit 0d75987, before the runs)
+`RADIANCE_KVA_STAGE_ROWS` default 64 -> unlimited (every masked pass streams), per Stage A.1's warmed engine results
+(notes/impl.md): inside an ON server streaming beats the stock step by 220-240 ms a straddling chunk at 512 / 1,024 /
+1,984 exact rows, the 64-row guard cost 331 ms at 9,216 and ran every T 2560 chunk exact. The env keeps the
+threshold. Static: 47 cases (truth table under an explicit 64; `the_default_streams_every_masked_pass` for the default);
+guard mutants G1-G6 all caught (evidence/aprime/scripts/mutate_guard.out). Then 02b674e: a capture with no folder
+takes S from `RADIANCE_KVA_CAPTURE_SPLIT`, never the container's `kva.split` (48 cases; debug path only, not
+exercised below).
+
+### Session 1 (09:14-09:33Z; evidence/aprime/r144/session1.log)
+`--debug-graph` vs the stock engine (sorted, durations normalised, plugin + shadow lines out):
+| run | KVA line | differing lines |
+|---|---|---|
+| off, folder visible beside the model | (none: off never looks; no kva.mode key in the published file) | **0** |
+| quality, folder hidden (empty dir over /models/projector) | `no projector folder (looked at /models/projector); serving stock` | **0** |
+| quality, only the file mounted (R149) | `no projector folder (looked at /m/projector); serving stock` | **0** |
+| quality, R142 wrong dims / wrong tokenizer / missing file | REFUSED by name, as on the appended file; serving stock | **0 / 0 / 0** |
+| quality, folder by discovery | `projector /models/projector (found beside --model /models/qwen3.8-next-flash-fp8-iq4r-moe.rad (same device and inode as the mapped …)) matches qwen4exp: arch ok, metadata 11/11, tokenizer ok, encodings 489/489, anchors 3/3, 0 warning(s)` | 641 (the KVA ops) |
+
+ident.sh = **R3's six hashes** for: off with the folder visible (R7), quality with the folder hidden, quality with the
+wrong-dims folder (refused).
+
+KL (quick9 vs data/kld/ref-stage0, SCORE_BULK=1, folder by discovery unless said, 67 approximate steps each):
+| run | rows vs |
+|---|---|
+| plumb FORCE_STREAM, boots 1 and 2 | **IDENTICAL** to the appended-file run (evidence/aprime/r140-plumb-stream-1) |
+| speed T2048 | **IDENTICAL** to evidence/aprime/r143-speed-t2048 |
+| quality T2048 (default guard now) | **IDENTICAL** to evidence/aprime/r143-quality-t2048 (STAGE_ROWS 4096 there) |
+| quality T2560 (default guard: 67 masked, stream, split) | **IDENTICAL** to Stage A's R100 run (evidence/stageA/quality-t2560) |
+| quality T2048, host + ring | **IDENTICAL** to r143-quality-t2048 |
+| quality T2048, R142 warn variant (env) | **IDENTICAL** to r143-quality-t2048; 3 named WARNINGs |
+No difference anywhere: the guard default changes only passes with > 64 exact rows, which the T2048 arms already ran
+streamed (STAGE_ROWS 4096 on the appended file) and which T2560 now runs approximate again (A.1's default ran it exact).
+
+**R100 headline (quality, T 2560, last 512, paired vs exact, 9 docs): dNLL +0.00212 [−0.01255, +0.01565], ppl ratio
+1.0021, KL 0.0368, top-1 0.9156** -- Stage A's headline to the byte.
+
+R141 (same logs): already held 306.25 / 331.59 MiB (plumb: copies nothing) -> 1.50-1.53 GiB (speed / quality) ->
+459.62 MiB (host ring); slab slots rank 0: plumb 19,530 · quality 18,371 · host ring 19,296.
+Kernel log clean before/after. Labbook: HAp-R144-bytes, HAp-R144-nofolder, HAp-R144-headline confirmed.
+
+### Session 2 -- warmed TTFT (10:08Z end; A.1's session-3 protocol: each server warmed by one RK_REPS=2 pass of all
+### three lengths, then RK_REPS=7 read reps 3-7; quiet host = 1-min load < 2.5 and no compiler/test process before
+### every label; arms exact / quality / speed twice; evidence/aprime/r144/session2.log, speed-w-*.json)
+Published file, folder by discovery, home-0d75987 (guard default unlimited), quality T 2048, speed T 2048.
+Settled medians a / b, and pooled vs exact (labbook aprime-r144-ttft-w-*):
+
+| arm | 9,216 | 16,384 | 32,768 |
+|---|---|---|---|
+| exact | 5,662 / 5,662 | 9,742 / 9,751 | 19,045 / 19,058 |
+| quality | 4,773 / 4,738 = **1.19x** | 6,816 / 6,797 = **1.43x** | 10,385 / 10,404 = **1.83x** |
+| speed | 4,038 / 4,034 = **1.40x** | 5,245 / 5,244 = **1.86x** | 8,958 / 8,966 = **2.13x** |
+
+quality − exact: −907 ms [−1,020, −793] / −2,940 [−3,119, −2,757] / −8,661 [−8,771, −8,364]; speed − exact: −1,626
+[−1,689, −1,569] / −4,501 / −10,090. Against A.1 (appended file, 64-row guard, same protocol): quality 9,216 −383 ms
+[−545, −218] faster (the guard's trade, now taken), 16K/32K within 1%; speed within 0.5%; exact within 0.2%. Every
+approximate arm faster than exact at every length, CIs excluding 0. Kernel log clean. HAp-R144-ttft confirmed.
+
+### Nothing reads kva.* from the model file
+Plugin: no `kva.*` weight is declared (decl_held/decl_projector/decl_correction/decl_score/decl_every_copy deleted in
+A′; static `a_mode_without_a_usable_projector_serves_the_in_tree_graph` holds the declare to the in-tree weights
+with kva.* entries present); since 02b674e the capture split no longer falls back to `kva.split`; the only `kva.*`
+key still looked up is `kva.mode`, read solely to log once that it is ignored (R81) -- the published file has none.
+kva.so declares no weights. Tools: `tools/kva_projector.py` reads the model file for the fingerprint only (metadata,
+tokenizer, template, 3 anchors); `scripts/mask_rule.py` and `tools/rows_compare.py` read `kva.rowsel.*` from the
+sidecar file data/sidecar (dev measurement aids, not the model); the append route lives in tools/dev (retired).
