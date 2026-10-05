@@ -12,8 +12,8 @@ decoders): mask.jsonl and rows.jsonl, one line per masked approximate chunk, in 
   mask = 0 on [b, n_tok); on [0, b) the class rule (tools/kva_rules.select_rows over ids[0:b] with the
   sidecar's score table and share); bounds = {0, b, b, n_tok}.
 
-N is recovered from the dump (the largest end + n_ahead of a prompt's chunks) and must be one of --lengths
-when given. Every expected approximate chunk must be present (a missing one is a replayed pass: rerun with
+N is each prompt's entry of --lengths, in send order (a capped n_ahead makes N unrecoverable from the dump:
+16,384 and 16,385 dump alike); the dump's own largest end + n_ahead must be consistent with it. Every expected approximate chunk must be present (a missing one is a replayed pass: rerun with
 --profile-ops) and every dumped field must equal the rule. Exits 1 on any difference, naming it.
 """
 import argparse
@@ -49,11 +49,11 @@ def prompts(mask_lines, rows_lines):
     return groups
 
 
-def check_prompt(group, score, share, args, lengths):
+def check_prompt(group, n, score, share, args):
     errors = []
-    n = max(m["chunk_start"] + m["n_tok"] + m["n_ahead"] for m, _ in group)
-    if lengths and n not in lengths:
-        errors.append(f"N {n} is not one of --lengths")
+    seen = max(m["chunk_start"] + m["n_tok"] + m["n_ahead"] for m, _ in group)
+    if seen > n or (seen < n and seen - group[-1][0]["chunk_start"] - group[-1][0]["n_tok"] < args.chunk):
+        errors.append(f"the dump reaches {seen} tokens, inconsistent with N {n}")
     want = expected_chunks(n, args.chunk, args.tail, args.tile)
     got = {m["chunk_start"]: (m, r) for m, r in group}
     if sorted(got) != [w[0] for w in want]:
@@ -82,7 +82,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--dump", required=True)
     ap.add_argument("--sidecar", required=True, help="the sidecar safetensors holding kva.rowsel.score")
-    ap.add_argument("--lengths", default="", help="comma-separated prompt lengths the run sent")
+    ap.add_argument("--lengths", required=True, help="comma-separated prompt lengths, in the order the run sent them")
     ap.add_argument("--chunk", type=int, default=2048)
     ap.add_argument("--tail", type=int, default=2048)
     ap.add_argument("--tile", type=int, default=64)
@@ -91,15 +91,14 @@ def main(argv=None):
         score = f.get_tensor("kva.rowsel.score")
         share = float((f.metadata() or {})["kva.rowsel.share"])
     read = lambda name: [json.loads(x) for x in (Path(args.dump) / name).read_text().splitlines() if x.strip()]
-    lengths = {int(x) for x in args.lengths.split(",") if x}
+    lengths = [int(x) for x in args.lengths.split(",") if x]
     groups = prompts(read("mask.jsonl"), read("rows.jsonl"))
-    ok = [check_prompt(g, score, share, args, lengths) for g in groups]
-    seen = {max(m["chunk_start"] + m["n_tok"] + m["n_ahead"] for m, _ in g) for g in groups}
-    missing = sorted(lengths - seen)
-    if missing:
-        print(f"prompts with no dumped chunk: {missing}")
-    print(f"{sum(ok)} of {len(ok)} prompts equal the rule" + (f"; missing {missing}" if missing else ""))
-    return 0 if all(ok) and not missing else 1
+    if len(groups) != len(lengths):
+        print(f"{len(groups)} prompts in the dump, {len(lengths)} sent")
+        return 1
+    ok = [check_prompt(g, n, score, share, args) for g, n in zip(groups, lengths)]
+    print(f"{sum(ok)} of {len(ok)} prompts equal the rule")
+    return 0 if all(ok) else 1
 
 
 if __name__ == "__main__":
