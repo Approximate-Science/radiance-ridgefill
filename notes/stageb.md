@@ -326,3 +326,43 @@ An ON server with the projector in VRAM decodes exactly like stock; session 2's 
 were noise. With the projector in host memory, decode at C = 8 is +87% in the first window and +8.7%
 after -- a decode-only step runs no KVA op, so this is the placement's effect on the expert tiers (host
 pool / SSD), Stage E's to explain; reported.
+
+### Session 5 -- R55 quality, interleaved, both lengths (14:21-15:1xZ; `session5.log`)
+Same instrument as 2c (rep-major, 6 reps reading 3-6, warmed, `--max-num-seqs 9`), C = 0 / 1 / 4 / 8,
+16K and 32K, exact vs quality (VRAM placement).
+
+| length | exact prompt_ms C 0/1/4/8 | quality prompt_ms C 0/1/4/8 | speedup C 0 | **R55 ratio C 1 / 4 / 8** | R56 KVA/exact median gap C 1 / 4 / 8 |
+|---|---|---|---|---|---|
+| 16K | 9,703 / 10,129 / 10,222 / 10,278 | 7,190 / 7,762 / 7,939 / 8,136 | 1.350 [1.327, 1.359] | **0.967 / 0.954 / 0.936** | 1.51 [1.29, 1.57] / 1.41 [1.08, 1.65] / 1.27 [1.01, 1.59] |
+| 32K | 19,415 / 20,317 / 20,578 / 20,998 | 12,572 / 13,619 / 14,143 / 14,799 | 1.544 [1.520, 1.551] | **0.966 / 0.942 / 0.919** | 1.45 [1.23, 1.50] / 1.26 [0.98, 1.44] / 1.09 [0.86, 1.57] |
+
+Per-step (step_times.py): quality big chunks 16K 899 / 882 / 895 / 911 ms, 32K 786 / 765 / 789 / 817 ms
+(C 0/1/4/8) -- decoders barely move them; exact 1,202-1,213 ms throughout.
+
+Reading:
+- **R55 for quality: GREEN at every cell** (0.919-0.967 here; 0.991 / 0.946 at 16K in 2c). Session 2's
+  0.85-0.89 was the block-order instrument.
+- **Hygiene note**: another lane's build ran during the EXACT arm's first 16K reps (14:25-14:28Z, up to
+  111 compiler processes, load 29.9 -- recorded per rep). Exact's prompt times did not move (C 0:
+  9,689-9,724 ms vs 2c's 9,689), so the baseline stands; the quality arm ran on a quiet host (load <=
+  1.25, 0 compilers).
+- **This quality server was slower than 2c's** (16K solo speedup 1.35x vs 1.48x; 32K 1.54x vs session
+  2's 1.81x), and its decoders were slower even BEFORE the prefill (decode-only gap 15.2 / 32.3 / 37.0
+  ms vs exact 11.6 / 17.6 / 23.3). That decode-only slowness is a server-level effect -- the same
+  symptom Stage E reports for plain decode on quality servers (their lane) -- not the mixed-step
+  mechanism; it is also why R56's ratio is > 1 in this session (1.09-1.51) while 2c and session 2 read
+  0.8-1.07. Session 4's steady-state decode on a VRAM-placed quality server read equal to stock
+  (13.92 vs 13.94 ms at C = 1). So decode speed on an ON server varies from boot to boot; R56 cannot be
+  called green until E's diagnosis lands.
+
+**R60 acceptance half (session 5, 14:5xZ)**: `conc.sh accept`, `--num-speculative-tokens 3`, the 32K
+prompt then 4 decoders as SEPARATE requests 0.5 s later, 5 rounds:
+
+| server | decoder 0 | decoder 1 | decoder 2 | decoder 3 | all 20 answers |
+|---|---|---|---|---|---|
+| off | 181/222 ×5 | 163-165/270-276 | 159-160/285-288 | 164/279 ×5 | **3,344 / 5,298 = 0.6312** |
+| quality | 181/222 ×4, 180/225 | 163-164/273-276 | 160/285 ×5 | 164/279 ×5 | **3,342 / 5,304 = 0.6301** |
+
+Every decoder's text identical across rounds and across the two servers (4 distinct texts per arm,
+the same 4). **R60 GREEN**: texts identical to off (batched arrangement, sessions 4; separate requests,
+here), acceptance within the round-to-round spread of each arm.
