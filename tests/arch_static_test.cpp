@@ -2778,6 +2778,107 @@ void write_folder(const std::filesystem::path& dir, const std::string& files_ove
     std::ofstream(dir / "kva.json") << "{\"format\": 1, \"files\": " << files << "}";
 }
 
+
+/* R74 and R76's static half -- MEDIA STEPS RUN STOCK, AND THE TEXT AFTER AN IMAGE RESUMES (PLAN-FIX §6.3), on
+ * the published container's geometry for pictures: interleaved M-RoPE 11/11/10 and a vision tower (cut to two
+ * blocks, as radiance's arch_test cuts it), served with a patch budget. An encoder pass, a chunk holding media
+ * rows (mixed rotary components or not) and a chunk with mixed components issue the in-tree step op for op in
+ * speed and quality. A text-only chunk after the image (rope_pos set, its three components equal) is
+ * approximated, and every in-tree op it issues takes the position operand the in-tree step gives that op --
+ * the rotary planes, which run behind the index after an image, where the stock step reads them. */
+RadModelMeta flash_next_vl_meta() {
+    static std::vector<const char*> keys, vals;
+    if (keys.empty()) {
+        keys.assign(kKeys, kKeys + kN);
+        vals.assign(kVals, kVals + kN);
+        const char* k[] = {"rope_parameters.mrope_section", "rope_parameters.mrope_interleaved",
+                           "vision_config.depth", "vision_config.hidden_size", "vision_config.num_heads",
+                           "vision_config.intermediate_size", "vision_config.patch_size",
+                           "vision_config.temporal_patch_size", "vision_config.in_channels",
+                           "vision_config.spatial_merge_size", "vision_config.out_hidden_size",
+                           "vision_config.num_position_embeddings", "vision_config.deepstack_visual_indexes",
+                           "vision_config.hidden_act"};
+        const char* v[] = {"11 11 10", "1", "2", "1152", "16", "4304", "16", "2", "3", "2", "2560", "2304", "",
+                           "gelu_pytorch_tanh"};
+        keys.insert(keys.end(), std::begin(k), std::end(k));
+        vals.insert(vals.end(), std::begin(v), std::end(v));
+    }
+    RadModelMeta m = flash_next_meta();
+    m.n_kv = (int)keys.size();
+    m.kv_key = keys.data();
+    m.kv_val = vals.data();
+    return m;
+}
+
+/* The position-like operands of an issue, in order: 'P' this pass's index positions, 'R<rows>' its rotary
+ * planes (plane 0 alone or all three). */
+std::string position_tags(const RecIssue& r, const RadBatch& b) {
+    std::string t;
+    for (const RadOperand& o : r.opd) {
+        if (o.raw && o.raw == (const void*)b.positions) t += "P";
+        if (o.raw && o.raw == (const void*)b.rope_pos) t += "R" + std::to_string(o.rows);
+    }
+    return t;
+}
+
+TEST(media_steps_run_stock_and_the_text_after_an_image_approximates_at_its_rotary_positions) {
+    static int32_t rp[3 * 4096], mm[8];
+    static uint16_t embd[8 * 2560], pix[64 * 1536];
+    static int32_t coord[4 * 64], ecu[2] = {0, 64};
+    using qwen4exp_kva::PATH_STOCK;
+    struct Edit { const char* why; std::function<void(RadBatch&)> f; };
+    const std::vector<Edit> media = {
+        {"encoder pass", [](RadBatch& b) { b.enc = 1; b.enc_n_patch = 64; b.enc_pixels = pix; b.enc_coord = coord;
+                                           b.enc_n_seg = 1; b.enc_cu = ecu; b.enc_max_seg = 64; }},
+        {"media rows, mixed components", [](RadBatch& b) { b.rope_pos = rp; b.rope_mixed = 1; b.n_mm_rows = 8;
+                                                           b.mm_rows = mm; b.mm_embd = embd; }},
+        {"media rows", [](RadBatch& b) { b.rope_pos = rp; b.n_mm_rows = 8; b.mm_rows = mm; b.mm_embd = embd; }},
+        {"mixed components", [](RadBatch& b) { b.rope_pos = rp; b.rope_mixed = 1; }},
+    };
+    for (const char* mode : {"speed", "quality"}) {
+        RadModelMeta meta = flash_next_vl_meta();
+        RadBuildCtx c = served_ctx();
+        c.max_enc_patches = 4096;
+        RadBuilder kva;
+        served(kva);
+        hold_kva(kva, {"kva.proj", "kva.st"});
+        hold_score(kva, "kva.rowsel.score");
+        Env env({{"RADIANCE_KVA", mode}});
+        REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
+        const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+        REQUIRE(qwen4exp_fp8::g_model[0].media && qwen4exp_fp8::g_model[0].g.rope_mc && k.have_proj);
+        for (const Edit& e : media) {
+            Batch x = make_step(kva, {{2048}, 0, 2048});
+            e.f(x.b);
+            CHECK_EQ(qwen4exp_kva::derive(k, &x.b).path, PATH_STOCK);
+            const Run got = run_step(qwen4exp_kva::step, x.b), want = run_step(qwen4exp_fp8::step, x.b);
+            CHECK(want.issues.size() > (x.b.enc ? 10u : 100u));
+            if (differ(got.all, want.issues) != 0) std::fprintf(stderr, "    %s / %s differs\n", mode, e.why);
+            CHECK_EQ(differ(got.all, want.issues), 0);
+            CHECK_EQ(got.device_calls, 0);
+        }
+        /* the text after it: rotary planes present, components equal -- approximated, at the rotary positions */
+        Batch x = make_step(kva, {{2048}, 0, 2048});
+        x.b.rope_pos = rp;
+        const qwen4exp_kva::Pass p = qwen4exp_kva::derive(k, &x.b);
+        CHECK(p.path != PATH_STOCK && p.b == 2048);
+        const Run got = run_step(qwen4exp_kva::step, x.b), stock = run_step(qwen4exp_fp8::step, x.b);
+        std::map<rad_op, std::set<std::string>> want;
+        for (const RecIssue& r : stock.issues) want[r.op].insert(position_tags(r, x.b));
+        int rotary = 0, bad = 0;
+        for (const RecIssue& r : got.issues) {
+            const std::string t = position_tags(r, x.b);
+            rotary += t.find('R') != std::string::npos;
+            const auto w = want.find(r.op);
+            if (w == want.end() || w->second.count(t)) continue;
+            if (bad++ < 3) std::fprintf(stderr, "    %s: op %u takes positions '%s'\n", mode, (unsigned)r.op, t.c_str());
+        }
+        CHECK_EQ(bad, 0);
+        /* not vacuous: at least layer 3's q and k (in-tree) and layer 7's k and indexer work list (filled) */
+        CHECK(rotary >= 4);
+    }
+}
+
 /* The folder's files are mapped, hashed and their tensors named; what a partial or damaged download
  * looks like is refused naming the file. */
 TEST(a_folder_is_read_and_a_damaged_one_refused_by_name) {

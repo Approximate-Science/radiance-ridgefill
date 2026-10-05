@@ -96,6 +96,10 @@ startup by name (tail of two steps less a tile or more, kva.so missing, or libr4
 `kva_gemm_nt_bias` forwards to libr4d's `gemm_nt_bias` row). Each approximate step logs one `kva: approximate step` line
 (rank 0) with the numbers it was decided from.
 
+**Images and video:** a step that runs the vision encoder, holds media rows or has rows whose rotary components
+differ runs the stock step; the text chunks after it are approximated again, at their rotary positions (which run
+behind the token index after an image), exactly where the stock step reads them. Draft-head passes always run stock.
+
 **A shorter step for a long tail, with no plugin change:** `--checkpoint-interval` below
 `--max-num-batched-tokens` gives each request smaller chunks while `n_ahead` stays capped at the step, at the
 cost of more snapshot writes.
