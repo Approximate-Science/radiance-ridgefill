@@ -15,16 +15,17 @@
  * Declared only with MTP on (max_spec > 0), in a projecting mode, with the folder holding the map and
  * RADIANCE_KVA_FINAL not off. Cost: hc more ring copies and GEMMs an approximate pass -- +210 MB a pass a rank
  * over the link (the bf16 projector moves 1.26 GB, int8 0.64 GB) and +17% of the projector's MACs -- 200 MiB
- * more host-mapped memory a rank, the slots sized for a bf16 block even with an int8 folder (2 x 50 MiB), and
- * `kva_final` [max_tok, hc*n] in the arena.
+ * more host-mapped memory a rank, the ring's one slot sized for a bf16 block even with an int8 folder (50 MiB),
+ * h_S kept even with an int8 folder, and `kva_final` [max_tok, hc*n] in the arena.
  */
 #ifndef QWEN4EXP_KVA_FINAL_H
 #define QWEN4EXP_KVA_FINAL_H
 
 namespace qwen4exp_kva {
 
-/* kva_layer.h: lane 0 waits for ring block j, lane 1 starts block j + 1. */
-inline void ring_next(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li);
+/* kva_layer.h: lane 0 waits for the slot's block; after its GEMM, lane 1 copies block j + 1 into the slot. */
+inline void ring_wait(RadCtx* c, const Kva& k);
+inline void ring_after(RadCtx* c, const Kva& k, int64_t li);
 
 /* The predicted final stream's buffer and its GEMM (the engine's gemm_nt_bias, forwarded by kva.so, the map
  * block as an IN operand). Every buffer it touches takes the whole program (rad_buf_concurrent). */
@@ -50,9 +51,10 @@ inline void final_stream(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, 
     const rad_buf src = masked ? k.b_hs : m.b_h;
     const int64_t r0 = masked ? p.s_lb : 0, rows = lean ? T : p.b - r0;
     for (int64_t i = 0; i < hc; ++i) {
-        ring_next(c, k, m, m.g.n_layer + i);
+        ring_wait(c, k);
         RAD_ISSUE_N(c, k.op_final, rows, brow_slice(src, r0, rows, wide), k.final_w[(size_t)i],
                     k.final_b[(size_t)i], RAD_NONE, bcol_at(k.b_final, r0, wide, i * n, n, rows));
+        ring_after(c, k, m.g.n_layer + i);
     }
     if (lean)
         RAD_ISSUE_N(c, k.op_cast, T, brows(k.b_final, T), brows(m.b_h, T));

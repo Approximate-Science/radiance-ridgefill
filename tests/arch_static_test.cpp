@@ -735,9 +735,9 @@ TEST(speed_takes_the_folder_and_declares_its_kernel_ops) {
     CHECK_EQ(undo, 3);    /* delta-net layers 4, 5, 6 */
     CHECK_EQ(apply, 3);
     CHECK_EQ(gemm, 8 - kSplit);
-    /* VRAM copies: the 3 corrections only (speed reads no row table); the maps and biases are written
-     * into the host block on the host */
-    CHECK_EQ(g_mem.copies.size(), (size_t)3);
+    /* no VRAM copies: the maps, biases and corrections are written into the host block on the host; the
+     * VRAM block is the ring's one slot */
+    CHECK_EQ(g_mem.copies.size(), (size_t)0);
     for (int l = 0; l < 8; ++l) {
         CHECK_EQ(k.proj_w[(size_t)l].kind == RAD_OPK_RAW, l >= kSplit);
         CHECK_EQ(k.st[(size_t)l].kind == RAD_OPK_RAW, l >= kSplit && l != 7);
@@ -747,7 +747,7 @@ TEST(speed_takes_the_folder_and_declares_its_kernel_ops) {
     RadBuilder again;
     hold_appended_weights(again);
     CHECK_EQ(qwen4exp_kva::declare(&again, &meta, &c), RAD_OK);
-    CHECK_EQ(g_mem.copies.size(), (size_t)3);
+    CHECK_EQ(g_mem.copies.size(), (size_t)0);
 }
 
 /* What each RAW operand points at is the copy of exactly its tensor: the projector map [n, hc*n]
@@ -793,15 +793,16 @@ TEST(the_raw_operands_point_at_their_tensors_copies) {
                 CHECK(std::memcmp(block, src("proj." + L + ".weight"), 2560 * row) == 0);
                 CHECK(std::memcmp(block + 2560 * row, src("proj." + L + ".bias"), 2560 * 2) == 0);
                 if (l == 7) continue;
-                const Upload* us = copy_of(k.st[(size_t)l]);
-                REQUIRE(us != nullptr);
-                CHECK(us->src == src("st." + L) + rank * heads * 4);
-                CHECK_EQ(us->bytes, heads * 4);
+                /* this rank's value heads of the correction, in the host block, read through its device view */
+                const unsigned char* st = (const unsigned char*)k.st[(size_t)l].raw - kDeviceView;
+                CHECK(st >= (const unsigned char*)up.host && st + heads * 4 <= (const unsigned char*)up.host + up.host_bytes);
+                CHECK(std::memcmp(st, src("st." + L) + rank * heads * 4, (size_t)heads * 4) == 0);
                 CHECK(k.st[(size_t)l].rows == m.gcfg.n_head_v && k.st[(size_t)l].cols == m.gcfg.head_v * m.gcfg.head_k);
             }
-            const Upload* sc = copy_of(k.score);
-            REQUIRE(sc != nullptr);
-            CHECK(sc->src == src("score_all") && sc->bytes == 248320 * 4 && k.score.rows == 248320);
+            const unsigned char* sc = (const unsigned char*)k.score.raw - kDeviceView;
+            CHECK(sc >= (const unsigned char*)up.host && sc + 248320 * 4 <= (const unsigned char*)up.host + up.host_bytes);
+            CHECK(std::memcmp(sc, src("score_all"), 248320 * 4) == 0 && k.score.rows == 248320);
+            CHECK(g_mem.copies.empty());
         }
 }
 
@@ -819,16 +820,17 @@ TEST(the_maps_live_in_host_mapped_memory) {
     const int hosts = g_mem.host;
     const std::string log = stderr_of([&] { CHECK_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK); });
     CHECK_EQ(g_mem.host, hosts + 1);
-    CHECK_EQ(g_mem.copies.size(), (size_t)(3 + 1));   /* corrections + row table */
+    CHECK(g_mem.copies.empty());   /* the corrections and the row table are host-block pieces too */
     const qwen4exp_kva::Upload& u = qwen4exp_kva::g_upload[0];
     const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
     for (int l = kSplit; l < 8; ++l) {
         const uintptr_t w = (uintptr_t)k.ring_src[(size_t)l].raw;
         CHECK(w >= (uintptr_t)u.host + kDeviceView && w < (uintptr_t)u.host + kDeviceView + (uintptr_t)u.host_bytes);
     }
-    CHECK_EQ(u.host_bytes, (int64_t)(8 - kSplit) * (2561LL * 10240 * 2));   /* one [n + 1, hc*n] row block a layer */
+    CHECK(u.host_bytes >= (int64_t)(8 - kSplit) * (2561LL * 10240 * 2) + 3 * (24LL * 128 * 128 * 4) + 248320 * 4);
+    CHECK_EQ(u.vram_bytes, 2561LL * 10240 * 2);   /* the ring's one slot, nothing else */
     CHECK(has(log, "MiB host-mapped (bf16 maps)"));
-    CHECK((uintptr_t)k.st[kSplit].raw >= kFakeVram && (uintptr_t)k.score.raw >= kFakeVram);
+    CHECK((uintptr_t)k.st[kSplit].raw >= (uintptr_t)u.host + kDeviceView && (uintptr_t)k.score.raw >= (uintptr_t)u.host + kDeviceView);
 }
 
 /* ==================================================================== the masked path: declare */
@@ -2236,10 +2238,10 @@ TEST(the_forward_table_starts_empty) {
     CHECK(qwen4exp_kva::find_shadowed("").empty() || std::getenv("RADIANCE_HOME") != nullptr);
 }
 
-/* THE STAGING RING (DD-L): with host placement, each late layer's map + bias row block is copied
- * into one of two VRAM slots on lane 1 -- layer S's at the start of the pass, layer li+1's right
- * before layer li's GEMM, behind a join that waits for the GEMM two layers back to have been handed
- * to lane 0 -- and lane 0 waits for a layer's copy before its GEMM, which reads that slot. */
+/* THE STAGING RING (DD-L, one slot since Stage E): each late layer's map + bias row block is copied
+ * into the ring's one VRAM slot on lane 1 -- layer S's at the start of the pass, layer li+1's right
+ * after layer li's GEMM, behind a join that waits for that GEMM to have been handed to lane 0 -- and
+ * lane 0 waits for a layer's copy before its GEMM, which reads the slot. */
 TEST(the_staging_ring_copies_each_map_a_layer_ahead_on_lane_1) {
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
@@ -2253,10 +2255,12 @@ TEST(the_staging_ring_copies_each_map_a_layer_ahead_on_lane_1) {
     REQUIRE(k.op_ring != 0);
     CHECK_EQ(kva.ops[k.op_ring - 1].op, std::string("cast"));
     const int64_t block = 2561LL * 10240 * 2;
-    CHECK_EQ(u.host_bytes, (8 - kSplit) * block);
+    /* the row blocks, then this rank's correction heads (a few MiB) */
+    CHECK(u.host_bytes > (8 - kSplit) * block && u.host_bytes < (8 - kSplit) * block + (16 << 20));
+    CHECK_EQ(u.vram_bytes, block);
     for (int l = kSplit; l < 8; ++l) {
         const uintptr_t slot = (uintptr_t)k.proj_w[(size_t)l].raw, other = (uintptr_t)k.proj_w[(size_t)(l ^ 1)].raw;
-        CHECK(slot >= kFakeVram && slot != other);
+        CHECK(slot >= kFakeVram && slot == other);   /* one slot, every layer in turn */
         CHECK_EQ((uintptr_t)k.proj_b[(size_t)l].raw, slot + 2560u * 10240 * 2);
         CHECK_EQ((uintptr_t)k.ring_dst[(size_t)l].raw, slot);
         CHECK_EQ(k.ring_src[(size_t)l].rows, 2561);
@@ -2276,11 +2280,13 @@ TEST(the_staging_ring_copies_each_map_a_layer_ahead_on_lane_1) {
         } else if (i.op && i.op == k.op_proj[(size_t)kSplit]) seq.push_back("gemm4");
         else for (int x = kSplit + 1; x < 8; ++x) if (i.op == k.op_proj[(size_t)x]) seq.push_back("gemm" + std::to_string(x));
     }
+    /* one slot: lane 0 waits for layer l's copy, its GEMM reads the slot, then lane 1 (after lane 0) copies
+     * layer l + 1 into it */
     const std::vector<std::string> want = {
         "join01", "lane1", "copy4", "lane0",
-        "join10", "join01", "lane1", "copy5", "lane0", "gemm4",
-        "join10", "join01", "lane1", "copy6", "lane0", "gemm5",
-        "join10", "join01", "lane1", "copy7", "lane0", "gemm6",
+        "join10", "gemm4", "join01", "lane1", "copy5", "lane0",
+        "join10", "gemm5", "join01", "lane1", "copy6", "lane0",
+        "join10", "gemm6", "join01", "lane1", "copy7", "lane0",
         "join10", "gemm7" };
     CHECK(seq == want);
     if (seq != want) for (const std::string& e : seq) std::fprintf(stderr, " %s", e.c_str());
@@ -2469,8 +2475,13 @@ std::vector<std::string> as_int8(const std::vector<RecIssue>& bf16, const RadBui
     for (const RecIssue& r : bf16) {
         int l = -1;
         for (int x = kSplit; x < 8; ++x) if (r.op == kb.op_proj[(size_t)x]) l = x;
+        /* int8 keeps no h_S (no MTP here): the bf16 pass's copy into it has no int8 counterpart, and the codes
+         * are made from b_h's same rows, which still hold the layer-S stream at layer S */
+        if (r.op == kb.op_cast && r.opd.size() > 1 && r.opd[1].kind == RAD_OPK_BUF && r.opd[1].handle == kb.b_hs) continue;
         if (l < 0) { out.push_back(named({r}, bb, kb)[0]); continue; }
-        const RadOperand src = rebuf(r.opd[0], bb, b8), dst = rebuf(r.opd[4], bb, b8);
+        RadOperand src = rebuf(r.opd[0], bb, b8);
+        const RadOperand dst = rebuf(r.opd[4], bb, b8);
+        if (r.opd[0].kind == RAD_OPK_BUF && r.opd[0].handle == kb.b_hs) src.handle = qwen4exp_fp8::g_model[0].b_h;
         RadOperand q = src, s = src;
         q.handle = k8.b_q8;
         s.handle = k8.b_s8;
@@ -2512,6 +2523,9 @@ TEST(the_int8_projector_quantises_the_stream_once_then_gemm_and_bias_a_layer) {
         REQUIRE_EQ(qwen4exp_kva::declare(&i8, &meta, &c), RAD_OK);
         const qwen4exp_kva::Kva& k8 = qwen4exp_kva::g_kva[0];
         REQUIRE(k8.int8 && !kb.int8);
+        /* the slot follows the folder's block (1,280 rows of codes, 20 of scales, 1 of bias), and no h_S */
+        CHECK_EQ(qwen4exp_kva::g_upload[0].vram_bytes, 1301LL * 10240 * 2);
+        CHECK(k8.b_hs == 0 && kb.b_hs != 0);
         const Run r8 = run_step(qwen4exp_kva::step, x.b);
         const std::vector<std::string> got_t = named(r8.all, i8, k8), want_t = as_int8(rb.all, bf, kb, i8, k8);
         int quants = 0, bad = 0;
@@ -2638,8 +2652,8 @@ TEST(the_final_map_is_held_and_declared_only_with_mtp) {
             CHECK_EQ(k.ring_src[(size_t)(8 + i)].rows, 2561);
             CHECK(std::memcmp(block, final_bytes() + (size_t)i * 2560 * row, (size_t)2560 * row) == 0);
             CHECK(std::memcmp(block + 2560 * row, final_bytes() + 10240LL * row + (size_t)i * 2560 * 2, 2560 * 2) == 0);
-            /* the slot it lands in keeps alternating after layer 7 (index 8 + i), and the GEMM reads it */
-            CHECK(k.ring_dst[(size_t)(8 + i)].raw == k.ring_dst[(size_t)((8 + i) % 2 ? 7 : 6)].raw);
+            /* the ring's one slot, and the GEMM reads it */
+            CHECK(k.ring_dst[(size_t)(8 + i)].raw == k.ring_dst[7].raw);
             CHECK(k.final_w[(size_t)i].raw == k.ring_dst[(size_t)(8 + i)].raw);
             CHECK_EQ((uintptr_t)k.final_b[(size_t)i].raw, (uintptr_t)k.final_w[(size_t)i].raw + 2560u * row);
         }
@@ -2709,8 +2723,8 @@ TEST(with_mtp_the_bulk_rows_take_the_predicted_final_stream_before_the_epilogue)
                 } else if (i.op == k.op_final) seq.push_back("final");
             }
             const std::vector<std::string> tail(seq.end() - 15, seq.end());
-            const std::vector<std::string> want = { "join10", "join01", "copy9", "final", "join10", "join01", "copy10",
-                                                    "final", "join10", "join01", "copy11", "final", "join10", "final" };
+            const std::vector<std::string> want = { "join10", "final", "join01", "copy9", "join10", "final", "join01",
+                                                    "copy10", "join10", "final", "join01", "copy11", "join10", "final" };
             CHECK(std::vector<std::string>(tail.end() - 14, tail.end()) == want);
             CHECK(std::find(seq.begin(), seq.end(), "copy8") != seq.end());
         }

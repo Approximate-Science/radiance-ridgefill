@@ -71,6 +71,7 @@ naming both, and runs. `arch/kva_config.h` is the full list of switches.
 | `RADIANCE_KVA_ROWSEL` | `class`, `random`, `all` | quality mode's exact-row rule |
 | `RADIANCE_KVA_SHARE` | (0, 1], default 0.25 | share of a window's class matches kept exact |
 | `RADIANCE_KVA_PROJECTOR` | a directory | the projector folder, ahead of `projector/` beside the model. A folder built by `tools/kva_projector.py int8 --from <bf16 folder> --out <dir>` holds the maps in int8 (the container trunk's own `i8*bf16[1x128]` encoding, 0.65 GiB instead of 1.23 GiB, half the bytes each approximated chunk streams); point this switch at it to use it |
+| `RADIANCE_KVA_FINAL` | `on` (default), `off` | with MTP on (`--num-speculative-tokens` > 0) and a folder holding the `final` map (`tools/kva_projector.py final`), each approximated chunk predicts its bulk rows' final stream, which the drafting head reads (+210 MB a chunk over the link, +200 MiB host memory, a 50 MiB slot even with int8 maps); `off` is the control |
 | `RADIANCE_KVA_ROWSEL_TABLE` | `class`/`none`/`all` | which of the folder's row tables quality mode uses (`none`/`all` are controls) |
 | `RADIANCE_KVA_STAGE` | `auto` (default), `stock` | the expert-stager lever: `auto` lets the late layers stream only their routed experts on an approximate pass (notes/impl.md §2); `stock` leaves staging as it is |
 | `RADIANCE_KVA_STAGE_ROWS` | rows | `auto` streams only when the pass has at most this many exact rows, else the pass runs the stock step. Default: no limit -- measured on warmed servers, streaming beats the stock step by 220-240 ms a straddling chunk at 512-1,984 exact rows, and a 64-row limit cost 331 ms at 9,216 and ran every T 2560 chunk exact (notes/impl.md, Stage A.1 R96) |
@@ -80,10 +81,12 @@ naming both, and runs. `arch/kva_config.h` is the full list of switches.
 | `RADIANCE_KVA_PROJ`, `RADIANCE_KVA_ST`, `RADIANCE_KVA_DECLARE` | -- | retired with the container append; refused by name |
 | `RADIANCE_KVA_PROJ_PLACE`, `RADIANCE_KVA_PROJ_RING` | -- | retired: the projector is always streamed from host memory (below); refused by name |
 
-**Where the projector lives:** in host memory, always. Each rank holds the maps in one host-mapped block (1.2 GiB
-bf16, 0.6 GiB int8) and two VRAM slots of one late layer's map (2 × 50 MiB bf16, 2 × 25.4 MiB int8); on every
-approximated chunk the second lane copies layer L+1's map into the free slot while layer L computes. VRAM costs the
-slots, this rank's correction heads (27 MiB) and the row table (1 MiB) -- about 1% of the resident expert slots.
+**Where the projector lives:** in host memory, always. Each rank holds the maps, its correction heads and the row
+table in one host-mapped block (1.2 GiB bf16, 0.6 GiB int8) and ONE VRAM slot the size of one late layer's map
+(50 MiB bf16, 25.4 MiB int8); on every approximated chunk, as soon as layer L's GEMM has read the slot, the second
+lane copies layer L+1's map into it while the rest of layer L computes. Every request pays that slot and the
+plugin's arena buffers in resident experts (the layer-S stream, kept with bf16 maps or MTP only, and the projected
+inputs), so they are kept as small as the pass allows (notes/stagee.md §14).
 Keeping the maps in VRAM instead (an earlier option, removed) cost ~1,100 expert slots a card and made a
 configuration stock radiance serves refuse to start (`--max-num-batched-tokens 8192 --max-num-seqs 10`: the pinned
 pool overflowed), and the plugin cannot see the engine's budget when it declares (notes/stagee.md §8).

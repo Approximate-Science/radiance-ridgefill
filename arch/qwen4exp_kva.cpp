@@ -186,7 +186,7 @@ static void mask_rows(RadCtx* c, const Kva& k, const RadBatch* batch, const Pass
 /* After layer S-1: the layer-S stream of the bulk superset copied into h_S, which every projector
  * reads from here on (b_h's bulk rows become a stream nobody reads). */
 static void copy_stream(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, const Pass& p) {
-    if (!k.op_cast) return;
+    if (!k.op_cast || !k.b_hs) return;   /* int8 without the MTP map keeps no h_S (kva_layer.h project_masked) */
     const int64_t wide = m.hccfg.hc * m.g.n_embd, rows = p.b - p.s_lb;
     RAD_ISSUE_N(c, k.op_cast, rows, brow_slice(m.b_h, p.s_lb, rows, wide),
                 brow_slice(k.b_hs, p.s_lb, rows, wide));

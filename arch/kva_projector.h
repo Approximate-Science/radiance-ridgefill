@@ -8,12 +8,12 @@
  * MEMORY. Each rank's real declare runs on its own thread with its card bound (radiance
  * core/engine_bringup.cpp:477-488). THE MAPS LIVE IN HOST MEMORY (Dylan, Stage E): one host-mapped
  * block a rank (the allocation is not portable, core/device/hip.cpp:300-306), outside the VRAM
- * budget, holding each late layer's map as one row block; two VRAM slots of one block take turns,
- * each layer copied in on the second lane a layer ahead of its GEMM (the staging ring, kva_layer.h).
- * The slots, this rank's correction heads and the row table are one rad_dev_alloc block, filled
- * synchronously at declare (nothing is recording); plan() subtracts it as already held
- * (core/mem/vram_budget.cpp:76-91). Sizing declares and tools allocate nothing. Freed at
- * rad_plugin_close.
+ * budget, holding each late layer's map as one row block, this rank's correction heads and the row
+ * table; ONE VRAM slot of one block (50 MiB bf16, 25.4 MiB int8) takes each layer in turn, copied on
+ * the second lane after the previous layer's GEMM (the staging ring, kva_layer.h). The slot is the
+ * plugin's only rad_dev_alloc; plan() subtracts it as already held (core/mem/vram_budget.cpp:76-91), and
+ * every request pays it in resident experts, so it is kept to one block (notes/stagee.md §12-§14).
+ * Sizing declares and tools allocate nothing. Freed at rad_plugin_close.
  *
  * THE INT8 VARIANT (a folder whose manifest says "projector": {"dtype": "i8"}, R79): codes and a
  * scale per 128 columns of a row instead of the bf16 map -- 0.51x the bytes on the link and in the
@@ -238,7 +238,7 @@ inline RowBlock row_block(const qwen4exp_fp8::Model& m, int64_t codes = -1, int6
 }
 
 /* Where each tensor of one rank's copy lands: the host block offset of each late layer's row block
- * (-1 below S), the two VRAM ring slots, the correction and the row table in VRAM. */
+ * (-1 below S), of each layer's value heads of the correction and of the row table; the ring's one VRAM slot. */
 struct Layout {
     std::vector<int64_t> w, st, slot, fw;   /* fw: the final map's hc row blocks (with MTP), else empty */
     RowBlock rb;
@@ -251,7 +251,7 @@ inline void put_piece(std::vector<Piece>& plan, const unsigned char* src, int64_
 }
 
 /* THE STAGING RING (Dylan's DD-L; since Stage E the only placement): every late layer's row block in
- * the host block, two VRAM slots of one block's size taking turns (kva_layer.h ring_*). int8 maps are
+ * the host block, ONE VRAM slot of one block's size taking each layer in turn (kva_layer.h ring_*). int8 maps are
  * relaid out into the engine's int8 GEMM's stored form first (kva_int8.h); `stored` keeps them alive
  * until the copy. False and `why` when that GEMM cannot take them. */
 /* THE FINAL MAP'S BLOCKS (with MTP, kva_final.h): hc row blocks of [n + 1, wide] bf16 -- rows i*n .. i*n + n of
@@ -299,9 +299,10 @@ inline bool plan_maps(const Folder& f, const Loaded& l, const qwen4exp_fp8::Mode
         put_piece(plan, b->data, b->bytes, x->w[li] + x->rb.bias_at);
     }
     if (final) plan_final(f, m, plan, x);
-    /* a slot holds the larger of a layer's block and (with MTP) a final block */
+    /* ONE slot (kva_layer.h ring_copy), the larger of a layer's block -- so int8 maps take half -- and (with
+     * MTP) a final block */
     const int64_t slot = final ? std::max(block, (n + 1) * wide * 2) : block;
-    for (int s = 0; s < 2; ++s) x->slot.push_back(place_piece(plan, &x->vend, nullptr, slot, false));
+    x->slot.push_back(place_piece(plan, &x->vend, nullptr, slot, false));
     return true;
 }
 
@@ -316,18 +317,20 @@ inline Layout plan_rank(const Loaded& l, const qwen4exp_fp8::Model& m, const Con
     for (auto* v : { &x.w, &x.st }) v->assign(m.g.n_layer, -1);
     if (c.mode == MODE_PLUMB) return x;
     if (!plan_maps(f, l, m, final, plan, &x, stored, why)) return x;
+    /* The correction and the row table live in the host block too (Stage E): read zero-copy by their kernels,
+     * once an element a pass (the correction's undo/apply, M = 1; the mask's score gather), on approximate
+     * passes only -- VRAM is what every request pays in resident experts. */
     for (int64_t li = l.split; li < m.g.n_layer; ++li) {
         const FolderTensor* st = m.layers[(size_t)li].full ? nullptr : tensor(f, "st." + std::to_string(li));
-        if (st) x.st[li] = place_piece(plan, &x.vend, st->data + rank * heads, heads, false);
+        if (st) x.st[li] = place_piece(plan, &x.hend, st->data + rank * heads, heads, true);
     }
     const FolderTensor* sc = c.mode == MODE_QUALITY ? tensor(f, kScoreNames[c.rowsel_table]) : nullptr;
-    if (sc) x.score = place_piece(plan, &x.vend, sc->data, sc->bytes, false);
+    if (sc) x.score = place_piece(plan, &x.hend, sc->data, sc->bytes, true);
     return x;
 }
 
-/* The issue sites' operands for a layout: each late layer's GEMM reads the ring slot it takes turns
- * on (codes / scales / bias at the row block's offsets), and the ring copies its host row block
- * there. */
+/* The issue sites' operands for a layout: each late layer's GEMM reads the ring's one slot (codes /
+ * scales / bias at the row block's offsets), and the ring copies its host row block there. */
 inline void take_operands(Upload& u, const Layout& x, const qwen4exp_fp8::Model& m, bool int8) {
     const int64_t n = m.g.n_embd, wide = m.hccfg.hc * n, L = m.g.n_layer, F = (int64_t)x.fw.size();
     const GdnFP8::Config& g = m.gcfg;
@@ -335,17 +338,17 @@ inline void take_operands(Upload& u, const Layout& x, const qwen4exp_fp8::Model&
     for (auto* v : { &u.ring_src, &u.ring_dst }) v->assign(L + F, RAD_NONE);
     u.final_w.assign(F, RAD_NONE);
     u.final_b.assign(F, RAD_NONE);
-    for (int64_t i = 0; i < F; ++i) {   /* ring index L + i: the slots keep alternating after the last layer */
-        unsigned char* slot = dev_at(u, false, x.slot[(size_t)((L + i) % 2)]);
+    for (int64_t i = 0; i < F; ++i) {   /* ring index L + i: after the last layer, the same slot */
+        unsigned char* slot = dev_at(u, false, x.slot[0]);
         u.final_w[i] = RAD_P_T2(slot, RAD_BF16, n, wide);
         u.final_b[i] = RAD_P_T2(slot + n * wide * 2, RAD_BF16, n, 0);
         u.ring_src[L + i] = RAD_P_T2(dev_at(u, true, x.fw[(size_t)i]), RAD_BF16, n + 1, wide);
         u.ring_dst[L + i] = RAD_P_T2(slot, RAD_BF16, n + 1, wide);
     }
     for (int64_t li = 0; li < L; ++li) {
-        if (x.st[li] >= 0) u.st[li] = RAD_P_T2(dev_at(u, false, x.st[li]), RAD_F32, g.n_head_v, g.head_v * g.head_k);
+        if (x.st[li] >= 0) u.st[li] = RAD_P_T2(dev_at(u, true, x.st[li]), RAD_F32, g.n_head_v, g.head_v * g.head_k);
         if (x.w[li] < 0 || x.slot.empty()) continue;
-        unsigned char* slot = dev_at(u, false, x.slot[(size_t)(li % 2)]);
+        unsigned char* slot = dev_at(u, false, x.slot[0]);
         u.proj_w[li] = RAD_P_T2(slot, int8 ? RAD_I8 : RAD_BF16, n, wide);
         if (int8) u.proj_s[li] = RAD_P_T2(slot + x.rb.scale_at, RAD_BF16, n, wide / kI8Group);
         u.proj_b[li] = RAD_P_T2(slot + x.rb.bias_at, RAD_BF16, n, 0);
@@ -377,13 +380,12 @@ inline bool upload_rank(const Loaded& l, const qwen4exp_fp8::Model& m, const Con
     u.host_bytes = x.hend;
     if ((x.vend && !u.vram) || (x.hend && !u.host)) return false;
     take_operands(u, x, m, l.int8);
-    if (x.score >= 0) u.score = RAD_P_T2(dev_at(u, false, x.score), RAD_F32, m.g.n_vocab_all, 0);
+    if (x.score >= 0) u.score = RAD_P_T2(dev_at(u, true, x.score), RAD_F32, m.g.n_vocab_all, 0);
     if (c.mode == MODE_PLUMB)   /* plumb reads no fitted tensor: say so rather than print a row of zeros */
         std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: rank %d holds nothing (plumb reads no fitted tensor)\n", rank);
     else std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: rank %d holds the projector: %.1f MiB host-mapped "
-                         "(%s maps), %.1f MiB VRAM (two %.1f MiB staging-ring slots, correction, row table)\n",
-                 rank, (double)x.hend / (1 << 20), l.int8 ? "int8" : "bf16", (double)x.vend / (1 << 20),
-                 x.slot.empty() ? 0.0 : (double)(x.rb.rows * m.hccfg.hc * m.g.n_embd * 2) / (1 << 20));
+                         "(%s maps, correction, row table), %.1f MiB VRAM (the staging ring's one slot)\n",
+                 rank, (double)x.hend / (1 << 20), l.int8 ? "int8" : "bf16", (double)x.vend / (1 << 20));
     u.ok = true;
     return true;
 }

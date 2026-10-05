@@ -53,8 +53,8 @@
  *                                 engine's int8 GEMM (kva_int8.h)
  *
  * THE PROJECTOR IS ALWAYS STREAMED FROM HOST MEMORY (Dylan, 2026-10-05): its maps live in host-mapped
- * memory and each late layer's map is copied into one of two VRAM slots on the second lane ahead of
- * its GEMM (kva_projector.h, kva_layer.h ring_*). There is no placement choice: maps kept in VRAM cost
+ * memory and each late layer's map is copied into ONE VRAM slot on the second lane, after the previous
+ * layer's GEMM has read it (kva_projector.h, kva_layer.h ring_*). There is no placement choice: maps kept in VRAM cost
  * ~1,100 resident expert slots a card and made a configuration stock serves refuse to start (the
  * pinned pool overflowed at --max-num-batched-tokens 8192 --max-num-seqs 10), and the plugin cannot
  * see the engine's budget at declare to choose safely (notes/stagee.md §8).

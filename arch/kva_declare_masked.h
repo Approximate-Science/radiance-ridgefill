@@ -30,9 +30,15 @@ static int decl_projected(RadBuilder* b, const qwen4exp_fp8::Model& m, const Rad
     Geom g = m.g;
     g.max_tok = ctx->max_tok;
     const int64_t n = g.n_embd;
-    k.b_hs = decl_b(b, k.nm.f("kva_h_stream"), g.act_dtype, {g.max_tok, m.hccfg.hc * n});
+    /* h_S, the layer-S stream every projector reads on a masked pass (40 MiB at 2,048 rows, paid by every
+     * request in resident experts): not with int8 maps and no MTP map, whose codes are made from b_h at
+     * layer S (kva_layer.h project_masked) */
+    if (!k.int8 || k.want_final) {
+        k.b_hs = decl_b(b, k.nm.f("kva_h_stream"), g.act_dtype, {g.max_tok, m.hccfg.hc * n});
+        if (!k.b_hs) return RAD_E_INVAL;
+    }
     k.xp.x = decl_b(b, k.nm.f("kva_x_proj"), g.act_dtype, {g.max_tok, n});
-    if (!k.b_hs || !k.xp.x) return RAD_E_INVAL;
+    if (!k.xp.x) return RAD_E_INVAL;
     if (m.a_x.cq()) RAD_ARCH_TRY(k.xp.declare_qs(b, k.nm, g, "kva_x_proj", n, 0, m.a_x.q8_fed));
     k.xp.q8_fed = m.a_x.q8_fed;
     for (rad_buf h : { k.b_hs, k.xp.x, k.xp.cq(), k.xp.cs(), m.b_eids })
