@@ -1,7 +1,7 @@
 #!/bin/sh
 # release_session.sh -- THE FINAL RELEASE SESSION: one GPU session, from one commit of main.
 #
-#   gpuq.sh release env RK_RELEASE_VERSION=0.2.0 sh scripts/release_session.sh   (from a checkout of main's HEAD)
+#   gpuq.sh release env RK_RELEASE_VERSION=0.1.0 sh scripts/release_session.sh   (from a checkout of main's HEAD)
 #
 # Every server runs radiance 1.0.13's shipped flashnext profile (RK_RELEASE_FLAGS, below: MTP 3, prefix cache on with
 # host and disk tiers, 2,048-token steps, wht6 wire, 8 sequences), headroom 3,072 MiB instead of 96. Only the
@@ -26,7 +26,7 @@ cd "$W" || exit 1
 D=$(readlink -f "$W/data")
 COMMIT=$(git rev-parse HEAD) SHORT=$(git rev-parse --short HEAD)
 E=$W/evidence/release; mkdir -p "$E"
-: "${RK_RELEASE_VERSION:=0.2.0}"
+: "${RK_RELEASE_VERSION:=0.1.0}"
 # the radiance release the plugin is built against and served on (1.0.13 since the rebase, Dylan 2026-10-05):
 : "${RK_RADIANCE_VERSION:=1.0.13}"
 : "${RK_RADIANCE_SRC:=$D/radiance-src-1.0.13}"

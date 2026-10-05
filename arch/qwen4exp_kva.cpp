@@ -94,7 +94,7 @@ extern "C" int rad_plugin_open(void) {
 }
 extern "C" void rad_plugin_close(void) { qwen4exp_kva::free_uploads(); }
 RAD_ARCH_PROBE(qwen4exp_kva)
-RAD_ARCH_PLUGIN(qwen4exp_kva, "qwen4exp", "", "0.2.0",
+RAD_ARCH_PLUGIN(qwen4exp_kva, "qwen4exp", "", "0.1.0",
                 "Qwen4-Exp (Qwen3.8-Flash-Next) with KVA / RidgeFill prefill: the in-tree "
                 "qwen4exp_fp8 plugin plus projected late-layer cache fill (modes off, plumb, "
                 "speed, quality; RADIANCE_KVA, default off)")
