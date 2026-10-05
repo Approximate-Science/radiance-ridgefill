@@ -42,7 +42,10 @@
  * `<model dir>/projector/` and never from the container -- kva.* weights and keys an earlier append
  * left in a container are ignored:
  *
- *   env RADIANCE_KVA_PROJECTOR    the folder, ahead of projector/ beside the model file
+ *   env RADIANCE_KVA_PROJECTOR    the folder, ahead of projector/ beside the model file. A folder
+ *                                 whose manifest says "projector": {"dtype": "i8"} (tools/kva_projector.py
+ *                                 int8) holds the int8 maps: half the VRAM, read by the engine's int8 GEMM
+ *                                 (kva_int8.h); vram placement only
  *   env RADIANCE_KVA_PROJ_PLACE   vram | host: where the projector maps live. vram costs ~1.2 GiB
  *                                 of each card (fewer resident experts); host costs nothing on
  *                                 the card and reads the maps over the link on every

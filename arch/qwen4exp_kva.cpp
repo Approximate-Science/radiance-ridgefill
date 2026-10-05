@@ -85,7 +85,7 @@ static int declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* c
     k.nm = Names(ctx->scope ? ctx->scope : "");
     k.tile = m.gcfg.chunk;
     k.out_rows_ok = ctx->max_out_rows == 0 || k.cfg.score_bulk;
-    for (auto* v : { &k.proj_w, &k.proj_b, &k.st })
+    for (auto* v : { &k.proj_w, &k.proj_b, &k.proj_s, &k.st })
         v->assign(m.layers.size(), RAD_NONE);
     for (auto* v : { &k.op_undo, &k.op_apply, &k.op_rho, &k.op_proj })
         v->assign(m.layers.size(), 0);

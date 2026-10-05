@@ -204,6 +204,26 @@ inline void ring_next(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int
     if (li + 1 < m.g.n_layer) ring_copy(c, k, li + 1);
 }
 
+/* THE PROJECTOR over rows [r0, r0 + rows) of the layer-S stream `src` into `dst`: the bf16 GEMM, or
+ * with an int8 folder (R79) the stream's int8 codes, the int8 GEMM and the bias. Every late layer
+ * projects the SAME rows of the same stream (h_S on the masked path; b_h's bulk rows, which nothing
+ * writes, on the lean and straddle paths), so the codes are made once a pass, at layer S. */
+inline void project_rows(RadCtx* c, const Kva& k, int64_t li, rad_buf src, int64_t r0, int64_t rows,
+                         int64_t wide, RadOperand dst) {
+    const size_t L = (size_t)li;
+    if (!k.int8) {
+        RAD_ISSUE_N(c, k.op_proj[L], rows, brow_slice(src, r0, rows, wide), k.proj_w[L], k.proj_b[L], RAD_NONE, dst);
+        return;
+    }
+    const int64_t groups = wide / kI8Group;
+    if (li == k.split)
+        RAD_ISSUE_N(c, k.op_quant8, rows, brow_slice(src, r0, rows, wide), brow_slice(k.b_q8, r0, rows, wide),
+                    brow_slice(k.b_s8, r0, rows, groups));
+    RAD_ISSUE_N(c, k.op_proj[L], rows, brow_slice(k.b_q8, r0, rows, wide), brow_slice(k.b_s8, r0, rows, groups),
+                k.proj_w[L], k.proj_s[L], dst, RAD_NONE, RAD_NONE);
+    RAD_ISSUE_N(c, k.op_bias, rows, dst, k.proj_b[L], dst);
+}
+
 /* The projected block input for the bulk superset [s_lb, b): the projector over the layer-S stream
  * h_S, its codes from the plugin's own quantiser (never re-quantised from bf16, so exact rows keep
  * the connection read's bytes), then kva_select puts the marked rows over `x` and its codes. */
@@ -212,9 +232,7 @@ inline void project_masked(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m
     const int64_t r0 = p.s_lb, rows = p.b - p.s_lb, n = m.g.n_embd, wide = m.hccfg.hc * n;
     const ActFP8& x = m.a_x;
     ring_next(c, k, m, li);
-    RAD_ISSUE_N(c, k.op_proj[(size_t)li], rows, brow_slice(k.b_hs, r0, rows, wide),
-                k.proj_w[(size_t)li], k.proj_b[(size_t)li], RAD_NONE,
-                brow_slice(k.xp.x, r0, rows, n));
+    project_rows(c, k, li, k.b_hs, r0, rows, wide, brow_slice(k.xp.x, r0, rows, n));
     if (k.quant.op)
         RAD_ISSUE_N(c, k.quant.op, rows, brow_slice(k.xp.x, r0, rows, n),
                     brow_slice(k.xp.cq(), r0, rows, n), brow_slice(k.xp.cs(), r0, rows, n / RAD_FP8_BLOCK));
@@ -252,8 +270,7 @@ inline void masked_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int64_
 inline void project_bulk(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li, int64_t b) {
     const int64_t n = m.g.n_embd;
     ring_next(c, k, m, li);
-    RAD_ISSUE_N(c, k.op_proj[(size_t)li], b, brows(m.b_h, b), k.proj_w[(size_t)li],
-                k.proj_b[(size_t)li], RAD_NONE, brows(m.a_x.x, b));
+    project_rows(c, k, li, m.b_h, 0, b, m.hccfg.hc * n, brows(m.a_x.x, b));
     if (k.quant.op)
         RAD_ISSUE_N(c, k.quant.op, b, brows(m.a_x.x, b), brows(m.a_x.cq(), b),
                     brow_slice(m.a_x.cs(), 0, b, n / RAD_FP8_BLOCK));
@@ -342,8 +359,7 @@ inline void straddle_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int6
 /* The projector writes the block input `x` from the stream entering layer S, for every row. */
 inline void project(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li, int64_t T) {
     ring_next(c, k, m, li);
-    RAD_ISSUE_N(c, k.op_proj[(size_t)li], T, brows(m.b_h, T), k.proj_w[(size_t)li],
-                k.proj_b[(size_t)li], RAD_NONE, brows(m.a_x.x, T));
+    project_rows(c, k, li, m.b_h, 0, T, m.hccfg.hc * m.g.n_embd, brows(m.a_x.x, T));
 }
 
 /* x's codes, as the connection read would have written them: QuantFP8::step without its

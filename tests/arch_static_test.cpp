@@ -344,6 +344,7 @@ qwen4exp_kva::Folder g_test_folder;
 /* The plugin forgets every folder and copy; the next declare looks again (every case starts so). */
 void reset_projector() {
     qwen4exp_kva::g_folder_for_test = nullptr;
+    qwen4exp_kva::g_i8_rows_for_test = nullptr;
     qwen4exp_kva::g_loaded = qwen4exp_kva::Loaded{};
     qwen4exp_kva::free_uploads();
     g_mem.copies.clear();
@@ -2257,6 +2258,297 @@ TEST(the_staging_ring_copies_each_map_a_layer_ahead_on_lane_1) {
         "join10", "gemm7" };
     CHECK(seq == want);
     if (seq != want) for (const std::string& e : seq) std::fprintf(stderr, " %s", e.c_str());
+}
+
+/* ==================================================================== the int8 projector (R79) */
+
+/* FAKE INT8 GEMM ROWS, standing in for kva.so's forwards of libr4d's: each describes a stored form
+ * 256 bytes longer than the plane (so a copy's size shows whether the hook was asked) and writes
+ * every plane byte XOR 0x5A, then 0x77 padding. `tag` lets two rows disagree. */
+struct FakeI8 { int layouts = 0, relayouts = 0; const char* tag = "test.i8"; } g_fake_i8;
+
+long long param(const RadParam* p, int n_p, const char* key) {
+    for (int i = 0; i < n_p; ++i) if (!std::strcmp(p[i].key, key)) return p[i].ival;
+    return 0;
+}
+int fake_i8_layout(const RadParam* p, int n_p, int opd, const RadEncoding* enc, const int* sel,
+                   const RadTensor* pl, int n, RadLayout* out) {
+    ++g_fake_i8.layouts;
+    const bool ok = n == 1 && (opd == 2 || opd == 3) && enc->plane[sel[0]].dtype == (opd == 2 ? RAD_I8 : RAD_BF16) &&
+                    param(p, n_p, "group") == 128 && pl[0].shape[0] == param(p, n_p, "N");
+    if (!ok) return RAD_E_DTYPE;
+    *out = RadLayout{};
+    out->tag = opd == 2 ? g_fake_i8.tag : "test.i8.scale";
+    out->bytes = rad_dtype_bytes(pl[0].dtype, pl[0].shape[0] * pl[0].shape[1]) + 256;
+    return RAD_OK;
+}
+int fake_i8_relayout(const RadParam* p, int n_p, int opd, const RadEncoding* enc, const int* sel,
+                     const RadTensor* pl, int n, void* dst, int64_t bytes) {
+    RadLayout L;
+    const char* tag = g_fake_i8.tag;
+    if (fake_i8_layout(p, n_p, opd, enc, sel, pl, n, &L) != RAD_OK || L.bytes != bytes) return RAD_E_SHAPE;
+    g_fake_i8.tag = tag;
+    ++g_fake_i8.relayouts;
+    const unsigned char* s = (const unsigned char*)pl[0].data;
+    for (int64_t i = 0; i < bytes; ++i) ((unsigned char*)dst)[i] = i < bytes - 256 ? (unsigned char)(s[i] ^ 0x5A) : 0x77;
+    return RAD_OK;
+}
+RadKernelInfo fake_i8_row(const char* name) {
+    RadKernelInfo k{};
+    k.name = name;
+    k.op = "kva_gemm_nt_q";
+    k.domain = RAD_DOMAIN_DEVICE;
+    k.layout = fake_i8_layout;
+    k.relayout = fake_i8_relayout;
+    return k;
+}
+RadKernelInfo g_i8_m16 = fake_i8_row("fake_i8_m16"), g_i8_tiled = fake_i8_row("fake_i8_tiled");
+std::vector<const RadKernelInfo*> g_i8_rows = { &g_i8_m16, &g_i8_tiled };
+
+/* hold_kva's folder with the maps in int8 (codes + scale + the bf16 bias) and the manifest saying
+ * so; the fake int8 rows stand in for kva.so. */
+void hold_kva_i8(RadBuilder& b) {
+    hold_kva(b, {"kva.st"});
+    const std::string text = std::string(R"({"format": 1, "adapter": "qwen4exp", "split": 4,
+        "projector": {"dtype": "i8", "layout": "i8_row128"},
+        "model": {"arch_id": "qwen4exp", "name": "test-q38-flashnext",
+                  "meta": {"hc_count": "4", "linear_num_value_heads": "48"},
+                  "vocab_sha256": ")") + kTinyVocab + R"("},
+        "files": {"proj8.L4.safetensors": "unused by the test folder"}})";
+    g_test_folder.manifest = qwen4exp_kva::Json{};
+    qwen4exp_kva::json_parse(text.data(), text.size(), &g_test_folder.manifest);
+    for (int l = kSplit; l < 8; ++l) {
+        const std::string L = std::to_string(l);
+        add_tensor("proj." + L + ".codes", RAD_I8, {2560, 4 * 2560});
+        add_tensor("proj." + L + ".scale", RAD_BF16, {2560, 4 * 2560 / 128});
+        add_tensor("proj." + L + ".bias", RAD_BF16, {2560});
+    }
+    g_fake_i8 = FakeI8{};
+    qwen4exp_kva::g_i8_rows_for_test = &g_i8_rows;
+}
+
+/* The int8 folder's declare: the quantiser over the stream, the bias add, one int8 GEMM a late layer
+ * (no bf16 GEMM), the stream's codes and scales taking the whole program; each map copied in the
+ * stored form the GEMM rows' hooks made (their size, their bytes), shaped as the GEMM reads it. */
+TEST(an_int8_folder_uploads_its_maps_in_the_gemms_stored_form) {
+    RadModelMeta meta = flash_next_meta();
+    RadBuildCtx c = served_ctx();
+    Env env({{"RADIANCE_KVA", "quality"}});
+    RadBuilder kva;
+    served(kva);
+    hold_kva_i8(kva);
+    hold_score(kva, "kva.rowsel.score");
+    int64_t at = 0;   /* distinct source bytes per tensor */
+    for (auto& [name, t] : g_test_folder.tensors) { t.data = tensor_bytes() + at; at += 256; }
+    const std::string log = stderr_of([&] { CHECK_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK); });
+    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+    REQUIRE(k.int8);
+    std::map<std::string, int> n;
+    for (const RecOp& o : kva.ops) {
+        ++n[o.op];
+        if (o.op != "kva_gemm_nt_q") continue;
+        CHECK(o.w.empty());
+        for (const RecParam& q : o.p) {
+            if (q.key == "M") CHECK(q.kind == RAD_P_RANGE && q.ival == 1 && q.ihi == 2048);
+            if (q.key == "N") CHECK_EQ(q.ival, 2560);
+            if (q.key == "K") CHECK_EQ(q.ival, 10240);
+            if (q.key == "group") CHECK_EQ(q.ival, 128);
+            if (q.key == "dtype") CHECK_EQ(q.sval, std::string("i8a8"));
+        }
+    }
+    CHECK_EQ(n["kva_gemm_nt_q"], 8 - kSplit);
+    CHECK_EQ(n["kva_gemm_nt_bias"], 0);
+    CHECK_EQ(kva.ops[k.op_quant8 - 1].op, std::string("quant_act_i8g"));
+    CHECK_EQ(kva.ops[k.op_bias - 1].op, std::string("add"));
+    for (const RecParam& q : kva.ops[k.op_quant8 - 1].p) if (q.key == "n") CHECK_EQ(q.ival, 10240);
+    for (const RecParam& q : kva.ops[k.op_bias - 1].p) if (q.key == "n") CHECK_EQ(q.ival, 2560);
+    CHECK_EQ(kva.bufs[k.b_q8 - 1].second.dtype, (uint32_t)RAD_I8);
+    CHECK_EQ(kva.bufs[k.b_s8 - 1].second.dtype, (uint32_t)RAD_F32);
+    CHECK(kva.concurrent.count(k.b_q8) && kva.concurrent.count(k.b_s8));
+    CHECK_EQ(g_fake_i8.relayouts, 2 * (8 - kSplit));
+    auto copy_of = [&](const RadOperand& o) -> const Upload* {
+        for (const Upload& u : g_mem.copies) if (u.dst == o.raw) return &u;
+        return nullptr;
+    };
+    for (int l = kSplit; l < 8; ++l) {
+        const RadOperand &w = k.proj_w[(size_t)l], &sc = k.proj_s[(size_t)l], &b = k.proj_b[(size_t)l];
+        const Upload *uw = copy_of(w), *us = copy_of(sc), *ub = copy_of(b);
+        REQUIRE(uw && us && ub);
+        CHECK(w.dtype == RAD_I8 && w.rows == 2560 && w.cols == 10240);
+        CHECK(sc.dtype == RAD_BF16 && sc.rows == 2560 && sc.cols == 80);
+        CHECK_EQ(uw->bytes, 2560LL * 10240 + 256);
+        CHECK_EQ(us->bytes, 2560LL * 80 * 2 + 256);
+        CHECK(ub->src == g_test_folder.tensors["proj." + std::to_string(l) + ".bias"].data && ub->bytes == 5120);
+    }
+    CHECK(has(log, "; int8 maps"));
+    CHECK(kva.notes.size() && has(kva.notes.back(), "(int8, vram)"));
+}
+
+/* Each issue as text, with this declare's handles named: the KVA ops by role, every other op and
+ * buffer by its declared name (op names numbered by occurrence), projector memory as "vram". Two
+ * declares of different folders then compare op for op although their handles are numbered apart. */
+std::vector<std::string> named(const std::vector<RecIssue>& v, const RadBuilder& b, const qwen4exp_kva::Kva& k) {
+    std::map<rad_op, std::string> ops;
+    std::map<std::string, int> seen;
+    for (size_t i = 0; i < b.ops.size(); ++i) ops[(rad_op)(i + 1)] = b.ops[i].op + "#" + std::to_string(seen[b.ops[i].op]++);
+    for (int l = kSplit; l < 8; ++l) ops[k.op_proj[(size_t)l]] = "PROJ" + std::to_string(l);
+    if (k.op_quant8) ops[k.op_quant8] = "QUANT8";
+    if (k.op_bias) ops[k.op_bias] = "BIAS";
+    std::vector<std::string> out;
+    for (const RecIssue& r : v) {
+        std::string t = (ops.count(r.op) ? ops[r.op] : std::to_string(r.op)) + " n" + std::to_string(r.n);
+        for (const RadOperand& o : r.opd) {
+            const bool vram = o.kind == RAD_OPK_RAW && (uintptr_t)o.raw >= kFakeVram && (uintptr_t)o.raw < kFakeVramEnd;
+            t += " |" + std::to_string(o.kind) + "/" + std::to_string(o.dtype) + "/";
+            t += o.kind == RAD_OPK_BUF && o.handle ? b.bufs[o.handle - 1].first : vram ? std::string("vram")
+               : std::to_string(o.handle) + "@" + std::to_string((uintptr_t)o.raw);
+            t += "/" + std::to_string(o.offset) + "/" + std::to_string(o.rows) + "/" + std::to_string(o.cols);
+        }
+        out.push_back(t);
+    }
+    return out;
+}
+
+/* A buffer operand of declare `from` re-pointed at the buffer of the same name in declare `to`. */
+RadOperand rebuf(RadOperand o, const RadBuilder& from, const RadBuilder& to) {
+    if (o.kind != RAD_OPK_BUF || !o.handle) return o;
+    for (size_t i = 0; i < to.bufs.size(); ++i)
+        if (to.bufs[i].first == from.bufs[o.handle - 1].first) { o.handle = (uint32_t)(i + 1); return o; }
+    o.handle = 0;
+    return o;
+}
+
+/* The bf16 run's issues, named, with each projector GEMM replaced by what the int8 projector issues:
+ * at layer S the stream's codes from the GEMM's input rows, then per layer the int8 GEMM over those
+ * codes into the same destination, then the bias added in place. */
+std::vector<std::string> as_int8(const std::vector<RecIssue>& bf16, const RadBuilder& bb, const qwen4exp_kva::Kva& kb,
+                                 const RadBuilder& b8, const qwen4exp_kva::Kva& k8) {
+    std::vector<std::string> out;
+    for (const RecIssue& r : bf16) {
+        int l = -1;
+        for (int x = kSplit; x < 8; ++x) if (r.op == kb.op_proj[(size_t)x]) l = x;
+        if (l < 0) { out.push_back(named({r}, bb, kb)[0]); continue; }
+        const RadOperand src = rebuf(r.opd[0], bb, b8), dst = rebuf(r.opd[4], bb, b8);
+        RadOperand q = src, s = src;
+        q.handle = k8.b_q8;
+        s.handle = k8.b_s8;
+        s.offset = src.offset / 128;
+        std::vector<RecIssue> v;
+        if (l == kSplit) v.push_back({k8.op_quant8, {src, q, s}, r.n});
+        v.push_back({k8.op_proj[(size_t)l], {q, s, k8.proj_w[(size_t)l], k8.proj_s[(size_t)l], dst, RAD_NONE, RAD_NONE}, r.n});
+        v.push_back({k8.op_bias, {dst, k8.proj_b[(size_t)l], dst}, r.n});
+        for (const std::string& t : named(v, b8, k8)) out.push_back(t);
+    }
+    return out;
+}
+
+/* THE INT8 PASS IS THE BF16 PASS WITH THE PROJECTION SWAPPED, on every path that projects (lean,
+ * tail-only straddle, masked): same batch, same everything else, op for op; the stream quantised
+ * once, at layer S, from exactly the rows the GEMMs read. */
+TEST(the_int8_projector_quantises_the_stream_once_then_gemm_and_bias_a_layer) {
+    struct Case { const char* mode; Shape s; int path; };
+    for (const Case& cs : {Case{"speed", {{2048}, 0, 2048}, qwen4exp_kva::PATH_LEAN},
+                           Case{"speed", {{128}, 0, 1984}, qwen4exp_kva::PATH_STRADDLE},
+                           Case{"quality", {{128}, 0, 2048}, qwen4exp_kva::PATH_MASKED},
+                           Case{"quality", {{128}, 0, 1984}, qwen4exp_kva::PATH_MASKED},
+                           Case{"quality", {{1, 64, 128}, 1, 2048}, qwen4exp_kva::PATH_MASKED}}) {   /* s_lb 65 */
+        RadModelMeta meta = flash_next_meta();
+        RadBuildCtx c = served_ctx();
+        Env env({{"RADIANCE_KVA", cs.mode}});
+        RadBuilder bf, i8;
+        served(bf);
+        served(i8);
+        hold_kva(bf, {"kva.proj", "kva.st"});
+        hold_score(bf, "kva.rowsel.score");
+        REQUIRE_EQ(qwen4exp_kva::declare(&bf, &meta, &c), RAD_OK);
+        const qwen4exp_kva::Kva kb = qwen4exp_kva::g_kva[0];
+        Batch x = make_step(bf, cs.s);
+        REQUIRE_EQ(qwen4exp_kva::derive(kb, &x.b).path, cs.path);
+        const Run rb = run_step(qwen4exp_kva::step, x.b);
+        hold_kva_i8(i8);
+        hold_score(i8, "kva.rowsel.score");
+        REQUIRE_EQ(qwen4exp_kva::declare(&i8, &meta, &c), RAD_OK);
+        const qwen4exp_kva::Kva& k8 = qwen4exp_kva::g_kva[0];
+        REQUIRE(k8.int8 && !kb.int8);
+        const Run r8 = run_step(qwen4exp_kva::step, x.b);
+        const std::vector<std::string> got_t = named(r8.issues, i8, k8), want_t = as_int8(rb.issues, bf, kb, i8, k8);
+        int quants = 0, bad = 0;
+        for (const RecIssue& r : r8.issues) quants += r.op == k8.op_quant8;
+        CHECK_EQ(quants, 1);
+        CHECK_EQ(got_t.size(), want_t.size());
+        for (size_t i = 0; i < got_t.size() && i < want_t.size(); ++i)
+            if (got_t[i] != want_t[i] && bad++ < 3)
+                std::fprintf(stderr, "  %s/%d issue %zu:\n    got  %s\n    want %s\n", cs.mode, cs.path, i,
+                             got_t[i].c_str(), want_t[i].c_str());
+        CHECK_EQ(bad, 0);
+        /* and the int8 issues' projector operands are this layer's own copies */
+        for (const RecIssue& r : r8.issues)
+            for (int l = kSplit; l < 8; ++l) {
+                if (r.op == k8.op_proj[(size_t)l])
+                    CHECK(r.opd[2].raw == k8.proj_w[(size_t)l].raw && r.opd[3].raw == k8.proj_s[(size_t)l].raw);
+                if (r.op == k8.op_bias && r.opd[1].raw == k8.proj_b[(size_t)l].raw) CHECK(same_operand(r.opd[0], r.opd[2]));
+            }
+        CHECK_EQ(r8.device_calls, 0);
+    }
+}
+
+/* Host placement moves bf16 maps (and its ring copies bf16 rows): with an int8 folder it is refused
+ * by name and the engine serves stock -- the in-tree graph, nothing copied. */
+TEST(an_int8_folder_with_host_placement_serves_stock) {
+    RadModelMeta meta = flash_next_meta();
+    RadBuildCtx c = served_ctx();
+    Env env({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_PROJ_PLACE", "host"}});
+    RadBuilder stock, kva;
+    served(stock);
+    served(kva);
+    hold_kva_i8(kva);
+    hold_score(kva, "kva.rowsel.score");
+    REQUIRE_EQ(qwen4exp_fp8::declare(&stock, &meta, &c), RAD_OK);
+    const std::string log = stderr_of([&] { CHECK_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK); });
+    check_same_graph(stock, kva);
+    CHECK(g_mem.copies.empty());
+    CHECK(has(log, "holds int8 maps, which are placed in VRAM only"));
+}
+
+/* No int8 GEMM row in the loaded libraries, or rows that would read different stored bytes (one
+ * upload must serve whichever row a step's M selects): the folder cannot run, startup fails naming
+ * why. A folder whose dtype is neither is refused as one that cannot run on this model. */
+TEST(an_int8_folder_without_one_agreed_stored_form_is_refused_by_name) {
+    RadModelMeta meta = flash_next_meta();
+    RadBuildCtx c = served_ctx();
+    Env env({{"RADIANCE_KVA", "speed"}});
+    RadKernelInfo other = fake_i8_row("fake_other");
+    other.layout = [](const RadParam* p, int n_p, int opd, const RadEncoding* e, const int* s, const RadTensor* pl,
+                      int n, RadLayout* out) {
+        const int st = fake_i8_layout(p, n_p, opd, e, s, pl, n, out);
+        if (opd == 2) out->tag = "test.i8.other";
+        return st;
+    };
+    const std::vector<const RadKernelInfo*> none, disagree = { &g_i8_m16, &other };
+    for (const auto* rows : { &none, &disagree }) {
+        RadBuilder kva;
+        served(kva);
+        hold_kva_i8(kva);
+        qwen4exp_kva::g_i8_rows_for_test = rows;
+        int st = RAD_OK;
+        const std::string log = stderr_of([&] { st = qwen4exp_kva::declare(&kva, &meta, &c); });
+        CHECK(st != RAD_OK);
+        CHECK(has(log, "cannot load the int8 projector"));
+        CHECK(has(log, rows == &none ? "no kernel library offers the int8 GEMM" : "store the map differently"));
+    }
+    RadBuilder stock, kva;
+    served(stock);
+    served(kva);
+    hold_kva_i8(kva);
+    std::string text = R"({"format": 1, "adapter": "qwen4exp", "split": 4, "projector": {"dtype": "i4"},
+        "model": {"arch_id": "qwen4exp", "name": "test-q38-flashnext", "meta": {"hc_count": "4"},
+                  "vocab_sha256": ")" + std::string(kTinyVocab) + R"("}, "files": {}})";
+    g_test_folder.manifest = qwen4exp_kva::Json{};
+    qwen4exp_kva::json_parse(text.data(), text.size(), &g_test_folder.manifest);
+    REQUIRE_EQ(qwen4exp_fp8::declare(&stock, &meta, &c), RAD_OK);
+    const std::string log = stderr_of([&] { CHECK_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK); });
+    check_same_graph(stock, kva);
+    CHECK(has(log, "its projector dtype 'i4' is neither bf16 nor i8"));
 }
 
 /* ==================================================================== the folder on disk */

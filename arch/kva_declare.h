@@ -9,6 +9,7 @@
 #define QWEN4EXP_KVA_DECLARE_H
 
 #include "kva_config.h"
+#include "kva_int8.h"
 
 #include <algorithm>
 #include <string>
@@ -33,6 +34,12 @@ struct Kva {
     bool    out_rows_ok = true;
     /* The folder's tensors on this rank (kva_projector.h): RAW operands, RAD_NONE where absent. */
     std::vector<RadOperand> proj_w, proj_b;   /* [n_layer]: none below S */
+    /* THE INT8 PROJECTOR (kva_int8.h, R79): the maps' scales, the stream's int8 codes and scales
+     * (quantised once a pass, read by every late layer's GEMM), the quantiser and the bias add. */
+    bool int8 = false;
+    std::vector<RadOperand> proj_s;           /* [n_layer]: none below S, none for bf16 maps */
+    rad_buf b_q8 = 0, b_s8 = 0;
+    rad_op  op_quant8 = 0, op_bias = 0;
     std::vector<RadOperand> st;               /* [n_layer]: this rank's heads; none below S and on attention */
     RadOperand score = RAD_NONE;
     /* The staging ring (host placement, kva_projector.h plan_maps): per late layer the host map's
@@ -201,12 +208,46 @@ static int check_fill(const qwen4exp_fp8::Model& m, const Kva& k) {
  * the masked path issues the same handles over h_S -> x_P. Declared after the whole in-tree graph,
  * so every buffer they touch takes the whole program (rad_buf_concurrent, PLAN D4). Under a sizing
  * declare the in-tree buffer handles are the real declare's, which name the same buffers. */
+/* THE INT8 PROJECTOR'S OPS (R79): libr4d's quant_act_i8g over the layer-S stream (once a pass, into
+ * the plugin's codes and scales), kva.so's forward of the engine's int8 gemm_nt_q per late layer (its
+ * maps in the stored form kva_int8.h relaid them into), and the in-tree row-broadcast add for the
+ * bias, which gemm_nt_q has no operand for. Cost: the codes buffer, [max_tok, hc*n] int8 + scales
+ * (~21 MiB at 2,048 rows), in the activation arena. */
+static int decl_fill_i8(RadBuilder* b, const Geom& g, const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva& k) {
+    const int64_t wide = m.hccfg.hc * g.n_embd;
+    k.b_q8 = decl_b(b, k.nm.f("kva_stream_q8"), RAD_I8, {g.max_tok, wide});
+    k.b_s8 = decl_b(b, k.nm.f("kva_stream_s8"), RAD_F32, {g.max_tok, wide / kI8Group});
+    if (!k.b_q8 || !k.b_s8) return RAD_E_INVAL;
+    RAD_ARCH_TRY(rad_buf_concurrent(b, k.b_q8));
+    RAD_ARCH_TRY(rad_buf_concurrent(b, k.b_s8));
+    k.op_quant8 = RAD_OP(b, "quant_act_i8g", RAD_PARAMS(RAD_RANGE("M", 1, g.max_tok), RAD_INT("n", wide),
+                                                       RAD_INT("group", kI8Group), RAD_STR("dtype", g.dtype)),
+                         RAD_NOWEIGHTS);
+    k.op_bias = RAD_OP(b, "add", RAD_PARAMS(RAD_RANGE("M", 1, g.max_tok), RAD_INT("n", g.n_embd),
+                                            RAD_STR("dtype", g.dtype)), RAD_NOWEIGHTS);
+    for (int64_t l = k.split; l < g.n_layer; ++l)
+        k.op_proj[(size_t)l] = rw(b, RAD_OP(b, "kva_gemm_nt_q",
+                                            RAD_PARAMS(RAD_RANGE("M", 1, g.max_tok), RAD_INT("N", g.n_embd),
+                                                       RAD_INT("K", wide), RAD_INT("group", kI8Group),
+                                                       RAD_STR("dtype", "i8a8")),
+                                            RAD_NOWEIGHTS),
+                                  {k.b_q8, k.b_s8}, {m.a_x.x});
+    const char* missing = !k.op_quant8 ? "quant_act_i8g" : !k.op_bias ? "add"
+                        : !k.op_proj[(size_t)k.split] ? "kva_gemm_nt_q" : nullptr;
+    if (!missing || ctx->shape_probe) return RAD_OK;
+    std::fprintf(stderr, "radiance: qwen4exp_kva: no kernel serves the int8 projector's %s (N %lld, K %lld): "
+                         "kva.so offers kva_gemm_nt_q only when libr4d is loaded\n", missing,
+                 (long long)g.n_embd, (long long)wide);
+    return RAD_E_UNSUPPORTED;
+}
+
 static int decl_fill(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva& k) {
     Geom g = m.g;
     g.max_tok = ctx->max_tok;
     for (rad_buf h : { m.b_h, m.a_x.x, m.a_x.cq(), m.a_x.cs() })
         if (h) RAD_ARCH_TRY(rad_buf_concurrent(b, h));
     RAD_ARCH_TRY(k.quant.declare(b, g, m.a_x, g.n_embd));
+    if (k.int8) return decl_fill_i8(b, g, m, ctx, k);
     const int64_t wide = m.hccfg.hc * g.n_embd;
     for (int64_t l = k.split; l < g.n_layer; ++l) {
         /* kva.so's forward of the engine's gemm_nt_bias row (kernels/forward.cpp): the projector is
