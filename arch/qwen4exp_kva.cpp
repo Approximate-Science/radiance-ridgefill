@@ -127,6 +127,7 @@ static Pass derive(const Kva& k, const RadBatch* batch) {
     pc.shift_b = c.shift_b;
     pc.stage_rows = c.stage_rows;
     pc.force_stream = c.force_stream;
+    pc.mask_step = c.mask_step;
     return plan_pass(in, pc);
 }
 
@@ -299,6 +300,22 @@ static void finish_state(RadCtx* c, const Kva& k, const RadBatch* batch, StateDu
               m.g.world, approx, kModeNames[k.cfg.mode]);
 }
 
+/* R61 -- RADIANCE_KVA_CAPTURE_STATE ON A MIXED STEP (decoders beside a prefill chunk): after the
+ * step, every sequence's late delta-net states, so the decoders' slots of two runs of one arrangement
+ * (KVA and off) can be compared byte for byte; the prefill's slot is the positive control. */
+static void capture_mixed(RadCtx* c, const Kva& k, const RadBatch* batch, bool approx) {
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
+    std::vector<int> layers;
+    for (int64_t li = k.split; li < m.g.n_layer; ++li)
+        if (!m.layers[(size_t)li].full) layers.push_back((int)li);
+    std::vector<float> data;
+    for (int64_t seq = 0; seq < batch->n_seq; ++seq)
+        for (int li : layers)
+            if (!copy_state(c, k, m, li, batch, seq, &data)) return;
+    mixed_state_end(c, k.state_dir, batch, data, layers, {m.gcfg.n_head_v, m.gcfg.head_v, m.gcfg.head_k},
+                    rad_rank(c), approx, kModeNames[k.cfg.mode]);
+}
+
 /* A one-sequence step whose chunk does not end on the delta net's tile cannot be split exactly;
  * the scheduler never cuts one (derive's note), so this names a broken invariant rather than a
  * shape to serve. Forced splits are R47's debug arm and may be off the tile on purpose. */
@@ -322,12 +339,14 @@ static void step(RadCtx* c, const RadBatch* batch) {
     }
     const bool capture = !k.capture_dir.empty() && rad_rank(c) == 0 && single_prefill(batch);
     const bool states = !k.state_dir.empty() && single_prefill(batch);
+    const bool mixed_states = !k.state_dir.empty() && batch->phase == RAD_PHASE_MIXED;
     StateDump sd;
     if (approx)       approximate_step(c, k, batch, p, states ? &sd : nullptr);
     else if (capture) capture_step(c, k, batch);
     else              qwen4exp_fp8::step(c, batch);
     if (approx && rad_rank(c) == 0) log_pass(k, batch, p);
     if (states) finish_state(c, k, batch, sd, approx);
+    if (mixed_states) capture_mixed(c, k, batch, approx);
 }
 
 /* The in-tree probe's answers hold here: the draft depth is the model's, and this declare writes

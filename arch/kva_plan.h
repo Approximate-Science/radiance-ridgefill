@@ -52,6 +52,7 @@ struct PlanConfig {
     int64_t force_split = 0, shift_b = 0;
     int64_t stage_rows = INT64_MAX;  /* exact rows a masked pass may carry and still stream: any */
     bool    force_stream = false;
+    bool    mask_step = false;       /* debug: every row before b approximated (R54's control) */
 };
 
 /* What step() does with the pass. */
@@ -81,12 +82,12 @@ inline Pass plan_pass(const PlanIn& in, const PlanConfig& c) {
     const int64_t s_lb = std::max(in.n_tok_decode, in.n_tok - in.q_prefill);
     if (b <= s_lb) return p;
     p.b = b;
-    p.s_lb = s_lb;
+    p.s_lb = c.mask_step ? 0 : s_lb;   /* the projector then covers every row the mask can mark */
     p.split = b < in.n_tok;
     const bool one = in.n_seq_decode == 0 && Pn == 1;
     if (in.mode == PLAN_SPEED && one && !p.split) { p.path = PATH_LEAN; return p; }
     if (in.mode == PLAN_SPEED && one && in.straddle_ok) { p.path = PATH_STRADDLE; return p; }
-    const int64_t exact_rows = in.n_tok - (b - s_lb);
+    const int64_t exact_rows = in.n_tok - (b - p.s_lb);
     p.stream = in.stream_ok && (c.force_stream || exact_rows <= c.stage_rows);
     if (p.stream || in.mode == PLAN_PLUMB) p.path = PATH_MASKED;
     return p.path == PATH_MASKED ? p : Pass{};

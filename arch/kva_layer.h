@@ -14,13 +14,19 @@ namespace qwen4exp_kva {
 
 using namespace rad::arch;
 
-/* A group's slot row for the step's LAST sequence (index row n_seq-1, one row): its own
- * state_index at its own pitch. The approximated sequence is always the last entry (n_ahead > 0
- * means it is a non-final prefill chunk, radiance core/sched/batch.cpp:1066-1080). */
-inline RadOperand last_slot(const RadBatch* batch, rad_kvgroup g) {
+/* A group's slot row for sequence `seq` of the step (one index row): its own state_index at its own
+ * pitch. */
+inline RadOperand slot_row(const RadBatch* batch, rad_kvgroup g, int64_t seq) {
     const RadKVGroupBatch* kb = kv_batch(batch, g);
     const int64_t pitch = kb && kb->state_index_pitch > 0 ? kb->state_index_pitch : 1;
-    return praw2(kb ? kb->state_index + (batch->n_seq - 1) * pitch : nullptr, RAD_I32, 1, pitch);
+    return praw2(kb ? kb->state_index + seq * pitch : nullptr, RAD_I32, 1, pitch);
+}
+
+/* The slot row of the step's LAST sequence (index row n_seq-1). The approximated sequence is always
+ * the last entry (n_ahead > 0 means it is a non-final prefill chunk, radiance
+ * core/sched/batch.cpp:1066-1080). */
+inline RadOperand last_slot(const RadBatch* batch, rad_kvgroup g) {
+    return slot_row(batch, g, batch->n_seq - 1);
 }
 
 /* THE +st CORRECTION (Stage 4, PLAN D7) on the last sequence, M = 1: `undo` before the layer's
@@ -53,23 +59,27 @@ inline void decay_sums(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, in
                 last_slot(batch, k.kv_rho), brows(k.b_bounds, 1));
 }
 
-/* RADIANCE_KVA_CAPTURE_STATE: layer li's state slot of this step's one sequence, copied by
- * kva_state_read into the plugin's buffer and from there to the host. Debug: synchronises. */
+/* Layer li's state slot of sequence `seq` of the step, copied by kva_state_read into the plugin's
+ * buffer and appended to `out` on the host. Debug: synchronises. */
+inline bool copy_state(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li,
+                       const RadBatch* batch, int64_t seq, std::vector<float>* out) {
+    const GdnFP8::Config& g = m.gcfg;
+    const int64_t n = g.n_head_v * g.head_v * g.head_k;
+    RAD_ISSUE_N(c, k.op_state_read, 1, kv_cache(m.kv_state, (int)li), slot_row(batch, m.kv_state, seq),
+                brows(k.b_state, 1));
+    const size_t at = out->size();
+    out->resize(at + (size_t)n);
+    if (dump_read(c, out->data() + at, rad_buf_ptr(c, k.b_state), n * 4)) return true;
+    std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE_STATE: device read failed\n");
+    out->resize(at);
+    return false;
+}
+
+/* RADIANCE_KVA_CAPTURE_STATE: layer li's state slot of this step's one sequence. */
 inline void read_state(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li,
                        const RadBatch* batch, StateDump* sd) {
     if (!sd || !k.op_state_read) return;
-    const GdnFP8::Config& g = m.gcfg;
-    const int64_t n = g.n_head_v * g.head_v * g.head_k;
-    RAD_ISSUE_N(c, k.op_state_read, 1, kv_cache(m.kv_state, (int)li), last_slot(batch, m.kv_state),
-                brows(k.b_state, 1));
-    const size_t at = sd->data.size();
-    sd->data.resize(at + (size_t)n);
-    if (!dump_read(c, sd->data.data() + at, rad_buf_ptr(c, k.b_state), n * 4)) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE_STATE: device read failed\n");
-        sd->data.resize(at);
-        return;
-    }
-    sd->layers.push_back((int)li);
+    if (copy_state(c, k, m, li, batch, batch->n_seq - 1, &sd->data)) sd->layers.push_back((int)li);
 }
 
 /* ---------------------------------------------------------------- the delta net, masked */

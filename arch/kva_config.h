@@ -37,6 +37,9 @@
  *   RADIANCE_KVA_FORCE_STREAM 1: the late layers stream on every masked pass (R94)
  *   RADIANCE_KVA_TAIL_ONLY    0: speed straddles take the masked path instead of the tail-only one
  *                             (the oracle the tail-only path is compared with, A.1)
+ *   RADIANCE_KVA_MASK         all: a masked pass approximates EVERY row before its bulk end, the
+ *                             decoders' and the other prompts' included -- R54's negative control,
+ *                             which must change a decoder's text (speed and quality only)
  *
  * THE PROJECTOR FOLDER (PACKAGING.md; kva_folder.h, kva_projector.h). The fitted tensors come from
  * `<model dir>/projector/` and never from the container -- kva.* weights and keys an earlier append
@@ -109,6 +112,7 @@ struct Config {
     int64_t     shift_b     = 0;
     bool        force_stream = false;
     bool        tail_only   = true;
+    bool        mask_step   = false;       /* RADIANCE_KVA_MASK=all */
     const char* meta_mode   = nullptr;     /* the container's kva.mode, if it has one: ignored */
 };
 
@@ -206,6 +210,13 @@ inline int read_switches(Config* c) {
     c->force_stream = v == 1;
     RAD_ARCH_TRY(read_choice("RADIANCE_KVA_TAIL_ONLY", { "1", "0" }, "0 or unset", &v));
     c->tail_only = v == 0;
+    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_MASK", { "rule", "all" }, "all or unset", &v));
+    c->mask_step = v == 1;
+    if (c->mask_step && c->mode == MODE_PLUMB) {
+        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_MASK=all approximates rows and mode "
+                             "plumb projects none; it takes speed or quality\n");
+        return RAD_E_INVAL;
+    }
     return RAD_OK;
 }
 

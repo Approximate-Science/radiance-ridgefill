@@ -20,6 +20,13 @@
  *                            "n_ahead", "b", "s_lb", "bounds", "mask"} (R45)
  *   <dir>/rows.jsonl         the same chunks: {"chunk_start", "n_tok", "rows_idx", "token_ids"},
  *                            rows_idx = the window's exact rows -- what tools/rows_compare.py reads (R39)
+ *
+ * RADIANCE_KVA_CAPTURE_STATE on a MIXED step (R61; scripts/state_compare.py reads it):
+ *   <dir>/mixed.<key>.r<R>.npy  f32 [n_seq, layers, heads, V, K]: every sequence's late delta-net
+ *                               states after the step, rank R's heads; <key> = the step's first
+ *                               position and the FNV-1a of all its token ids
+ *   <dir>/mixed.jsonl           one line per file: {"file", "key", "n_seq", "n_seq_decode", "cu",
+ *                               "starts" (each sequence's first position), "layers", "approximate"}
  */
 #ifndef QWEN4EXP_KVA_DUMP_H
 #define QWEN4EXP_KVA_DUMP_H
@@ -254,6 +261,34 @@ inline void state_end(RadCtx* c, const std::string& dir, const RadBatch* b, cons
               std::to_string((rank + 1) * heads) + "], \"layers\": " + ints_json(layers) +
               ", \"approximate\": " + (approximate ? "true" : "false") + ", \"mode\": \"" + mode +
               "\", \"applied_before_copy\": false}");
+}
+
+/* One mixed step's states (R61): the batch's sequence bounds and first positions read back, the
+ * states written as one .npy, one line in mixed.jsonl. `dims` = {heads, V, K} of this rank. */
+inline void mixed_state_end(RadCtx* c, const std::string& dir, const RadBatch* b, const std::vector<float>& data,
+                            const std::vector<int>& layers, std::initializer_list<int64_t> dims, int rank,
+                            bool approximate, const char* mode) {
+    int32_t start = -1;
+    std::vector<int32_t> ids, cu((size_t)b->n_seq + 1), pos((size_t)b->n_tok);
+    if (!dump_chunk(c, b, &start, &ids) || !dump_read(c, cu.data(), b->cu_seqlens, (int64_t)cu.size() * 4) ||
+        !dump_read(c, pos.data(), b->positions, b->n_tok * 4)) {
+        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE_STATE: device read failed\n");
+        return;
+    }
+    std::vector<int> starts, cus(cu.begin(), cu.end());
+    for (int64_t i = 0; i < b->n_seq; ++i) starts.push_back(pos[(size_t)cu[(size_t)i]]);
+    const auto d = dims.begin();
+    const std::string key = chunk_key(start, ids), file = "mixed." + key + ".r" + std::to_string(rank) + ".npy";
+    if (!dump_npy(dir + "/" + file, "<f4", {b->n_seq, (int64_t)layers.size(), d[0], d[1], d[2]}, data.data(),
+                  (int64_t)data.size() * 4))
+        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE_STATE: cannot write %s/%s\n",
+                     dir.c_str(), file.c_str());
+    dump_line(dir + "/mixed.jsonl",
+              "{\"file\": \"" + file + "\", \"key\": \"" + key + "\", \"rank\": " + std::to_string(rank) +
+              ", \"n_seq\": " + std::to_string(b->n_seq) + ", \"n_seq_decode\": " + std::to_string(b->n_seq_decode) +
+              ", \"cu\": " + ints_json(cus) + ", \"starts\": " + ints_json(starts) + ", \"layers\": " +
+              ints_json(layers) + ", \"approximate\": " + (approximate ? "true" : "false") + ", \"mode\": \"" +
+              mode + "\"}");
 }
 
 }  /* namespace qwen4exp_kva */
