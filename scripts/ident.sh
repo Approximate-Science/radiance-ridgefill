@@ -23,7 +23,8 @@
 #
 #   RK_PORT=8100 scripts/ident.sh        # against a server already up
 #
-# Adapted from radiance scripts/ident.sh (tag v1.0.8, commit 140987f, unmodified logic):
+# Adapted from radiance scripts/ident.sh (tag v1.0.8, commit 140987f, unmodified logic; radiance's file is
+# unchanged through v1.0.13, d0f639b):
 # the port comes from RK_PORT (default 8100, scripts/common.sh) instead of P, so it
 # follows this repo's scripts/serve.sh. Run three times across restarts for the
 # reproducibility gate (HANDOVER §5 Stage 0 step 4).

@@ -31,7 +31,7 @@ rad_plugin_defaults()
 # installed in-tree plugin nor anything tested -- `off` mode would stop being stock (R7) with
 # nothing to say so. So configure refuses it (R10), by two checks:
 #
-#  1. THE RELEASE. find_package's version is the ABI number (15.0.0 at v1.0.8, radiance
+#  1. THE RELEASE. find_package's version is the ABI number (15.0.0 at v1.0.8 AND at v1.0.13, radiance
 #     CMakeLists.txt:426-429), so it cannot tell two releases apart. The release lives in the
 #     engine binary (RAD_VERSION, core/CMakeLists.txt:25), so the installed `radiance` must carry
 #     the string RADIANCE_SRC's project(VERSION) names. Skipped -- and said -- when the prefix has

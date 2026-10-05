@@ -1,0 +1,14 @@
+# qwen4exp.copies -- which in-tree radiance files the qwen4exp adapter COPIES issue-for-issue, and where.
+# scripts/update_radiance.sh reads every arch/*.copies: when a new radiance release changes a file named
+# here, the adapter file beside it is the one to review or port (the static oracle says whether it must).
+# Files the adapter only CALLS (methods of the in-tree blocks: hc read/write, ple, MoE routing helpers)
+# are not listed -- a change there reaches the plugin by itself.
+#
+# <adapter file>          <in-tree file it copies from (radiance arch/)>
+arch/qwen4exp_adapter.h   arch/qwen4exp_fp8/qwen4exp_fp8.cpp
+arch/qwen4exp_moe.h       arch/common/rad_block_moe_fp8.h
+arch/qwen4exp_blocks.h    arch/common/rad_block_gdn_fp8.h
+arch/qwen4exp_blocks.h    arch/common/rad_block_attn_gated_fp8.h
+arch/qwen4exp_fill.h      arch/common/rad_block_gdn_fp8.h
+arch/qwen4exp_fill.h      arch/common/rad_block_attn_gated_fp8.h
+arch/qwen4exp_fill.h      arch/common/rad_qsa.h

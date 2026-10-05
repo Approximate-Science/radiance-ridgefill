@@ -31,7 +31,11 @@ qwen4exp_moe.h, qwen4exp_kva.cpp.
    exactly what your in-tree plugin does; add your derive truth-table rows, your projector
    refusals, and -- while you write adapter_of -- a case asserting each fact against the direct
    read it replaces (the split carried one, the_adapter_facts_match_the_model, until its step 7).
-6. Fit the projector from exact captures (RADIANCE_KVA=off + RADIANCE_KVA_CAPTURE; notes/refit.md),
+6. List what your adapter COPIES from radiance in `arch/<adapter>.copies` (one `<adapter file> <in-tree
+   file>` pair a line; arch/qwen4exp.copies is the example). scripts/update_radiance.sh reads it to say,
+   for each new radiance release, which of your files to port -- the static oracle says whether you must
+   (and CI, .github/workflows/radiance-watch.yml, says it daily against radiance's newest release).
+7. Fit the projector from exact captures (RADIANCE_KVA=off + RADIANCE_KVA_CAPTURE; notes/refit.md),
    then gate: `ctest -LE gpu`, off ≡ stock (scripts/ident.sh), and the KL rows (scripts/grade.sh).
 
 The step around the late layers is the core's too (arch/kva_step.h): the adapter adds prologue /

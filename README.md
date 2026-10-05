@@ -79,6 +79,47 @@ suites that fake their inputs.
 `-DRAD_WITH_HIP=OFF` leaves out the device rows even against a HIP install. Every `build*/` and `home/`
 directory is git-ignored.
 
+## Updating to a new radiance release
+
+The plugin is built against ONE radiance release (`RADIANCE_VERSION` names it, with its commit): the arch
+plugin compiles that release's in-tree Qwen4-Exp source, and the release guard forwards to the engine's own
+architecture on any other. To try a new release:
+```sh
+scripts/update_radiance.sh v1.0.14              # + device build and packages when radiance-build:1.0.14 exists
+scripts/update_radiance.sh v1.0.14 --host-only  # no docker: ~15 min the first time, ~1 min after
+scripts/update_radiance.sh v1.0.14 --gpu-smoke  # + one queued GPU session, ~15-20 min
+```
+Exit 0 COMPATIBLE, 1 INCOMPATIBLE, 2 INFRASTRUCTURE (the answer could not be computed -- never reported
+as compatible).
+It archives the release from the radiance checkout into `data/radiance-src-<release>/` (read-only), builds a
+host-only install of it and the plugin against it, runs `ctest -LE gpu` -- the static oracle holds `off` and
+every approximate path issue for issue against THAT release's in-tree plugin -- and pytest, and on green
+builds the device plugins in `radiance-build:<release>` and the release packages (`tools/package.py`) into
+`dist/radiance-kva-r<release>-<commit>/`. It ends `RESULT: PASS` or `RESULT: FAIL` (exit 0 / 1); logs and a
+summary in `data/update-<release>/`. A change of RAD_ABI_VERSION is INCOMPATIBLE on its own. `--gpu-smoke` adds one `gpuq` session on `stilldeadcode/radiance:<release>`:
+stock and `off` ident (must match), an exact KL reference for the release, int8 quality T2560 and int8
+speed T2048 scored last-512 paired vs exact.
+
+Either way it lists which in-tree files the adapter COPIES changed since the pinned release, and which
+adapter file copies each (`arch/*.copies`). When the oracle fails, those are the files to port: a compile
+error names the line that no longer fits (e.g. on v1.0.8 this branch fails in `arch/qwen4exp_moe.h` because
+1.0.10's four-class MoE fields do not exist there), a failing static case prints its first difference.
+Port the adapter file, rerun until PASS, then update `RADIANCE_VERSION` and the release README's version.
+The 1.0.8 -> 1.0.13 port is the worked example (notes/rebase-1.0.13.md): one file changed.
+
+### CI: radiance release watch
+
+`.github/workflows/radiance-watch.yml` (GitHub Actions; Forgejo / Codeberg Actions runs the same file) runs
+daily, on every push and pull request, and by hand with an optional `radiance_tag`. It resolves radiance's
+newest release tag (`git ls-remote --tags` on codeberg.org/StillDeadcode/radiance, highest semver), clones
+radiance, and runs `scripts/update_radiance.sh <tag> --host-only --ci` on an ordinary ubuntu-24.04 runner:
+no GPU, no ROCm, no docker. It installs cmake (>= 3.21), g++-14, binutils and Python 3.12 with
+`tools/requirements.txt` (torch from the CPU index). The job fails on INCOMPATIBLE (a build failure, an ABI
+number change, any static-oracle mismatch) and on INFRASTRUCTURE; each failing oracle case is an `::error::`
+naming the adapter files it points at and the first in-tree op that moved. Every file of radiance's `abi/`,
+`arch/common/` and `arch/qwen4exp_fp8/` changed since `RADIANCE_VERSION` is a `::warning::` either way. The
+report (`data/update-<release>/`, report.md + every log) is uploaded as an artifact.
+
 ## Switches (read once, at startup)
 
 The MODE comes from the environment only, default `off`: a container's `kva.mode` is ignored (and said so

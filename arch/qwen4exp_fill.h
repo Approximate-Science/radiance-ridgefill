@@ -5,8 +5,8 @@
  * late block that writes a cache: the delta net's input projections and recurrence, the indexer's
  * block-key half, and the attention's K/V path. The in-tree GdnFP8 / QsaIndexer / AttnGatedFP8
  * step() functions take the whole batch and run the whole block, so the pieces are spelled out
- * here, each a verbatim copy of the in-tree lines it cites (radiance 140987f), with the SAME
- * handles and the SAME operands -- the stock wiring, including `w.h` (= the model's `x`) as the
+ * here, each a verbatim copy of the in-tree lines it cites (radiance 1.0.13 d0f639b; the files are
+ * unchanged since 1.0.8), with the SAME handles and the SAME operands -- the stock wiring, including `w.h` (= the model's `x`) as the
  * input, because the projector writes its prediction there (notes/arch.md §6, the a_x decision).
  * Every other approximate shape takes the masked path (kva_layer.h), which runs the blocks whole.
  *

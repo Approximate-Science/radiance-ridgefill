@@ -30,7 +30,7 @@ RK_REPO=$(CDPATH= cd "$RK_SCRIPTS/.." && pwd) || exit 1
 RK_TOOLS=$RK_REPO/tools
 
 : "${RK_PORT:=8100}"
-: "${RK_IMAGE:=stilldeadcode/radiance:1.0.8}"
+: "${RK_IMAGE:=stilldeadcode/radiance:1.0.13}"
 : "${RK_PLUGIN_HOME:=$RK_REPO/home}"
 : "${RK_EVIDENCE:=$RK_REPO/evidence}"
 # Exported so a script that hands over to a child process (speed.sh -> tools/speed.py)

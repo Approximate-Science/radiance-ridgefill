@@ -14,6 +14,9 @@
 #   RK_RADIANCE_SRC  the radiance source checkout at the installed release (required; the arch
 #                    plugin #includes the in-tree qwen4exp_fp8.cpp from it)
 #   RK_BUILD_IMAGE   default radiance-build
+#   RK_HOME_TAG      appended to both directory names (data/src-<short><tag>, data/home-<short><tag>), so
+#                    one commit built against two radiance releases keeps two homes
+#                    (scripts/update_radiance.sh passes -r<release>); default empty
 set -eu
 
 . "$(dirname "$0")/common.sh"
@@ -21,11 +24,11 @@ set -eu
 [ "$#" -eq 1 ] || rk_die "usage: scripts/frozen_home.sh <commit>"
 [ -n "${RK_RADIANCE_SRC:-}" ] || rk_die "RK_RADIANCE_SRC is not set: the radiance source checkout"
 [ -f "$RK_RADIANCE_SRC/arch/qwen4exp_fp8/qwen4exp_fp8.cpp" ] || rk_die "RK_RADIANCE_SRC is not a radiance checkout: $RK_RADIANCE_SRC"
-: "${RK_BUILD_IMAGE:=radiance-build}"
+: "${RK_BUILD_IMAGE:=radiance-build:1.0.13}"
 
 short=$(git -C "$RK_REPO" rev-parse --short "$1") || rk_die "not a commit: $1"
-src=$RK_REPO/data/src-$short
-home=$RK_REPO/data/home-$short
+src=$RK_REPO/data/src-$short${RK_HOME_TAG:-}
+home=$RK_REPO/data/home-$short${RK_HOME_TAG:-}
 rm -rf "$src" "$home"
 mkdir -p "$src" "$home/architectures" "$home/kernels"
 git -C "$RK_REPO" archive "$short" | tar -x -C "$src"

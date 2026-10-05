@@ -8,7 +8,7 @@ startup. The shipped projector is INT8 only.
 
 ## Requirements
 
-- **Radiance engine:** release `1.0.8`. The plugin checks the engine binary at
+- **Radiance engine:** release `1.0.13`. The plugin checks the engine binary at
   startup and forwards to the engine's own architecture (KVA off) or refuses to
   start on a mismatch; see Troubleshooting.
 - **Base model:** the stock published container
@@ -143,8 +143,8 @@ KVA did not load; check `RADIANCE_HOME` order.
 | `KVA: no projector folder (looked at …); serving stock` | No `kva.json` at `$RADIANCE_KVA_PROJECTOR` or `<model dir>/projector`. Stock serving. Check the path or Docker mount. |
 | `KVA: projector … REFUSED, it cannot run on this model: …; serving stock` | Dimension, layer, tokenizer, or tensor mismatch with this model. Stock serving. Use the projector fitted for the model. |
 | `KVA: WARNING: projector …: … -- it runs, but was fitted on another variant` | Quantization or weight-anchor difference only. KVA still runs. |
-| `WARNING: built against radiance 1.0.8, and the engine … carries release string(s) …; forwarding to the engine's own architecture …, KVA off` | Engine is not release 1.0.8. Stock serving through the engine's in-tree architecture. |
-| `built against radiance 1.0.8, and the engine …; no in-tree architectures/… on $RADIANCE_HOME to forward to, so this plugin declines …` | Engine mismatch and no in-tree architecture behind the plugin on `RADIANCE_HOME`. Startup fails. Fix `RADIANCE_HOME` order (a home given only as `--radiance-home` is invisible to plugins). |
+| `WARNING: built against radiance 1.0.13, and the engine … carries release string(s) …; forwarding to the engine's own architecture …, KVA off` | Engine is not release 1.0.13. Stock serving through the engine's in-tree architecture. |
+| `built against radiance 1.0.13, and the engine …; no in-tree architectures/… on $RADIANCE_HOME to forward to, so this plugin declines …` | Engine mismatch and no in-tree architecture behind the plugin on `RADIANCE_HOME`. Startup fails. Fix `RADIANCE_HOME` order (a home given only as `--radiance-home` is invisible to plugins). |
 | `kva.tail is … and the largest step is …` | Tail above `2 × step − tile`. Startup refused. Lower `RADIANCE_KVA_TAIL` or raise `--max-num-batched-tokens` (or set `--checkpoint-interval` below it). |
 | `kva.tail is …; the shortest exact tail this method was measured at is …` | Tail below 512. Startup refused. |
 | `RADIANCE_KVA_PROJ_PLACE=… is retired: the projector is always streamed from host memory through the staging ring …` | Retired placement switch set. Startup refused. Unset `RADIANCE_KVA_PROJ_PLACE` and `RADIANCE_KVA_PROJ_RING`. |
@@ -156,8 +156,12 @@ KVA did not load; check `RADIANCE_HOME` order.
 - Missing or incompatible projector: the server runs stock (see the `serving
   stock` lines above). A tokenizer or geometry mismatch refuses by name;
   quantization or anchor differences warn and run.
-- Engine other than 1.0.8: forwarded to the in-tree architecture (KVA off) or
-  refused at startup, never silently approximated.
+- Engine other than 1.0.13: forwarded to the in-tree architecture (KVA off) or
+  refused at startup, never silently approximated. Forwarding needs the engine's own
+  in-tree `qwen4exp_fp8.so` on `$RADIANCE_HOME` behind this plugin's home; a home given
+  only as `--radiance-home` is invisible to plugins, so the start then fails by name.
+  Each plugin build targets one radiance release; a build for a newer release is made
+  with `scripts/update_radiance.sh <tag>` (see the repository README).
 - Radiance's own MTP drafting works with the plugin; the plugin's optional
   `final` map only applies when the folder holds it and MTP is on.
 - Prefix cache behaves like stock; see the hazard counter above.
