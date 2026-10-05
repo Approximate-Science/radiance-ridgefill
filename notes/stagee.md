@@ -139,6 +139,15 @@ libref's gemm_nt_q on canonical planes, 0 of 5.57 M outputs over, worst 0.80 of 
 | R91 | **refused by the engine by name** (§R91) |
 | MUST-FIX (Stage B) | vram placement refuses at `--max-num-batched-tokens 8192 --max-num-seqs 10` (host pool full) where stock starts -- not started |
 
+### Chain state at the checkpoint (all detached with `nohup setsid`, each session under ONE gpu.lock)
+- ediag stopped after `d-exact` at 15:16Z (my edit of arm2.sh under a running arm; the arm's measurements completed,
+  its stop did not -- container stopped by hand, logs saved). Lesson: never edit a script a session is executing.
+- `run_diag2.sh` → ediag2 (running from 15:17Z): y-exact-1 / y-qh-1 / y-qh-noring / y-qh-2 / y-exact-2 (decode, 3
+  windows) then R77's 32-sequence servers d-off / d-sv / d-qv / d-qh (into e1/).
+- `run_diag3.sh` → ediag3 after ediag2: held TTFT for stock / plumb / speed+host / quality+host (which part of the
+  declare costs stock passes ~15%), then `--profile-ops` of 2048-token prefills, stock vs quality+host held.
+- Both runners skip if their session already logged its end line; rerunning them is safe.
+
 ## 7. Resume here
 1. `evidence/stagee/ediag.session.log` (d-* 32-seq decode servers, written into e1/) and `ediag2.session.log`.
 2. Separate the ON-server prefill penalty (§3 OPEN) and the ring's decode cost (§4); fix plugin-side; frozen home; re-measure.
