@@ -338,3 +338,7 @@ exact-b's median 6,775): read 9,216 ratios with that spread in mind.
 | R100 | **green** static + engine; headline quality T 2560 last-512 dNLL +0.0021 [-0.0126, +0.0157], KL 0.037, top-1 0.916 | §4 session 2 |
 | R99 | Stage A part **green** (static grep + 400-request mixed soak, 0 audit failures) | §4 session 4 |
 | DD-B as specified (weightless alternate) | **not implementable** in v1.0.8 (§2); replaced by zero-row probes, same effect | §2 |
+
+**R6/R7 at the final plugin commit**: home data/home-b6979d4 (arch d19c0308…, kva.so 2cfe6699…), `serve.sh off`:
+ident.sh = R3's six hashes; kernel log clean (2026-10-05 04:3xZ, evidence/stageA/off-b6979d4.txt). Static
+off == in-tree graph and issue sequence at HEAD (arch_static_test).
