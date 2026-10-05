@@ -6,18 +6,12 @@ scored only the last 512 tokens of a 9,216 / 16,384 / 32,768-token prompt. This 
 alignment (doc order from the reference's kld.json, token ids vs tcc's stored ids) and prints per-doc
 deltas for any window. Read-only; prints JSON lines.
 """
-import argparse, json, os, sys
+import json, os
 import numpy as np
 
 EVID = os.path.expanduser("~/AI-Work/radiance-kva-plugin-20261004/evidence")
 TCC = os.path.expanduser("~/AI-Work/kva-flashnext-iterate/tests/results")
 REF = os.path.join(os.path.dirname(__file__), "../../data/kld/ref-stage0")
-
-ARMS = {  # radiance arms: label -> report path (relative to evidence)
-    "exact": "stage0/kld-exact-vs-ref.json",
-    "fill": "stage4/speed-fill-f60f893.json",  # placeholder, replaced below if missing
-}
-
 
 def ref_layout():
     k = json.load(open(os.path.join(REF, "kld.json")))
