@@ -17,8 +17,14 @@
  * the cache-writing pieces, qwen4exp_fill.h) or the MASKED layer (every other shape: the in-tree layer
  * over all rows with the device mask choosing which rows use the projection, kva_layer.h). On a
  * masked pass the expert stager is steered, with zero-row probes of the late layers' gate-up GEMMs,
- * to stream the late layers' routed experts instead of staging each layer whole (notes/impl.md §2). The engine release
- * is checked at open and a mismatch forwards to the engine's own architecture (kva_guard.h).
+ * to stream the late layers' routed experts instead of staging each layer whole (notes/impl.md §2).
+ * The engine release is checked at open and a mismatch forwards to the engine's own architecture
+ * (kva_guard.h).
+ *
+ * CORE AND ADAPTER (docs/ADDING-A-MODEL.md). All of the above that is not Qwen4-Exp's is the core
+ * (arch/kva_*.h, namespace kva, which names no model); this file is the scaffolding, the thin
+ * declare/step/probe and the exports, and qwen4exp_adapter.h / _blocks.h / _fill.h / _moe.h are
+ * the model's half: its facts and the hooks that issue its blocks.
  *
  * Included by tests/arch_static_test.cpp too, which defines RAD_ARCH_NO_EXPORTS itself; then
  * neither plugin's exports are emitted and the test calls both namespaces directly.

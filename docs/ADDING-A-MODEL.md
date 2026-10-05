@@ -7,7 +7,8 @@ qwen4exp_moe.h, qwen4exp_kva.cpp.
 
 0. Read radiance docs/PLUGIN.md §11: your adapter is ONE .so claiming (arch_id, quant) and
    shadowing the in-tree stem on $RADIANCE_HOME. Copy qwen4exp_kva.cpp's scaffolding
-   (`RAD_ARCH_NO_EXPORTS` + the `#include` of your in-tree arch .cpp, the `RAD_ARCH_PLUGIN` exports)
+   (`RAD_ARCH_NO_EXPORTS` + the `#include` of your in-tree arch .cpp, then `#include "kva_core.h"`,
+   the declare/step/probe thins that call `core_declare` / `core_step`, the `RAD_ARCH_PLUGIN` exports)
    and arch/CMakeLists.txt's `rad_add_plugin` entry (stem = the shadowed .so's name; pass the same
    name as `shadow_so` and to `open_guard`, so a release mismatch forwards to it).
 1. Write `<model>_adapter.h` with `adapter_of(model)` filling every fact from your in-tree Model
