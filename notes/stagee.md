@@ -161,3 +161,21 @@ libref's gemm_nt_q on canonical planes, 0 of 5.57 M outputs over, worst 0.80 of 
 4. Then e2 (int8 KL, R79), e3 (int8 table), e4 (R85/R86/R89/R90), e5 (R88). Every session: ONE `flock gpu.lock` for the
    whole session (per-arm locks starve behind other lanes' session-long locks), launched with `nohup setsid`, no compile
    while any session runs, no waiter whose command line contains a quiet() pattern word.
+
+## 8. DYLAN'S DECISION (2026-10-05 ~15:45Z, via the orchestrator): VRAM placement is REMOVED
+The projector lives in host RAM and is streamed through the staging ring; that is the only placement. Why (history
+kept here): vram placement refused to start at `--max-num-batched-tokens 8192 --max-num-seqs 10` where stock
+starts (Stage B: "DID NOT FIT 461 gate_up experts: host pool full") -- its 1.2 GiB a card pushes ~1,100 experts into
+the pinned pool -- and the plugin has no budget ABI at declare to choose safely (§ the must-fix message). Measured
+trade it removes: vram ON TTFT 6% / 10% faster than host at 16K / 32K (A′ R148); settled decode equal (§4); the
+stock-pass prefill penalty equal for both (§3).
+Work list (in order, after the held-prefill penalty which stays first):
+1. Delete the vram path and the zero-copy (RING=0) path; `RADIANCE_KVA_PROJ_PLACE` / `RADIANCE_KVA_PROJ_RING` become
+   retired switches refused by name ("the projector is always streamed from host memory through the staging ring").
+2. int8 THROUGH THE RING: per layer the stored codes + stored scales + bias laid out as rows of `hc·n` bf16 (codes
+   1,280 rows, scales 20, bias 1 → 1,301 rows), copied by the same `cast` bf16→bf16 (libr4d `r4d_p2p_copy2d`, a pure
+   byte copy -- no value passes through a float), slots 2 × 26.6 MiB; the GEMM's codes/scale/bias = slot offsets.
+3. Option C (correction + row table to host memory) only if it measures free on ON TTFT (paired, warmed).
+4. kva_config.h comments, README, notes: nothing documents vram placement.
+5. Tests: B's 8192/10 config starts and serves; retired-switch refusals + mutants; off ≡ stock.
+6. Measure int8-ring vs bf16-ring: ON TTFT 9K/16K/32K warmed + paired; bytes a pass and copy time per rank.
