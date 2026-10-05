@@ -35,6 +35,7 @@
 #include "kva_fill.h"
 #include "kva_moe.h"
 #include "kva_layer.h"
+#include "kva_hazard.h"
 #include "kva_guard.h"
 
 namespace qwen4exp_kva {
@@ -114,6 +115,7 @@ static Pass derive(const Kva& k, const RadBatch* batch) {
     in.n_seq = batch->n_seq;
     in.q_prefill = batch->phase == RAD_PHASE_MIXED ? batch->max_q_len_prefill : batch->max_q_len;
     in.n_ahead = batch->n_ahead;
+    in.n_checkpoints = batch->n_checkpoints;
     /* The probes ride in layer S-3's MoE (approximate_step), so the lever needs three routed layers
      * below S. */
     in.stream_ok = k.split >= 3 && (c.stage == STAGE_AUTO || c.force_stream);
@@ -128,6 +130,7 @@ static Pass derive(const Kva& k, const RadBatch* batch) {
     pc.shift_b = c.shift_b;
     pc.stage_rows = c.stage_rows;
     pc.min_bulk_rows = c.min_bulk_rows;
+    pc.ckpt_floor = c.ckpt_floor;
     pc.force_stream = c.force_stream;
     pc.mask_step = c.mask_step;
     return plan_pass(in, pc);
@@ -349,6 +352,8 @@ static void step(RadCtx* c, const RadBatch* batch) {
     else if (capture) capture_step(c, k, batch);
     else              qwen4exp_fp8::step(c, batch);
     if (approx && rad_rank(c) == 0) log_pass(k, batch, p);
+    hazard_issue(c, k, batch, p);
+    hazard_log(c);
     if (states) finish_state(c, k, batch, sd, approx);
     if (mixed_states) capture_mixed(c, k, batch, approx);
     if (!k.logits_dir.empty() && batch->n_out > 0 && batch->draft_pass == 0) {

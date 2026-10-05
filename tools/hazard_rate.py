@@ -184,6 +184,14 @@ def summarize(rows, plugin, tail):
                                 flagged=flagged_i, overlap=overlap,
                                 plugin_positions=(plugin["by_request"].get(row["id"])
                                                   if plugin is not None else None)))
+    # UNNAMED LINES ARE PAIRED IN ORDER. The plugin cannot know request ids; it logs one line per
+    # request whose counter moved, after that request ran. When every line is unnamed and there is one
+    # per flagged request, the i-th line belongs to the i-th flagged request (both chronological).
+    if plugin is not None and plugin["unnamed"] and not plugin["by_request"]:
+        flagged_rows = [r for r in per_request if r["flagged"]]
+        if len(flagged_rows) == len(plugin["unnamed"]):
+            for r, positions in zip(flagged_rows, plugin["unnamed"]):
+                r["plugin_positions"] = positions
     summary = {
         "tail": tail,
         "n_requests": len(rows),

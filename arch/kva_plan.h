@@ -50,6 +50,7 @@ struct PlanIn {
     int64_t n_tok = 0, n_seq = 0, n_seq_decode = 0, n_tok_decode = 0;
     int64_t q_prefill = 0;           /* the longest prefill query of the pass */
     int64_t n_ahead = 0;
+    int64_t n_checkpoints = 0;       /* checkpoints this pass writes (keyed) */
     bool    stream_ok = false;       /* the stager lever is on and has the layers it needs */
     bool    straddle_ok = false;     /* every late attention layer takes its per-row sparse form */
 };
@@ -60,6 +61,7 @@ struct PlanConfig {
     int64_t tile = 64;               /* G: the delta net's chunk */
     int64_t force_split = 0, shift_b = 0;
     int64_t stage_rows = INT64_MAX;  /* exact rows a masked pass may carry and still stream: any */
+    int64_t ckpt_floor = 0;          /* T_ck: the last rows of a checkpoint-writing chunk kept exact */
     int64_t min_bulk_rows = 0;       /* fewer bulk rows than this: the stock step (a pass's fixed
                                       * cost, e.g. a host-placed projector's stream, outweighs them) */
     bool    force_stream = false;
@@ -81,6 +83,10 @@ struct Pass {
 inline int64_t bulk_end(const PlanIn& in, const PlanConfig& c) {
     int64_t b = in.n_ahead >= c.tail ? in.n_tok
                                      : in.n_tok - (c.tail - in.n_ahead + c.tile - 1) / c.tile * c.tile;
+    /* DD-A's floor: a chunk that writes a checkpoint keeps its last T_ck rows exact, so a branch that
+     * resumes there has at least T_ck exact rows before it (PLAN-FIX §5.2). */
+    if (in.n_checkpoints > 0 && c.ckpt_floor > 0)
+        b = std::min(b, in.n_tok - (c.ckpt_floor + c.tile - 1) / c.tile * c.tile);
     if (c.force_split) b = in.n_tok - c.force_split;
     return std::min(std::max<int64_t>(b + c.shift_b, 0), in.n_tok);
 }

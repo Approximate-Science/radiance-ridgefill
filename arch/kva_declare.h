@@ -62,6 +62,11 @@ struct Kva {
     rad_kvgroup kv_applied = 0;
     /* Quality mode's running decay sums N and D per head (kva_rho_update), same lifetime. */
     rad_kvgroup kv_rho = 0;
+    /* DD-A's branch-hazard instrument (kva_hazard.h): one slot a sequence, bound to one late layer
+     * so checkpoints snapshot it, and the op that counts and records. */
+    rad_kvgroup kv_meta = 0;
+    int         meta_layer = -1;
+    rad_op      op_hazard = 0;
     /* The projector GEMM per late layer, and the quantiser that writes a projected block input's
      * codes as the connection read would have. */
     std::vector<rad_op> op_proj;              /* [n_layer]: 0 below S */

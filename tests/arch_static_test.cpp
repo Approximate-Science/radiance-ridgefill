@@ -1090,6 +1090,35 @@ TEST(a_host_placed_projector_approximates_only_passes_with_enough_bulk_rows) {
     CHECK_EQ(cfg.min_bulk_rows, 0);
 }
 
+/* DD-A's T_ck floor (Stage C) -- a chunk that writes a checkpoint keeps its last T_ck rows exact
+ * (rounded up to the tile); a chunk that writes none is untouched; 0 is off; it composes with a
+ * capped n_ahead (the smaller bulk end wins). The switch is read at declare. */
+TEST(a_checkpoint_writing_chunk_keeps_its_last_t_ck_rows_exact) {
+    using namespace qwen4exp_kva;
+    PlanIn in;
+    in.mode = PLAN_QUALITY; in.eligible = in.stream_ok = true;
+    in.n_tok = 2048; in.n_seq = 1; in.q_prefill = 2048;
+    PlanConfig pc;
+    struct Case { int64_t floor, ckpts, ahead, b; };
+    for (const Case& c : {Case{0, 1, 2048, 2048}, Case{512, 0, 2048, 2048}, Case{512, 1, 2048, 1536},
+                          Case{500, 1, 2048, 1536}, Case{1024, 1, 2048, 1024}, Case{512, 1, 1536, 1536},
+                          Case{512, 1, 1024, 1024}}) {
+        pc.ckpt_floor = c.floor; in.n_checkpoints = c.ckpts; in.n_ahead = c.ahead;
+        CHECK_EQ(plan_pass(in, pc).b, c.b);
+    }
+    Env e({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_CKPT_FLOOR", "512"}});
+    Config cfg;
+    RadModelMeta meta = flash_next_meta();
+    REQUIRE_EQ(read_config(&meta, &cfg), RAD_OK);
+    CHECK_EQ(cfg.ckpt_floor, 512);
+    Pair p;
+    declare_pair(p, "quality");
+    REQUIRE_EQ(p.st, RAD_OK);
+    Batch x = make_step(p.kva, {{128}, 0, 2048});
+    x.b.n_checkpoints = 1;
+    CHECK_EQ(qwen4exp_kva::derive(qwen4exp_kva::g_kva[0], &x.b).path, (int)PATH_STOCK);   /* 128 rows: all floor */
+}
+
 /* R73 -- KL MODE IS EXACT UNLESS THE SWITCH IS SET: a declare that sizes logits for every prompt
  * row (max_out_rows > 0) serves every pass stock, because bulk rows' logits are not the model's;
  * RADIANCE_KVA_SCORE_BULK=1 says the caller scores the exact tail only, and the pass approximates. */
@@ -1232,6 +1261,20 @@ std::vector<RadOperand> correction_operands(const Batch& x, int l, int rank = 0)
             k.kv_rho ? last_row(x, k.kv_rho) : RAD_NONE, brows(k.b_bounds, 2)};
 }
 
+/* DD-A's hazard op as an approximate pass ends it (kva_hazard.h): the last sequence's cu pair, the
+ * positions, the bulk bounds (the cu pair itself on the lean path), the span T - n_ahead as an
+ * extent when positive, the meta slot of the last sequence, this rank's counter. None in plumb. */
+void push_hazard(std::vector<RecIssue>& out, const Batch& x, bool lean, int rank = 0) {
+    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    if (!k.op_hazard) return;
+    const RadBatch& b = x.b;
+    const int64_t span = k.cfg.tail - b.n_ahead;
+    const RadOperand cu = praw(b.cu_seqlens + b.n_seq - 1, RAD_I32, 2);
+    out.push_back({k.op_hazard, {cu, praw(b.positions, RAD_I32, b.n_tok), lean ? cu : brows(k.b_bounds, 2),
+                   span > 0 ? praw(b.positions, RAD_I32, span) : RAD_NONE, kv_cache(k.kv_meta, k.meta_layer),
+                   last_row(x, k.kv_meta), praw(qwen4exp_kva::g_hazard_dev[rank], RAD_F32, 1)}, 1});
+}
+
 /* The in-tree scan, as the masked layer issues it for the last sequence (and, before it, the
  * other prefill sequences): cu and state rows narrowed, split at the bulk end when asked. */
 void push_scans(std::vector<RecIssue>& out, const RecIssue& scan, const Batch& x, int l, const Want& w,
@@ -1358,6 +1401,7 @@ std::vector<RecIssue> masked_expected(const Batch& x, const Want& w, int rank = 
     for (int l = kSplit; l < 8; ++l)
         push_layer(out, slice(stock, at[(size_t)(l - kSplit)], at[(size_t)(l - kSplit + 1)]), x, l, w, rank);
     for (size_t i = at.back(); i < stock.size(); ++i) out.push_back(stock[i]);
+    push_hazard(out, x, false, rank);
     return out;
 }
 
@@ -1617,6 +1661,7 @@ std::vector<RecIssue> decoders_expected(const Batch& x, int rank = 0) {
     for (int l = kSplit; l < 8; ++l)
         append(out, decoders_layer_expected(slice(stock, at[(size_t)(l - kSplit)], at[(size_t)(l - kSplit + 1)]), x, l, rank));
     for (size_t i = at.back(); i < stock.size(); ++i) out.push_back(stock[i]);
+    push_hazard(out, x, false, rank);
     return out;
 }
 
@@ -1681,6 +1726,7 @@ TEST(a_speed_straddle_runs_its_late_blocks_over_the_tail_rows_only) {
             append(want, straddle_expected(slice(stock, at[(size_t)(l - kSplit)], at[(size_t)(l - kSplit + 1)]),
                                            x, l, 64, 0));
         for (size_t i = at.back(); i < stock.size(); ++i) want.push_back(stock[i]);
+        push_hazard(want, x, false);
         const Run got = run_step(qwen4exp_kva::step, x.b);
         CHECK_EQ(differ_at(got.issues, want), 0);
         CHECK(has(got.log, "straddle, stage stock, split)"));
@@ -1783,6 +1829,48 @@ TEST(the_mask_all_control_approximates_every_row_before_the_bulk_end) {
     CHECK(has(err, "RADIANCE_KVA_MASK=all"));
 }
 
+/* DD-A's INSTRUMENT (Stage C, R65): speed and quality declare one LINEAR meta group bound to the
+ * first late delta-net layer (so checkpoints snapshot it), the kva_hazard op and a host-mapped counter;
+ * plumb and off declare none. A stock pass whose last sequence still has tail ahead (n_ahead < T)
+ * ends with the op, counting only (no bounds); a stock pass with T or more ahead and a decode-only
+ * step issue nothing. The counter is read on the host for the log alone. */
+TEST(the_hazard_instrument_counts_on_tail_passes_and_records_on_approximate_ones) {
+    Pair p;
+    declare_pair(p, "quality");
+    REQUIRE_EQ(p.st, RAD_OK);
+    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+    REQUIRE(k.op_hazard != 0 && k.kv_meta != 0);
+    CHECK_EQ(std::count(p.kva.kv_groups.begin(), p.kva.kv_groups.end(), "kv_kva_meta"), 1);
+    CHECK_EQ(k.meta_layer, kSplit);
+    int binds = 0;
+    for (auto [layer, g] : p.kva.binds)
+        if (g == k.kv_meta) { CHECK_EQ(layer, kSplit); ++binds; }
+    CHECK_EQ(binds, 1);
+    REQUIRE(qwen4exp_kva::g_hazard_dev[0] != nullptr);
+    Batch tail = make_step(p.kva, {{128}, 0, 0});          /* the final chunk: stock, n_ahead 0 */
+    const Run got = run_step(qwen4exp_kva::step, tail.b);
+    std::vector<RecIssue> want = run_step(qwen4exp_fp8::step, tail.b).issues;
+    want.push_back({k.op_hazard, {praw(tail.b.cu_seqlens, RAD_I32, 2), praw(tail.b.positions, RAD_I32, 128), RAD_NONE,
+                    praw(tail.b.positions, RAD_I32, k.cfg.tail), kv_cache(k.kv_meta, k.meta_layer),
+                    last_row(tail, k.kv_meta), praw(qwen4exp_kva::g_hazard_dev[0], RAD_F32, 1)}, 1});
+    CHECK_EQ(differ_at(got.issues, want), 0);
+    for (const Shape& s : {Shape{{128}, 0, 4096}, Shape{{1, 1}, 2, 0}}) {   /* T+ ahead but stock; decode only */
+        Batch x = make_step(p.kva, s);
+        if (s.D == 0) x.b.n_mm_rows = 1;                 /* a media step: stock whatever is ahead */
+        CHECK_EQ(differ(run_step(qwen4exp_kva::step, x.b).issues, run_step(qwen4exp_fp8::step, x.b).issues), 0);
+    }
+    float* host = (float*)rad_dev_host_ptr(qwen4exp_kva::g_hazard_dev[0]);
+    REQUIRE(host != nullptr);
+    *host = qwen4exp_kva::g_hazard_logged[0] + 1144.0f;
+    CHECK(has(run_step(qwen4exp_kva::step, tail.b).log, "kva: hazard 1144 positions"));
+    CHECK(!has(run_step(qwen4exp_kva::step, tail.b).log, "kva: hazard"));   /* said once */
+    Pair q;
+    declare_pair(q, "plumb");
+    REQUIRE_EQ(q.st, RAD_OK);
+    CHECK(qwen4exp_kva::g_kva[0].op_hazard == 0);
+    CHECK_EQ(std::count(q.kva.kv_groups.begin(), q.kva.kv_groups.end(), "kv_kva_meta"), 0);
+}
+
 /* A ONE-SEQUENCE CHUNK OFF THE DELTA NET'S TILE FAILS THE STEP BY NAME: the scheduler never cuts one,
  * and splitting a tile would be silently wrong. A forced split off the tile (R47's negative
  * control) is served, and said at declare. */
@@ -1849,8 +1937,9 @@ TEST(speed_fills_late_layers_with_their_cache_writing_ops_only) {
     const std::vector<size_t> ws = starts(want.issues, reads, m.mixer.op_read);
     const std::vector<size_t> gs = starts(got.issues, projs, m.mixer.op_read);
     CHECK_EQ(differ(slice(got.issues, 0, gs[0]), slice(want.issues, 0, ws[0])), 0);
-    CHECK_EQ(differ(slice(got.issues, gs.back(), got.issues.size()),
-                    slice(want.issues, ws.back(), want.issues.size())), 0);
+    std::vector<RecIssue> tail = slice(want.issues, ws.back(), want.issues.size());
+    push_hazard(tail, x, true);
+    CHECK_EQ(differ(slice(got.issues, gs.back(), got.issues.size()), tail), 0);
     for (const RecIssue& r : got.issues) {   /* no mask, no probe */
         CHECK(r.op != k.op_mask);
         for (const RadOperand& o : r.opd) CHECK(o.kind != RAD_OPK_BUF || o.handle != k.b_zeros);

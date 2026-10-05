@@ -427,3 +427,44 @@ extern "C" int kva_drop_host(const RadArgs* a, RadStream) {
         for (int64_t j = 0; j < g.top_k && g.mask[i] == 1; ++j) g.ids[i * g.pitch + j] = -1;
     return RAD_OK;
 }
+
+/* ================================================================== kva_hazard */
+
+extern "C" int kva_hazard_parse(const RadArgs* a, KvaHazard* g) {
+    const RadTensor* cu = rad_arg_in(a, HZ_CU);
+    const RadTensor* pos = rad_arg_in(a, HZ_POS);
+    const RadTensor* span = rad_arg_in(a, HZ_SPAN);     /* optional: its extent is T - n_ahead */
+    const RadTensor* meta = rad_arg_in(a, HZ_META);
+    const RadTensor* idx = rad_arg_in(a, HZ_META_IDX);
+    const RadTensor* cnt = rad_arg_in(a, HZ_COUNT);
+    if (!cu || !pos || !meta || !idx || !cnt) return RAD_E_INVAL;
+    if (cu->dtype != RAD_I32 || pos->dtype != RAD_I32 || meta->dtype != RAD_F32 || cnt->dtype != RAD_F32)
+        return RAD_E_DTYPE;
+    if (!dense(cu) || !dense(cnt)) return RAD_E_STRIDE;
+    int64_t rows = 0, pitch = 0;
+    int rc = index_rows(idx, &rows, &pitch);
+    if (rc == RAD_OK) rc = optional_bounds(rad_arg_in(a, HZ_BOUNDS), 2, &g->bounds);
+    if (rc != RAD_OK) return rc;
+    if (rows < 1 || rad_tensor_numel(cu) < 2 || rad_tensor_numel(cnt) < 1 || pos->rank < 1 || pos->rank > 2 ||
+        meta->rank < 2 || meta->shape[meta->rank - 1] != 2 || meta->stride[meta->rank - 1] != 1)
+        return RAD_E_SHAPE;
+    g->cu_last = (const int32_t*)cu->data;
+    g->positions = (const int32_t*)pos->data;
+    g->pos_stride = pos->stride[pos->rank - 1];
+    g->span = span ? rad_tensor_numel(span) : 0;
+    g->meta = (float*)meta->data;
+    g->meta_slot = meta->stride[0];
+    g->meta_states = meta->shape[0];
+    g->meta_idx = (const int32_t*)idx->data;
+    g->count = (float*)cnt->data;
+    return RAD_OK;
+}
+
+extern "C" int kva_hazard_host(const RadArgs* a, RadStream) {
+    KvaHazard g{};
+    const int rc = kva_hazard_parse(a, &g);
+    if (rc != RAD_OK) return rc;
+    if (g.cu_last[0] < 0 || g.cu_last[0] > g.cu_last[1]) return RAD_E_INVAL;
+    kva_hazard_step(&g);
+    return RAD_OK;
+}
