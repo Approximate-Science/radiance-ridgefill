@@ -23,7 +23,7 @@
 #   RK_PLUGIN_HOME    <repo>/home (mounted at /plugins for every mode except exact)
 #   RK_EVIDENCE       <repo>/evidence
 #   RK_FLAGS          the shared engine flags (common.sh)
-#   RK_SERVE_SEQS     8: --max-num-seqs for the serving deployment
+#   RK_SERVE_SEQS     8: --max-num-seqs for the serving deployment; `default` passes none (radiance's own)
 #   RK_SERVE_TIMEOUT  1800 s: how long to wait for /health (a 114 GiB model load is slow)
 #   plus any RADIANCE_KVA*/RADIANCE_LOG_STEPS in the caller's environment, passed through
 #   to the container.
@@ -60,7 +60,8 @@ trap 'rm -f "$rk_args" "$rk_extra"' EXIT INT TERM
     printf '%s\n' "$RK_IMAGE" --model "/models/$(basename "$RK_MODEL")"
     # shellcheck disable=SC2086  # RK_FLAGS is one flag or value per word by construction
     printf '%s\n' $RK_FLAGS
-    printf '%s\n' --host 0.0.0.0 --port "$RK_PORT" --max-num-seqs "$RK_SERVE_SEQS"
+    printf '%s\n' --host 0.0.0.0 --port "$RK_PORT"
+    [ "$RK_SERVE_SEQS" = default ] || printf '%s\n' --max-num-seqs "$RK_SERVE_SEQS"
     cat "$rk_extra"
 } > "$rk_args"
 

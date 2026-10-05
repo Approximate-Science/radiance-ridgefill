@@ -54,6 +54,11 @@
 #   RK_E2E_SERVE_TIMEOUT  default 1800 s: how long to wait for /health a case (114 GiB load)
 #   RK_E2E_TTFT_LEN       default 16384: the TTFT prompt length
 #   RK_E2E_TTFT_REPS      default 3: timed reps after one warm-up (median is compared)
+#   RK_E2E_CACHE_ROOT     default unset: with flags that turn the prefix cache's disk tier on
+#                         (--prefix-cache-dir /kvcache), each case gets <root>/<case> mounted at /kvcache,
+#                         so no case reuses another's cached KV
+#   RK_E2E_SEQS           default 8 (the measurement deployment's --max-num-seqs); `default` passes
+#                         none, so a run with RK_FLAGS="--tp 2" serves radiance's own defaults throughout
 #   RK_E2E_PREFLIGHT     default 1: run scripts/preflight.sh before each container; 0 skips it
 #                         (debug only -- a gate number next to a squatter is not a number)
 #   RK_E2E_MODEL_SHA256   default the published sha256 of the stock container
@@ -84,6 +89,7 @@ fi
 : "${RK_E2E_SERVE_TIMEOUT:=1800}"
 : "${RK_E2E_TTFT_LEN:=16384}"
 : "${RK_E2E_TTFT_REPS:=3}"
+: "${RK_E2E_SEQS:=8}"
 : "${RK_E2E_PREFLIGHT:=1}"
 : "${RK_E2E_STAGE_F:=0}"
 : "${RK_E2E_MODEL_SHA256:=0af5e96244e80c21ac8edca1719dae49b8a201b94a2f3994c3e24026ceaa4d20}"
@@ -254,6 +260,9 @@ e2e_serve() {
     fi
     e_container=radiance-kva-e2e-$e_name
     e_args=$E2E_LOGS/$e_name.cmd
+    if [ -n "${RK_E2E_CACHE_ROOT:-}" ]; then   # a fresh prefix-cache dir per case (mounted at /kvcache)
+        RK_CACHE_DIR=$RK_E2E_CACHE_ROOT/$e_name; mkdir -p "$RK_CACHE_DIR"; export RK_CACHE_DIR
+    fi
     {
         printf '%s\n' -d --name "$e_container"
         rk_docker_prefix "$e_mode"
@@ -262,7 +271,8 @@ e2e_serve() {
         printf '%s\n' "$RK_IMAGE" --model "/models/$(basename "$RK_MODEL")"
         # shellcheck disable=SC2086  # RK_FLAGS is one flag or value per word by construction
         printf '%s\n' $RK_FLAGS
-        printf '%s\n' --host 0.0.0.0 --port "$RK_PORT" --max-num-seqs 8
+        printf '%s\n' --host 0.0.0.0 --port "$RK_PORT"
+        [ "$RK_E2E_SEQS" = default ] || printf '%s\n' --max-num-seqs "$RK_E2E_SEQS"
         if [ -n "$e_tmpl" ]; then printf '%s\n' --override-chat-template /templates/chat_template.jinja; fi
         if [ "$#" -gt 0 ]; then printf '%s\n' "$@"; fi
     } > "$e_args"
