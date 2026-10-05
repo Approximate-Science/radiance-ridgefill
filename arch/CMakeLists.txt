@@ -10,3 +10,8 @@
 rad_add_plugin(qwen4exp_fp8 architectures
                SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/qwen4exp_kva.cpp
                INCLUDES ${RADIANCE_SRC}/arch)
+
+# The release the plugin is built against, for the open-time engine guard (kva_guard.h, R83): the
+# top-level CMakeLists.txt has already required RADIANCE_SRC and the installed engine to agree on it.
+target_compile_definitions(qwen4exp_fp8 PRIVATE KVA_RADIANCE_VERSION="${RADIANCE_SRC_VERSION}")
+target_link_libraries(qwen4exp_fp8 PRIVATE ${CMAKE_DL_LIBS})

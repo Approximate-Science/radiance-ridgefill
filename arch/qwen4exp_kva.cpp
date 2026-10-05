@@ -17,7 +17,8 @@
  * the cache-writing pieces, kva_fill.h) or the MASKED layer (every other shape: the in-tree layer
  * over all rows with the device mask choosing which rows use the projection, kva_layer.h). The
  * routed down GEMMs from layer S-1 go through weightless alternate handles so the expert stager
- * streams the late layers' routed experts instead of staging each whole (§6.1).
+ * streams the late layers' routed experts instead of staging each whole (§6.1). The engine release
+ * is checked at open and a mismatch forwards to the engine's own architecture (kva_guard.h).
  *
  * Included by tests/arch_static_test.cpp too, which defines RAD_ARCH_NO_EXPORTS itself; then
  * neither plugin's exports are emitted and the test calls both namespaces directly.
@@ -33,6 +34,7 @@
 #include "kva_fill.h"
 #include "kva_moe.h"
 #include "kva_layer.h"
+#include "kva_guard.h"
 
 namespace qwen4exp_kva {
 
@@ -47,6 +49,7 @@ static void note_meta_mode(const Config& c, const RadBuildCtx* ctx) {
 }
 
 static int declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* ctx) {
+    if (g_forward.declare) return g_forward.declare(b, meta, ctx);
     RAD_ARCH_TRY(qwen4exp_fp8::declare(b, meta, ctx));
 
     /* A SIZING DECLARE WRITES SCRATCH, as the included declare does. Its geometry is read from
@@ -293,6 +296,7 @@ static bool misaligned(const Kva& k, const RadBatch* batch, const Pass& p) {
 }
 
 static void step(RadCtx* c, const RadBatch* batch) {
+    if (g_forward.step) { g_forward.step(c, batch); return; }
     const Kva& k = g_kva[rad_rank(c)];
     const Pass p = derive(k, batch);
     const bool approx = p.path != PATH_STOCK;
@@ -315,12 +319,14 @@ static void step(RadCtx* c, const RadBatch* batch) {
 /* The in-tree probe's answers hold here: the draft depth is the model's, and this declare writes
  * scratch under shape_probe exactly as the included one does. */
 static int probe(const RadModelMeta* meta, RadArchProbe* out) {
+    if (g_forward.probe) return g_forward.probe(meta, out);
     return qwen4exp_fp8::probe(meta, out);
 }
 
 }  /* namespace qwen4exp_kva */
 
 #ifdef QWEN4EXP_KVA_EXPORTS
+extern "C" int rad_plugin_open(void) { return qwen4exp_kva::open_guard(); }
 RAD_ARCH_PROBE(qwen4exp_kva)
 RAD_ARCH_PLUGIN(qwen4exp_kva, "qwen4exp", "", "0.2.0",
                 "Qwen4-Exp (Qwen3.8-Flash-Next) with KVA / RidgeFill prefill: the in-tree "

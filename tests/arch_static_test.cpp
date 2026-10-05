@@ -171,6 +171,8 @@ int   rad_memset_async(void*, int, int64_t, RadStream) { ++g_ctx->device_calls; 
 }  /* extern "C" */
 
 /* ==================================================================== the plugin under test */
+/* The release the guard compares against; the build sets it for the plugin (arch/CMakeLists.txt). */
+#define KVA_RADIANCE_VERSION "0.0.0-test"
 #include "qwen4exp_kva.cpp"
 
 using rad::arch::bcol;
@@ -1709,6 +1711,51 @@ TEST(state_capture_without_kva_state_read_is_refused) {
     std::string err;
     CHECK_EQ(refused({{"RADIANCE_KVA_CAPTURE_STATE", "x"}}, b, &err), RAD_E_UNSUPPORTED);
     CHECK(has(err, "kva_state_read"));
+}
+
+/* ==================================================================== the release guard (R83) */
+
+/* The scan counts NUL-delimited copies only: a copy inside a longer string, or at a file's very
+ * start with no NUL in front, is not one; two adjacent copies sharing a NUL are two; a copy that
+ * straddles the scan's 1 MiB block boundary is found once. An unreadable file is -1. */
+TEST(the_release_scan_counts_nul_delimited_copies) {
+    TempDir dir;
+    REQUIRE(!dir.path.empty());
+    auto write = [&](const char* name, const std::string& bytes) {
+        std::ofstream(dir.path / name, std::ios::binary) << bytes;
+        return (dir.path / name).string();
+    };
+    const std::string z(1, '\0');
+    CHECK_EQ(qwen4exp_kva::count_version(write("one", "abc" + z + "1.0.8" + z + "x").c_str(), "1.0.8"), 1);
+    CHECK_EQ(qwen4exp_kva::count_version(write("none", "x" + z + "1.0.80" + z + "11.0.8" + z).c_str(), "1.0.8"), 0);
+    CHECK_EQ(qwen4exp_kva::count_version(write("start", "1.0.8" + z + "q").c_str(), "1.0.8"), 0);
+    CHECK_EQ(qwen4exp_kva::count_version(write("two", z + "1.0.8" + z + "1.0.8" + z).c_str(), "1.0.8"), 2);
+    std::string big((1 << 20) - 3, 'a');
+    big += z + "1.0.8" + z;
+    CHECK_EQ(qwen4exp_kva::count_version(write("straddle", big).c_str(), "1.0.8"), 1);
+    CHECK_EQ(qwen4exp_kva::count_version((dir.path / "absent").c_str(), "1.0.8"), -1);
+}
+
+/* FIPS 180-4's own vectors, so a logged sha256 names the binary it claims to. */
+TEST(sha256_matches_the_fips_vectors) {
+    TempDir dir;
+    REQUIRE(!dir.path.empty());
+    auto sha = [&](const std::string& bytes) {
+        const std::string p = (dir.path / "f").string();
+        std::ofstream(p, std::ios::binary) << bytes;
+        return qwen4exp_kva::sha256_file(p.c_str());
+    };
+    CHECK_EQ(sha(""), std::string("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
+    CHECK_EQ(sha("abc"), std::string("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
+    CHECK_EQ(sha("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"),
+             std::string("248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1"));
+}
+
+/* With no forward taken the plugin serves itself; the forward table is empty at load. */
+TEST(the_forward_table_starts_empty) {
+    CHECK(qwen4exp_kva::g_forward.declare == nullptr && qwen4exp_kva::g_forward.step == nullptr &&
+          qwen4exp_kva::g_forward.probe == nullptr);
+    CHECK(qwen4exp_kva::find_shadowed("").empty() || std::getenv("RADIANCE_HOME") != nullptr);
 }
 
 RAD_TEST_MAIN()
