@@ -6,7 +6,7 @@ the plugin's "kva: approximate step" lines) and, step by step, recomputes PLAN-F
 engine's own numbers: the long prompt's chunk q = n_tok - (n_seq - 1)(1 + spec) (each decoder verifies 1 + spec rows;
 the long prompt is the step's last entry), its context = the sum of its earlier chunks, n_ahead =
 min(N - ctx - q, max_tok), b = n_tok if n_ahead >= T else n_tok - roundup_G(T - n_ahead), s_lb =
-n_tok - q; approximate iff n_ahead > 0 and b > s_lb. Each expected step must be followed by a plugin
+n_tok - q; approximate iff n_ahead > 0, b > s_lb and b - s_lb >= --min-bulk-rows (the R56 guard). Each expected step must be followed by a plugin
 line with the same n_tok and n_ahead (any path).
 
 A REPLAYED PASS LOGS NOTHING. The engine records a pass the second time its key is seen and replays
@@ -42,7 +42,8 @@ def expected(steps, length, a):
             continue
         need = a.tail - ahead
         b = n_tok if ahead >= a.tail else n_tok - (need + a.tile - 1) // a.tile * a.tile
-        out.append((number, n_tok, ahead, b > n_tok - q))
+        s_lb = n_tok - q
+        out.append((number, n_tok, ahead, b > s_lb and b - s_lb >= a.min_bulk_rows))
     return out
 
 
@@ -83,6 +84,8 @@ def main():
     ap.add_argument("--tile", type=int, default=64)
     ap.add_argument("--max-tok", type=int, default=2048)
     ap.add_argument("--spec", type=int, default=0, help="draft depth: each decoder verifies 1 + spec rows")
+    ap.add_argument("--min-bulk-rows", type=int, default=0,
+                    help="the server's RADIANCE_KVA_MIN_BULK_ROWS (1024 with the projector in host memory)")
     a = ap.parse_args()
     res = json.load(open(a.result))
     logdir = a.result[:-len(".json")] + ".logs"
