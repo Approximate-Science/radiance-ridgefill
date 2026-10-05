@@ -80,3 +80,26 @@ approximates those positions -- so the two differ by design and identity is the 
   so speculating decoders never ride beside a prefill chunk and speed took the lean path on all 75
   approximate steps. Per-decoder acceptance (separate requests, 5 rounds x 4): off 3,347 / 5,298 = 0.6317,
   speed 3,344 / 5,298 = 0.6312. (Stage B session 4's batched spec texts were taken the same way.)
+- **R65 GREEN at T_ck 0** (corpus `branches2.jsonl`: one document per triple, `--min-prompt 8192`, server
+  `--checkpoint-slots 64 --checkpoint-policy keep-all`): **9 real branches** (every B resumed at its predicted
+  checkpoint), and on every one the device counter equals the oracle min(N1−N2, T−(N2−P)) and the
+  records-side count exactly:
+
+| branch | N1 | N2 | P (cache_n) | oracle | records | device |
+|---|---|---|---|---|---|---|
+| 000 | 9,384 | 4,787 | 4,096 | 1,357 | 1,357 | 1,357 |
+| 001 | 9,393 | 6,561 | 6,144 | 1,631 | 1,631 | 1,631 |
+| 002 | 9,401 | 6,569 | 6,144 | 1,623 | 1,623 | 1,623 |
+| 003 | 16,570 | 15,094 | 14,336 | 1,290 | 1,290 | 1,290 |
+| 004 | 16,549 | 2,532 | 2,048 | 1,564 | 1,564 | 1,564 |
+| 005 | 16,554 | 8,530 | 8,192 | 1,710 | 1,710 | 1,710 |
+| 006 | 16,553 | 12,564 | 12,288 | 1,772 | 1,772 | 1,772 |
+| 007 | 32,927 | 16,725 | 16,384 | 1,707 | 1,707 | 1,707 |
+| 008 | 32,952 | 4,466 | 4,096 | 1,678 | 1,678 | 1,678 |
+
+  The 18 A (producer) and C (append-only) requests: no tail overlap in the records, device count 0.
+  Not yet measured: the T_ck = 512 variant (session C3, queued), the greedy-answer agreement, and the
+  negative control (zeroing kv_kva_meta after a restore needs a debug switch that is not built).
+- **R68 GREEN**: `tools/hazard_rate.py` (superset rule from `timings`) flags exactly the 9 B's and none of
+  the A/C's on this corpus, and with unnamed lines paired in order (fix above) its per-request cross-check
+  with the device AGREEs (14,332 positions both). On the append-only R62 traffic: 0 flagged, 0 logged.
