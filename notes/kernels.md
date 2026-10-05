@@ -4,6 +4,9 @@ Owner: KERNELS lane. Files: `kernels/` (CMakeLists.txt, kva.h, rows.cpp, host_re
 rho.hip, state_correct.hip), `tests/kernel_test.cpp`, `tests/rho_ref.py`, `tests/fixtures/rho_numpy.txt`,
 this file. Radiance `140987f` (v1.0.8).
 
+**Stage A (PLAN-FIX v2, 2026-10-04, last section) replaced `kva_rowsel` by `kva_mask` and added `kva_select`,
+`kva_drop_rows` and optional `bounds` operands; §1-§2 below describe the library before it and are kept as history.**
+
 ## 1. The three ops — schemas and operand order (for the ARCH lane)
 
 Operands are POSITIONAL, in this order. `?` = optional (pass `RAD_NONE`). Params in `RAD_PARAMS` order
@@ -321,3 +324,211 @@ strides, slots 4 / −1 / 1 / 7-past-pool / 4) compares the whole output bitwise
 zero — **not run: the GATES worker holds the GPU lock**. HIP build compiles, `ctest -LE gpu` passes. Device command
 as in the previous entry (`ctest --test-dir build-kernels-hip -L gpu --output-on-failure` in radiance-build with
 all of /dev/dri and ROCR_VISIBLE_DEVICES set to the card's GPU-agent index).
+
+## Stage A — the device mask (PLAN-FIX v2, 2026-10-04, late evening)
+
+Plan: `~/AI-Work/radiance-kva-plugin-20261004/fix-246/` (PLAN-FIX v2, REQUIREMENTS-FIX R46/R98). Binding schemas:
+`notes/impl.md` §1 (IMPL lane). Radiance `140987f`, ROCm 7.2.4 (radiance-build image), card PCI 0000:13:00.0.
+Files now: `kernels/` (CMakeLists.txt, kva.h, rows.cpp, host_ref.cpp, mask.hip [was rowsel.hip], select.hip [new],
+rho.hip, state_correct.hip), `tests/kernel_test.cpp`.
+
+Commits: c377613 (rho / state_correct `bounds`), 9f87144 (`kva_mask` replaces `kva_rowsel`), 790a711 (`kva_select`,
+`kva_drop_rows`, R98 case), 007c967 (test harness: zero-row operands present and empty).
+
+### A.1 Schemas — exactly impl.md §1, no deviation
+
+`rad-schemas kva.so` (host-only build):
+```
+kva -- 6 ops
+  kva_drop_rows      params M:int top_k:int                          operands mask:in ids:inout
+  kva_mask           params M:int share:f64 seed:int mode:str        operands cu_last:in token_ids:in positions:in score:weight? mask:out bounds:out
+  kva_rho_update     params M:int n_head:int                         operands a:in mask:in A_log:weight dt_bias:weight ND:inout state_idx:in bounds:in?
+  kva_select         params M:int                                    operands mask:in x_src:in q_src:in? s_src:in? x:inout q:inout? s:inout?
+  kva_state_correct  params M:int mode:str alpha:f64 n_head:int sd0:int sd1:int
+                     operands state:inout state_idx:in applied:inout applied_idx:in C:weight ND:in? nd_idx:in? bounds:in?
+  kva_state_read     params M:int n_head:int sd0:int sd1:int         operands state:in state_idx:in out:out
+```
+(columns re-wrapped; names, order, roles and optionality as printed.) Every param is REQUIRED and has role
+RAD_PROLE_NONE. `kva_rowsel` is deleted entirely (schema, rows, host/device code, tests); its `cap` (the only
+CAPACITY param) went with it.
+
+### A.2 Decisions and their cost (what the arch side can trip)
+
+- **kva_mask, cu_last out of order.** The host row refuses s < 0, s > e, e > n with RAD_E_INVAL. The device row
+  reads cu_last in device memory and cannot return a code without a synchronize (R21), so it does the safe thing:
+  clamps e into [0, n], s into [0, e], and takes the window EMPTY -- every mask row 0 (exact, the plain model),
+  bounds {s, s, s, e} clamped. Test `mask_device_fail_safe`. Cost: a wrong cu_last on the device is silent (all
+  rows exact, so slower, never wrong numbers).
+- **kva_mask device row: b <= 8192** (`KVA_MASK_MAX_ROWS`, renamed from KVA_ROWSEL_MAX_ROWS, same value; nothing
+  outside kernels/ used it). The row's constraint is `M <= 8192` (band selection, M issued at b) and the launch
+  also refuses token_ids' extent b > 8192 with RAD_E_SHAPE (the window, <= b rows, keeps one 4-byte key per row in
+  LDS: 33,792 B). The mask's n is NOT bounded (tested at n = 9000). The host row has no limit.
+- **kva_mask, required operands.** cu_last [>= 2], token_ids, positions (rank 1 or 2, last extent >= b, even in
+  modes that never read it -- the schema does not mark it optional), mask, bounds [>= 4] are required; `score` is
+  optional and RAD_E_INVAL when absent in class/random; `share` in [0, 1] and `seed` required in every mode.
+  b = 0 (token_ids of zero rows) works as long as its data pointer is non-null: a null pointer is "absent" under
+  the ABI's rule and is refused RAD_E_INVAL.
+- **kva_select.** Exactly `mask[i] == 1` copies (other values copy nothing). Each pair rank 2, last stride 1,
+  same dtype and shape[1], >= n rows each; a half-present pair is RAD_E_INVAL. Whole-byte dtypes only: a sub-byte
+  dtype (i4, fp4, ...) is refused RAD_E_DTYPE (a row of them need not start on a byte boundary under every
+  pitch). The device row copies each pair in the widest word (16, 4 or 1 bytes) its two addresses, two pitches and
+  row width are multiples of, picked at parse; a bf16 row moves in 16-byte loads. One workgroup per mask row;
+  an exact row costs one 4-byte mask read. A destination may be its own source (host uses memmove).
+- **kva_drop_rows.** top_k >= 0 (missing or negative: RAD_E_INVAL); ids rank 2, last stride 1, rows >= n,
+  shape[1] >= top_k (else RAD_E_SHAPE). top_k 0 writes nothing.
+- **bounds on rho / state_correct.** i32, dense, >= 1 (rho) / >= 2 (state_correct) elements, else
+  DTYPE / STRIDE / SHAPE. Read INSIDE the kernel on the device row (never on the host). rho runs over
+  [clamp(bounds[0], 0, n), n) with n = `a`'s extent; state_correct writes nothing when bounds[1] <= bounds[0], in
+  both modes and for every sequence. Absent = the old op, bit for bit (every pre-Stage-A case unchanged).
+- **rho host vs device is not bitwise** (the device's expf/log1pf are not glibc's; max |Δrho| 2.4e-7 here), so
+  "rho with bounds, device == host" is checked as: device == device-on-the-slice BITWISE (7/7 bounds incl. -3, 0,
+  2048, 4000 on n = 2048) plus device vs host within the R34 tolerance (1e-5). Every other op is bytewise.
+- **R98:** `grep -rn RAD_PROLE_SEQ_CHUNK kernels/` -> empty (exit 1); case `params_carry_no_role` asserts every
+  param of every schema has role in {NONE, CAPACITY} and in fact NONE, and that the schema count is 6.
+
+### A.3 Tests (R46/R98)
+
+New host cases: `params_carry_no_role`, `mask_class_semantics` (s = 4 decode prefix + 2-row tail, ties, every
+non-finite score, id past the table, k half to even, rows outside W carry the best id), `mask_window_clamping`
+(b < s, b > e, b == s, s == e == n, b = 0, bulk + tail; none = 1 exactly on W, all = 0, bounds bytes),
+`mask_random_semantics` (W = [100, 900) of 1100 rows: kept rows == the k smallest (hash(seed, position), row) by
+a transcription of kva_row_hash; seed and positions matter; [3, b] positions == [b]; class ignores positions),
+`mask_refuses_bad_window`, `select_copies_masked_rows` (bf16 x, i8 q, f32 s, padded and different pitches, more
+destination rows than n, mask values 2 and -1, EVERY destination byte checked against a 0xA5 sentinel, sources
+untouched, absent q/s), `drop_rows_semantics`, `select_drop_refuse_bad_operands`, `rho_bounds_semantics`
+(== the op on the slice [s, n), carried ND, clamp below 0 / at or past n), `state_correct_bounds` (empty and
+inverted bounds change no byte in either mode; non-empty == no bounds). `refuses_bad_operands` re-pointed at
+kva_mask (+ bounds refusals of rho / state_correct). R33 re-pointed: `mask_matches_fnlev_rules` (class mode, window
+[0, 2048) of each doc == fixture rows, count == k; and the same ids at rows [64, 2112) of a 2112-row step, cu_last
+{64, 2112}, rows before 64 the table's best id: kept == rows + 64, rows < 64 all 0). Generic cases iterate all
+six ops; the described operands use the engine tools' IDX_CU fill for cu_last ({0, M}).
+New gpu cases: `mask_device_matches_host` (192 configurations: n in {1, 7, 300, 2048, 8192, 9000} x 4 window
+layouts x 4 modes x share {0.25, 1}, random ids/positions/score with heavy ties, [b] and [3, b] positions; mask
+AND bounds bytes equal), `mask_device_fail_safe`, `rho_bounds_device_matches_host`,
+`state_correct_bounds_device_matches_host`, `select_device_matches_host` (9 configurations, 7.58 MB of destination
+bytes, n up to 8192, bf16 / i8 / E4M3 / f32, all three copy words, absent pairs), `drop_rows_device_matches_host`
+(12 configurations, top_k 0..300).
+
+Host group, host-only build (`ctest -LE gpu`: `kva_kernels_host Passed`, 100% tests passed out of 1):
+```
+  ok   descriptions_cover_schemas
+  SKIP stub_refuses: no stubbed row remains in this domain (R8 retired: every row implemented)
+  ok   described_operands_launch
+  ok   params_carry_no_role
+  ok   mask_class_semantics
+  ok   mask_window_clamping
+  ok   mask_random_semantics
+  ok   mask_refuses_bad_window
+  ok   refuses_bad_operands
+  ok   state_read_semantics
+  ok   state_correct_separate_slots
+  ok   state_correct_semantics
+  ok   rho_semantics
+  ok   rho_in_unit_interval
+  ok   select_copies_masked_rows
+  ok   drop_rows_semantics
+  ok   select_drop_refuse_bad_operands
+  ok   rho_bounds_semantics
+  ok   state_correct_bounds
+  rho vs NumPy: max |rho diff| 1.55e-06, max rel N/D diff 2.15e-06
+  ok   rho_matches_numpy_reference
+  ppl/8k/0   n 2048  k 119  == fnlev.rules (window [0, 2048) and [64, 2112))
+  ppl/8k/1   n 2048  k 101  == fnlev.rules (window [0, 2048) and [64, 2112))
+  ppl/8k/2   n 2048  k 78  == fnlev.rules (window [0, 2048) and [64, 2112))
+  ppl/16k/0  n 2048  k 127  == fnlev.rules (window [0, 2048) and [64, 2112))
+  ppl/16k/1  n 2048  k 144  == fnlev.rules (window [0, 2048) and [64, 2112))
+  ppl/16k/2  n 2048  k 140  == fnlev.rules (window [0, 2048) and [64, 2112))
+  ppl/16k/3  n 2048  k 124  == fnlev.rules (window [0, 2048) and [64, 2112))
+  ppl/32k/0  n 2048  k 94  == fnlev.rules (window [0, 2048) and [64, 2112))
+  ppl/32k/1  n 2048  k 101  == fnlev.rules (window [0, 2048) and [64, 2112))
+  ok   mask_matches_fnlev_rules
+767 check(s), group host
+```
+HIP build in radiance-build: compiles, `ctest -LE gpu` 100% passed (1/1). Device group (kernel log clean before
+and after every GPU run; card mapped from BDFID 4864 inside the container):
+```
+card 0000:13:00.0 (BDFID 4864) -> ROCR_VISIBLE_DEVICES=1
+  device 0 of 1 visible, PCI 0000:13:00.0
+  ok   descriptions_cover_schemas
+  SKIP stub_refuses: no stubbed row remains in this domain (R8 retired: every row implemented)
+  ok   described_operands_launch
+  ok   params_carry_no_role
+  ok   refuses_bad_operands
+  ok   select_drop_refuse_bad_operands
+  rho vs NumPy: max |rho diff| 1.55e-06, max rel N/D diff 2.15e-06
+  ok   rho_matches_numpy_reference
+  ppl/8k/0   n 2048  k 119  == fnlev.rules (window [0, 2048) and [64, 2112)) == host row
+  ppl/8k/1   n 2048  k 101  == fnlev.rules (window [0, 2048) and [64, 2112)) == host row
+  ppl/8k/2   n 2048  k 78  == fnlev.rules (window [0, 2048) and [64, 2112)) == host row
+  ppl/16k/0  n 2048  k 127  == fnlev.rules (window [0, 2048) and [64, 2112)) == host row
+  ppl/16k/1  n 2048  k 144  == fnlev.rules (window [0, 2048) and [64, 2112)) == host row
+  ppl/16k/2  n 2048  k 140  == fnlev.rules (window [0, 2048) and [64, 2112)) == host row
+  ppl/16k/3  n 2048  k 124  == fnlev.rules (window [0, 2048) and [64, 2112)) == host row
+  ppl/32k/0  n 2048  k 94  == fnlev.rules (window [0, 2048) and [64, 2112)) == host row
+  ppl/32k/1  n 2048  k 101  == fnlev.rules (window [0, 2048) and [64, 2112)) == host row
+  ok   mask_matches_fnlev_rules
+  shared slots undo  alpha 1.0 ND 0: 10031712 state bytes, 0 differ (max abs diff 0)
+  shared slots apply alpha 0.7 ND 1: 10031712 state bytes, 0 differ (max abs diff 0)
+  shared slots undo  alpha 1.0 ND 0: 10031712 state bytes, 0 differ (max abs diff 0)
+  shared slots apply alpha 1.0 ND 0: 10031712 state bytes, 0 differ (max abs diff 0)
+  shared slots apply alpha 0.0 ND 1: 10031712 state bytes, 0 differ (max abs diff 0)
+  own slots   undo  alpha 1.0 ND 0: 10031712 state bytes, 0 differ (max abs diff 0)
+  own slots   apply alpha 0.7 ND 1: 10031712 state bytes, 0 differ (max abs diff 0)
+  own slots   undo  alpha 1.0 ND 0: 10031712 state bytes, 0 differ (max abs diff 0)
+  own slots   apply alpha 1.0 ND 0: 10031712 state bytes, 0 differ (max abs diff 0)
+  own slots   apply alpha 0.0 ND 1: 10031712 state bytes, 0 differ (max abs diff 0)
+  ok   state_correct_device_matches_host
+  7864320 out bytes, 0 differ; out-of-pool rows all zero: yes
+  ok   state_read_device_matches_host
+  192 configurations (17 layouts with a window, 10 with s > 0): device mask and bounds == host
+  ok   mask_device_matches_host
+  ok   mask_device_fail_safe
+  device vs host: max |rho diff| 2.68e-07, max rel N/D diff 7.67e-07
+  ok   rho_device_matches_host
+  7 bounds: device == device-on-slice bitwise 7/7; device vs host max |rho diff| 2.38e-07
+  ok   rho_bounds_device_matches_host
+  8 runs (undo/apply x absent/empty/inverted/non-empty bounds): device == host bytewise
+  ok   state_correct_bounds_device_matches_host
+  9 configurations, 7578006 destination bytes: device == host bytewise
+  ok   select_device_matches_host
+  12 configurations: device ids == host bytewise
+  ok   drop_rows_device_matches_host
+944 check(s), group gpu
+exit 0
+$ ctest --test-dir build-kernels-hip -L gpu      (final run, HEAD 007c967)
+1/1 Test #2: kva_kernels_gpu ..................   Passed    1.81 sec
+100% tests passed, 0 tests failed out of 1
+```
+The first device run (before 007c967) aborted in `rho_bounds_device_matches_host` with std::length_error: the test
+harness sized a zero-row tensor with explicit strides to a negative byte count (the case slices to zero rows when
+bounds start at or past n). Every case before it had passed; fixed in the harness, not the op, and re-run as above.
+
+### A.4 Negative controls — 11 mutants, each built and run in a scratch copy (nothing committed), all caught
+```
+H1 host mask ignores s (window from row 0)          -> FAIL mask_class_semantics, mask_window_clamping,
+                                                         mask_random_semantics, mask_matches_fnlev_rules
+H2 host select also copies a mask==0 row            -> FAIL select_copies_masked_rows
+H3 host drop_rows writes top_k+1 columns            -> FAIL drop_rows_semantics
+H4 host rho ignores bounds                          -> FAIL rho_bounds_semantics
+H5 host state_correct ignores empty bounds          -> FAIL state_correct_bounds
+H6 host mask k rounds half up                       -> FAIL mask_class_semantics, mask_matches_fnlev_rules
+D1 device mask ties by higher row                   -> FAIL mask_device_matches_host, mask_matches_fnlev_rules
+D2 device select also copies a mask==0 row          -> FAIL select_device_matches_host
+D3 device drop_rows writes top_k+1 columns          -> FAIL drop_rows_device_matches_host
+D4 device rho ignores bounds                        -> FAIL rho_bounds_device_matches_host
+D5 device state_correct ignores empty bounds        -> FAIL state_correct_bounds_device_matches_host
+```
+
+### A.5 Static checks
+- R21 `grep -rnE 'hipMalloc|getenv|hipDeviceSynchronize|hipStreamSynchronize' kernels/` -> empty.
+- R27 portability grep over kernels/ and tests/kernel_test.cpp -> empty. R28 `\b(48|24|2560|10240|128|2048)\b` over
+  kernels/* -> empty.
+- R98 `grep -rn RAD_PROLE_SEQ_CHUNK kernels/` -> empty.
+- Code objects (gfx1201, `.hip_fatbin` split into its 4 bundles, `llvm-readelf --notes`): kva_mask_kernel LDS
+  33,792 B, kernarg 104 B; kva_select_kernel kernarg 160 B; kva_drop_kernel 40 B; kva_rho_kernel 128 B (+8 for
+  bounds); kva_correct_kernel 248 B (+8); kva_state_read_kernel 104 B. Every kernel: private segment 0,
+  `uses_dynamic_stack: false`, 0 SGPR/VGPR spills, no hostcall buffer, no hidden (implicit) arguments.
+- `rad-info --plugins`: host-only build `kva 0.1.0 kernels 6 kernel(s), 6 schema(s), built for host`; HIP build
+  (in the image, no card) `kva 0.1.0 kernels 12 kernel(s), 6 schema(s), built for gfx1201 host`.
+- NOT exercised: the device rows through the ENGINE's queues (the tests use the HIP runtime); the arch side's
+  Stage A runs are the first engine launches of kva_mask / kva_select / kva_drop_rows.
