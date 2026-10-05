@@ -178,6 +178,14 @@ def one_rep(length, c, n, doc_ids, logdir, tag):
     delta = {k: m1.get(k, 0) - m0.get(k, 0) for k in
              ("radiance:engine_steps_total", "radiance:engine_steps_mixed_total",
               "radiance:engine_steps_prefill_total", "radiance:decode_tokens_total")}
+    # BESIDE, NOT AFTER: a server whose --max-num-seqs the decoders fill queues the long prompt
+    # until they finish, and its prompt_ms then times a solo prefill (measured 2026-10-05, C = 8 at 8
+    # seqs: 8,144 decode-only steps first). Refused rather than reported.
+    queued = 1000 * (t1 - t0) - (timings.get("prompt_ms") or 0)
+    if c and (delta["radiance:engine_steps_mixed_total"] <= 0 or queued > 2000):
+        die(f"the long prompt did not run beside the {c} decoders (mixed steps "
+            f"{delta['radiance:engine_steps_mixed_total']:.0f}, queued {queued:.0f} ms): "
+            f"--max-num-seqs must be at least C + 1")
     steps = delta["radiance:engine_steps_total"]
     return {"length": length, "decoders": c, "prompt_ms": timings.get("prompt_ms"),
             "wall_ms": 1000 * (t1 - t0), "since": w0, "until": w1,
