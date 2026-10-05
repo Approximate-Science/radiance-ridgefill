@@ -1,5 +1,5 @@
 ---
-license: TBD (license terms to be determined by author)
+license: apache-2.0
 base_model: StillDeadcode/qwen3.8-next-flash-fp8-iq4r-moe
 tags:
   - radiance
