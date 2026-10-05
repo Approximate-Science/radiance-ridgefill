@@ -156,12 +156,24 @@ static RadParam pf64(const char* k, double v) { return RadParam{ k, RAD_P_F64, 0
 /* ================================================================== running a row */
 
 static int launch(const RadKernelInfo* row, const std::vector<RadTensor>& t,
-                  const std::vector<RadParam>& p, RadStream stream) {
+                  const std::vector<RadParam>& p, RadStream stream, void* scratch = nullptr,
+                  int64_t scratch_bytes = 0) {
     RadArgs a{};
     a.t = t.data(); a.n_t = (int)t.size();
     a.p = p.data(); a.n_p = (int)p.size();
     a.world_size = 1;
+    a.scratch = scratch; a.scratch_bytes = scratch_bytes;
     return row->launch(&a, stream);
+}
+
+/* The scratch a row's hook asks for at these operands (0 without a hook). */
+static int64_t scratch_of(const RadKernelInfo* row, const std::vector<RadTensor>& t, const std::vector<RadParam>& p) {
+    if (!row->scratch) return 0;
+    RadArgs a{};
+    a.t = t.data(); a.n_t = (int)t.size();
+    a.p = p.data(); a.n_p = (int)p.size();
+    a.world_size = 1;
+    return row->scratch(&a);
 }
 
 /* A host row on host buffers. A null Buf is an absent optional operand (null data). */
@@ -196,10 +208,14 @@ static int run_device(const RadKernelInfo* row, std::vector<Buf*> opds, const st
         t[i] = opds[i]->t;
         t[i].data = dev[i];
     }
+    void* scratch = nullptr;
+    const int64_t scratch_bytes = ok ? scratch_of(row, t, p) : 0;
+    if (scratch_bytes > 0) ok = hip_ok(hipMalloc(&scratch, (size_t)scratch_bytes), "hipMalloc scratch");
     if (ok) {
-        rc = launch(row, t, p, (RadStream)stream);
+        rc = launch(row, t, p, (RadStream)stream, scratch, scratch_bytes);
         ok = hip_ok(hipStreamSynchronize(stream), "kernel");
     }
+    if (scratch) (void)hipFree(scratch);
     for (size_t i = 0; i < opds.size() && ok; ++i)
         if (opds[i]) ok = hip_ok(hipMemcpy(opds[i]->bytes.data(), dev[i], opds[i]->bytes.size(),
                                            hipMemcpyDeviceToHost), "copy out");
@@ -393,7 +409,7 @@ TEST(params_carry_no_role, "both") {
             CHECK_EQ(role, RAD_PROLE_NONE);                                 /* and in fact none */
         }
     }
-    CHECK_EQ(g_schema_count(), (int)(sizeof kOps / sizeof kOps[0]) + 1);   /* + kva_gemm_nt_bias */
+    CHECK_EQ(g_schema_count(), (int)(sizeof kOps / sizeof kOps[0]) + 2);   /* + the two forwarded GEMMs */
 }
 
 /* ================================================================== op runners
@@ -1706,6 +1722,9 @@ TEST(gemm_forward_offers_no_row_without_its_source, "host") {
     CHECK(find_schema("kva_gemm_nt_bias") != nullptr);
     CHECK(find_row("kva_gemm_nt_bias", RAD_DOMAIN_HOST) == nullptr);
     CHECK(find_row("kva_gemm_nt_bias", RAD_DOMAIN_DEVICE) == nullptr);
+    CHECK(find_schema("kva_gemm_nt_q") != nullptr);
+    CHECK(find_row("kva_gemm_nt_q", RAD_DOMAIN_HOST) == nullptr);
+    CHECK(find_row("kva_gemm_nt_q", RAD_DOMAIN_DEVICE) == nullptr);
 }
 
 TEST(gemm_forward_is_the_source_row, "both") {
@@ -1756,6 +1775,128 @@ TEST(gemm_forward_matches_its_source_bytewise, "both") {
     std::fprintf(stderr, "  %d runs (M 1, 64, %d; N %lld, K %lld; bf16 and f32 bias, with and without res), "
                  "%zu output bytes: forwarded == %s's gemm_nt_bias bytewise\n", runs, gpu ? 2048 : 130,
                  (long long)N, (long long)K, bytes, gemm_source());
+}
+
+/* ================================================================== kva_gemm_nt_q (R79's int8 projector)
+ * libr4d's int8 gemm_nt_q device rows (dtype i8a8), forwarded with their layout hooks: every one of
+ * them, and nothing else; and on the card the forwarded rows, fed planes stored by their own
+ * relayout hook, compute what libref's gemm_nt_q computes from the canonical planes. */
+
+/* The device rows of `op` in the preloaded library `plugin` whose constraints admit dtype i8a8. */
+static std::vector<const RadKernelInfo*> source_i8_rows(const char* plugin) {
+    std::vector<const RadKernelInfo*> out;
+    for (void* h : g_preloaded) {
+        auto info = (const RadPluginInfo* (*)(void))dlsym(h, "rad_plugin_info");
+        auto count = (int (*)(void))dlsym(h, "rad_kernel_count");
+        auto at = (const RadKernelInfo* (*)(int))dlsym(h, "rad_kernel_at");
+        if (!info || !count || !at || std::strcmp(info()->name, plugin) != 0) continue;
+        for (int i = 0; i < count(); ++i) {
+            const RadKernelInfo* k = at(i);
+            if (k->domain != RAD_DOMAIN_DEVICE || std::strcmp(k->op, "gemm_nt_q") || k->n_tunables) continue;
+            for (int c = 0; c < k->n_constraints; ++c)
+                if (k->constraints[c].op == RAD_C_IN && !std::strcmp(k->constraints[c].key, "dtype") &&
+                    std::strstr(k->constraints[c].sval, "i8a8"))
+                    out.push_back(k);
+        }
+    }
+    return out;
+}
+
+static std::vector<const RadKernelInfo*> forwarded_i8_rows() {
+    std::vector<const RadKernelInfo*> out;
+    for (int i = 0; i < g_kernel_count(); ++i)
+        if (!std::strcmp(g_kernel_at(i)->op, "kva_gemm_nt_q")) out.push_back(g_kernel_at(i));
+    return out;
+}
+
+TEST(int8_forward_is_libr4ds_int8_rows_with_their_hooks, "both") {
+    const std::vector<const RadKernelInfo*> src = source_i8_rows("libr4d");
+    if (src.empty()) { skip("libr4d is not preloaded"); return; }
+    const std::vector<const RadKernelInfo*> fwd = forwarded_i8_rows();
+    REQUIRE(fwd.size() == src.size());
+    for (size_t i = 0; i < src.size(); ++i) {
+        CHECK(fwd[i]->domain == RAD_DOMAIN_DEVICE);
+        CHECK(fwd[i]->launch == src[i]->launch && fwd[i]->describe == src[i]->describe);
+        CHECK(fwd[i]->init == src[i]->init && fwd[i]->fini == src[i]->fini && fwd[i]->scratch == src[i]->scratch);
+        CHECK(fwd[i]->constraints == src[i]->constraints && fwd[i]->priority == src[i]->priority);
+        CHECK(fwd[i]->layout == src[i]->layout && fwd[i]->relayout == src[i]->relayout);
+        CHECK(fwd[i]->unrelayout == src[i]->unrelayout && fwd[i]->layout != nullptr);
+    }
+}
+
+/* Whether `row` admits M (an LE constraint on "M"). */
+static bool admits_m(const RadKernelInfo* row, int64_t M) {
+    for (int c = 0; c < row->n_constraints; ++c)
+        if (row->constraints[c].op == RAD_C_LE && !std::strcmp(row->constraints[c].key, "M") &&
+            M > row->constraints[c].ival)
+            return false;
+    return true;
+}
+
+/* `plane` relaid by `row`'s hooks as operand `opd` (2 = codes, 3 = scale) of encoding i8*bf16[1x128]. */
+static Buf stored(const RadKernelInfo* row, const std::vector<RadParam>& p, int opd, const Buf& plane) {
+    const RadEncoding enc = rad_enc_affine(RAD_I8, RAD_BF16, 1, 128);
+    const int sel = opd == 2 ? 0 : 1;
+    RadTensor geom = plane.t;
+    geom.data = nullptr;
+    RadLayout L{};
+    if (row->layout(p.data(), (int)p.size(), opd, &enc, &sel, &geom, 1, &L) != RAD_OK) return Buf{};
+    Buf out = plane;
+    out.bytes.assign((size_t)L.bytes, 0);
+    out.t.data = out.bytes.data();
+    if (row->relayout(p.data(), (int)p.size(), opd, &enc, &sel, &plane.t, 1, out.bytes.data(), L.bytes) != RAD_OK)
+        return Buf{};
+    return out;
+}
+
+TEST(int8_forward_on_stored_planes_matches_libref_on_canonical_ones, "gpu") {
+    if (!group_runnable()) return;
+    const RadKernelInfo* ref = nullptr;
+    for (void* h : g_preloaded) {
+        auto info = (const RadPluginInfo* (*)(void))dlsym(h, "rad_plugin_info");
+        auto count = (int (*)(void))dlsym(h, "rad_kernel_count");
+        auto at = (const RadKernelInfo* (*)(int))dlsym(h, "rad_kernel_at");
+        if (!info || !count || !at || std::strcmp(info()->name, "libref")) continue;
+        for (int i = 0; i < count(); ++i)
+            if (at(i)->domain == RAD_DOMAIN_HOST && !std::strcmp(at(i)->op, "gemm_nt_q")) ref = at(i);
+    }
+    const std::vector<const RadKernelInfo*> fwd = forwarded_i8_rows();
+    if (!ref || fwd.empty()) { skip("libr4d and libref are not both preloaded"); return; }
+    const int64_t N = 2560, K = 10240;   /* the projector's own shape */
+    Rng r{ 79 };
+    Buf w = make(RAD_I8, { N, K }), ws = make(RAD_BF16, { N, K / 128 });
+    for (int64_t i = 0; i < N * K; ++i) w.bytes[(size_t)i] = (unsigned char)(int8_t)(r.below(255) - 127);
+    for (int64_t i = 0; i < N * K / 128; ++i) setf(ws, i, (float)(1e-3 * (0.5 + r.uniform())));
+    double worst = 0;
+    int runs = 0;
+    for (const RadKernelInfo* row : fwd)
+        for (int64_t M : { 1, 64, 2048 }) {
+            if (!admits_m(row, M)) continue;
+            const std::vector<RadParam> p = { pint("M", M), pint("N", N), pint("K", K), pint("group", 128),
+                                              pstr("dtype", "i8a8") };
+            Buf a = make(RAD_I8, { M, K }), as = make(RAD_F32, { M, K / 128 });
+            for (int64_t i = 0; i < M * K; ++i) a.bytes[(size_t)i] = (unsigned char)(int8_t)(r.below(255) - 127);
+            for (int64_t i = 0; i < M * K / 128; ++i) setf(as, i, (float)(0.01 * (0.5 + r.uniform())));
+            Buf sw = stored(row, p, 2, w), sws = stored(row, p, 3, ws);
+            REQUIRE(!sw.bytes.empty() && !sws.bytes.empty());
+            Buf y_ref = make(RAD_BF16, { M, N }), y_dev = y_ref;
+            fill_sentinel(y_dev);
+            CHECK_EQ(run_group(ref, { &a, &as, &w, &ws, &y_ref }, p), RAD_OK);
+            CHECK_EQ(run_group(row, { &a, &as, &sw, &sws, &y_dev }, p), RAD_OK);
+            /* int32 within a 128-K block on both sides, the blocks folded in f32 in different orders,
+             * one bf16 rounding of the result each: within two bf16 ulps of the larger output. */
+            for (int64_t i = 0; i < M * N; ++i) {
+                const double x = getf(y_ref, i), y = getf(y_dev, i);
+                const double tol = std::ldexp(std::max(std::fabs(x), std::fabs(y)), -7) + 1e-6;
+                worst = std::max(worst, std::fabs(x - y) / tol);
+                if (std::fabs(x - y) > tol) { CHECK(std::fabs(x - y) <= tol); break; }
+            }
+            ++runs;
+        }
+    std::fprintf(stderr, "  %d runs (%zu forwarded int8 rows, M 1/64/2048 as each admits; N %lld, K %lld): "
+                 "stored-plane device == libref canonical within %.3g of the 2-ulp bound\n", runs, fwd.size(),
+                 (long long)N, (long long)K, worst);
+    CHECK(runs >= 3);
 }
 
 /* ================================================================== main */

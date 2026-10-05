@@ -67,6 +67,12 @@ static const RadParamSpec pGemm[] = { P_INT("M"), P_INT("N"), P_INT("K"), P_STR(
                                       { "act", RAD_P_STR, RAD_OPTIONAL, RAD_PROLE_NONE } };
 static const RadOperandSpec oGemm[] = { OPD("a"), OPD("b"), OPD("bias"), OPD_O("res"), OUT("y") };
 
+/* libr4d's gemm_nt_q (r4d_rows.cpp:681-712, docs/OPS.md:344) with `b` and `b_scale` as inputs; the same seven
+ * positions, so a forwarded row reads every operand where its source does. */
+static const RadParamSpec pGemmQ[] = { P_INT("M"), P_INT("N"), P_INT("K"), P_INT("group"), P_STR("dtype") };
+static const RadOperandSpec oGemmQ[] = { OPD("a"), OPD_O("a_scale"), OPD("b"), OPD("b_scale"), OUT("y"),
+                                         OPD_O("a_sum"), OPD_O("b_ref") };
+
 static const RadParamSpec pStateRead[] = { P_INT("M"), P_INT("n_head"), P_INT("sd0"), P_INT("sd1") };
 static const RadOperandSpec oStateRead[] = { OPD("state"), OPD("state_idx"), OUT("out") };
 
@@ -136,6 +142,13 @@ static const RadOpSchema kSchemas[] = {
   "act(a @ b^T + bias), rounded to bf16 after the biased product, after the activation and after "
   "the residual. Its rows are the engine's own gemm_nt_bias rows (libr4d's device row, libref's "
   "host row), offered only when that library is loaded." },
+{ "kva_gemm_nt_q", ARR(pGemmQ), ARR(oGemmQ),
+  "gemm_nt_q (docs/OPS.md) with the weight `b` and its scale `b_scale` as IN operands, held in the "
+  "STORED form the row's own layout hook describes (the caller runs that row's relayout on the "
+  "canonical planes once, at load): y = (a, a_scale) @ dequant(b, b_scale)^T, bf16. Its rows are "
+  "the engine's own int8 gemm_nt_q rows (libr4d's dtype i8a8 device rows, layout and relayout "
+  "hooks included), offered only when that library is loaded. No host row: libref reads canonical "
+  "planes, which these operands are not." },
 };
 
 /* ================================================================== operand descriptions
@@ -327,7 +340,8 @@ static const RadPluginInfo kInfo = {
     "rows select no ids), kva_rho_update (decayed approximated share per GDN head), "
     "kva_state_correct (GDN terminal-state correction), kva_state_read (GDN state slot copy-out "
     "for the correction refit), kva_gemm_nt_bias (the engine's gemm_nt_bias with its weight as an "
-    "input). A host row (the oracle) and, in a HIP build, a device row each.",
+    "input), kva_gemm_nt_q (the engine's int8 gemm_nt_q with its weight as an input, device "
+    "only). A host row (the oracle) and, in a HIP build, a device row each.",
     KVA_BUILD_TARGET
 };
 
