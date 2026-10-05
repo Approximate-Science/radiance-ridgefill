@@ -135,7 +135,7 @@ def log_window(since, until, path):
     container = os.environ.get("RK_CONTAINER")
     if not container:
         return None
-    p = subprocess.run(["docker", "logs", "--since", since, "--until", until, container],
+    p = subprocess.run(["docker", "logs", "--timestamps", "--since", since, "--until", until, container],
                        capture_output=True, text=True)
     text = p.stdout + p.stderr
     with open(path, "w") as f:
@@ -219,18 +219,20 @@ def run_ttft(label, out_dir):
     reps = int(os.environ.get("RK_REPS", "7"))
     logdir = os.path.join(out_dir, f"conc-{label}.logs")
     os.makedirs(logdir, exist_ok=True)
+    # RK_INTERLEAVE=1: rep-major order (every C once, then the next rep), so the heat engine's drift
+    # over a label falls on every C alike instead of on whichever block ran first.
+    order = ([(L, c, r) for L in lengths for r in range(reps) for c in concs] if os.environ.get("RK_INTERLEAVE")
+             else [(L, c, r) for L in lengths for c in concs for r in range(reps)])
     result, n = {"label": label, "kind": "ttft", "reps": []}, 0
-    for length in lengths:
-        for c in concs:
-            for rep in range(reps):
-                n += 1
-                rec = one_rep(length, c, n, doc_ids, logdir, f"r{rep}")
-                rec["rep"] = rep
-                result["reps"].append(rec)
-                g = rec["decoder_gap_prefill_ms"]
-                print(f"  {length:6d} C={c} rep {rep}: prompt {rec['prompt_ms']:9.1f} ms"
-                      f"  decoder gap median {g['median'] if g else float('nan'):7.1f} ms"
-                      f"  approx lines {rec['log']['approximate_steps'] if rec['log'] else '-'}", flush=True)
+    for length, c, rep in order:
+        n += 1
+        rec = one_rep(length, c, n, doc_ids, logdir, f"r{rep}")
+        rec["rep"] = rep
+        result["reps"].append(rec)
+        g = rec["decoder_gap_prefill_ms"]
+        print(f"  {length:6d} C={c} rep {rep}: prompt {rec['prompt_ms']:9.1f} ms"
+              f"  decoder gap median {g['median'] if g else float('nan'):7.1f} ms"
+              f"  approx lines {rec['log']['approximate_steps'] if rec['log'] else '-'}", flush=True)
     return result
 
 
