@@ -943,6 +943,7 @@ TEST(the_approximate_decision_truth_table) {
     using qwen4exp_kva::PATH_LEAN;
     using qwen4exp_kva::PATH_MASKED;
     using qwen4exp_kva::PATH_STRADDLE;
+    using qwen4exp_kva::PATH_DECODERS;
     const auto none = [](RadBatch&) {};
     const std::vector<Row> rows = {
         {"whole bulk chunk, speed", "speed", {{2048}, 0, 2048}, none, PATH_LEAN, 2048, 0, false},
@@ -964,8 +965,11 @@ TEST(the_approximate_decision_truth_table) {
         {"media rows", "quality", {{2048}, 0, 2048}, [](RadBatch& b) { b.n_mm_rows = 5; }, PATH_STOCK, 0, 0, false},
         {"mixed rope", "speed", {{2048}, 0, 2048},
          [](RadBatch& b) { static int32_t rp[3]; b.rope_pos = rp; b.rope_mixed = 1; }, PATH_STOCK, 0, 0, false},
-        {"one decoder beside", "speed", {{1, 1984}, 1, 2048}, none, PATH_MASKED, 1985, 1, true},
-        {"eight decoders beside", "speed", {{1, 1, 1, 1, 1, 1, 1, 1, 1984}, 8, 2048}, none, PATH_MASKED, 1992, 8, true},
+        {"one decoder beside", "speed", {{1, 1984}, 1, 2048}, none, PATH_DECODERS, 1985, 1, true},
+        {"eight decoders beside", "speed", {{1, 1, 1, 1, 1, 1, 1, 1, 1984}, 8, 2048}, none, PATH_DECODERS, 1992, 8, true},
+        {"decoders beside a straddle: 1,025 exact rows > the table's 64", "speed", {{1, 1984}, 1, 1024}, none, PATH_STOCK, 0, 0, false},
+        {"decoders beside, short context: dense attention", "speed", {{1, 1984}, 1, 2048, 0}, none, PATH_MASKED, 1985, 1, true},
+        {"one decoder beside, quality", "quality", {{1, 1984}, 1, 2048}, none, PATH_MASKED, 1985, 1, true},
         {"eight decoders, straddle: 1096 exact rows run exact", "quality", {{1, 1, 1, 1, 1, 1, 1, 1, 1984}, 8, 1000}, none, PATH_STOCK, 0, 0, false},
         {"two prefills, last long", "speed", {{64, 1984}, 0, 2048}, none, PATH_MASKED, 2048, 64, true},
         {"two prefills, last short", "speed", {{1984, 64}, 0, 2048}, none, PATH_MASKED, 2048, 64, true},
@@ -1006,6 +1010,14 @@ TEST(the_planner_straddles_only_in_speed) {
     }
     in.mode = PLAN_SPEED;
     CHECK_EQ(plan_pass(in, pc).path, PATH_STRADDLE);
+    /* beside decoders, whole bulk: the decoders path is speed's alone, even when an adapter claims
+     * the per-row attention form for every mode */
+    in.n_tok = 2049; in.n_seq = 2; in.n_seq_decode = 1; in.n_tok_decode = 1; in.q_prefill = 2048; in.n_ahead = 2048;
+    CHECK_EQ(plan_pass(in, pc).path, PATH_DECODERS);
+    for (int mode : {PLAN_PLUMB, PLAN_QUALITY}) {
+        in.mode = mode;
+        CHECK_EQ(plan_pass(in, pc).path, PATH_MASKED);
+    }
 }
 
 /* R56 (host placement) -- A PASS APPROXIMATES ONLY WITH ENOUGH BULK ROWS: a decoder-shared prompt's
@@ -1475,6 +1487,122 @@ std::vector<RecIssue> straddle_expected(const std::vector<RecIssue>& seg, const 
     return out;
 }
 
+/* SPEED BESIDE DECODERS, one late layer as the oracle sees it: the in-tree helpers over the decoder
+ * rows [0, DT) (connection read/write, MoE pass, output linears), the attention's indexer, K/V and
+ * query path over every row and its per-row sparse attention over [0, DT); the delta net's
+ * projections, decode half, conv/kkt and corrected scan as stock issues them, its output projection
+ * over [0, DT); the bulk rows' projection from the layer-S stream into `x` and its codes. */
+std::vector<RecIssue> decoders_layer_expected(const std::vector<RecIssue>& seg, const Batch& x, int l, int rank) {
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
+    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    const qwen4exp_fp8::Layer& lay = m.layers[(size_t)l];
+    const RadBatch& bt = x.b;
+    const int64_t T = bt.n_tok, DT = bt.n_tok_decode, n = m.g.n_embd, wide = m.hccfg.hc * n, bulk = T - DT;
+    std::vector<RecIssue> out = issues_by([&](RadCtx* cx) { lay.hc_mix.read(cx, T, 0, DT); });
+    out.push_back({k.op_proj[(size_t)l], {brow_slice(m.b_h, DT, bulk, wide), k.proj_w[(size_t)l], k.proj_b[(size_t)l],
+                   RAD_NONE, brow_slice(m.a_x.x, DT, bulk, n)}, bulk});
+    out.push_back({k.quant.op, {brow_slice(m.a_x.x, DT, bulk, n), brow_slice(m.a_x.q8, DT, bulk, n),
+                   brow_slice(m.a_x.s8, DT, bulk, n / 128)}, bulk});
+    if (lay.full) {
+        const AttnGatedFP8& a = lay.attn;
+        const int64_t qw = a.g.q_dim(), hd = a.g.head_dim;
+        append(out, issues_by([&](RadCtx* cx) { lay.qsa.step(cx, a.w.h, &bt); }));
+        std::set<rad_op> kv, q;
+        add_linear(kv, a.kp);
+        add_linear(kv, a.vp);
+        for (rad_op h : {a.op_k_norm, a.op_rope_k, a.op_kv_store}) kv.insert(h);
+        add_linear(q, a.qg);
+        for (rad_op h : {a.op_q_norm, a.op_rope_q}) q.insert(h);
+        append(out, pick(seg, kv));
+        append(out, pick(seg, q));
+        out.push_back({a.op_attn_gq, {brow_slice(a.w.q, 0, DT, qw), kv_cache(a.kv, a.layer),
+                       brow_slice(a.qsa_sel, 0, DT, a.qsa_topk + 1), brow_slice(a.qsa_sequ, 0, DT, 1),
+                       RAD_NONE, RAD_NONE, RAD_NONE, brow_slice(a.w.attn.x, 0, DT, qw),
+                       bcol_at(a.w.qg, 0, a.g.n_head * 2 * hd, hd, hd, DT),
+                       brow_slice(a.w.attn.cq(), 0, DT, qw), brow_slice(a.w.attn.cs(), 0, DT, qw / 128)}, 1});
+        append(out, issues_by([&](RadCtx* cx) { a.o.step(cx, a.w.attn, a.w.h.x, T, 0, DT); }));
+        if (a.op_ar && !rad::arch::ar_taken(a.g, T, a.ar_out, a.ar_out_take))
+            out.push_back({a.op_ar, {brow_slice(a.w.h.x, 0, DT, n), RAD_NONE}, DT * n});
+    } else {
+        const GdnFP8& d = lay.gdn;
+        std::set<rad_op> front, half;
+        add_linear(front, d.in);
+        front.insert(d.op_ab);
+        for (rad_op h : {d.op_cr, d.op_conv_update, d.op_recur}) if (h) half.insert(h);
+        append(out, pick(seg, front));
+        append(out, pick(seg, half));
+        Want w;
+        w.b = T; w.correct = true;
+        for (const RecIssue& r : seg) {
+            if (r.op == d.op_conv_prep) out.push_back({k.op_undo[(size_t)l], correction_operands(x, l, rank), 1});
+            if (r.op == d.op_conv_prep || r.op == d.op_kkt) out.push_back(r);
+            if (r.op == d.op_scan) push_scans(out, r, x, l, w, rank);
+        }
+        append(out, issues_by([&](RadCtx* cx) { d.out.step(cx, d.w.o, d.w.h.x, T, 0, DT); }));
+        if (d.op_ar && !rad::arch::ar_taken(d.g, T, d.ar_out, d.ar_out_take))
+            out.push_back({d.op_ar, {brow_slice(d.w.h.x, 0, DT, n), RAD_NONE}, DT * n});
+    }
+    append(out, issues_by([&](RadCtx* cx) { lay.hc_mix.write(cx, T, 0, DT); }));
+    append(out, issues_by([&](RadCtx* cx) { lay.hc_ffn.read(cx, T, 0, DT); }));
+    append(out, issues_by([&](RadCtx* cx) { lay.mlp.pass(cx, T, 0, DT); }));
+    append(out, issues_by([&](RadCtx* cx) { lay.hc_ffn.write(cx, T, 0, DT); }));
+    return out;
+}
+
+/* The whole step of speed beside decoders: the in-tree step's issues on this batch up to layer S
+ * with the mask ahead of layer 0 (zeros and bounds) and the stager probes behind layer S-3's gate-up
+ * (the decoders' late experts stream), then decoders_layer_expected per late layer, the epilogue stock. */
+std::vector<RecIssue> decoders_expected(const Batch& x, int rank = 0) {
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
+    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    const RadBatch& b = x.b;
+    const std::vector<RecIssue> stock = run_step(qwen4exp_fp8::step, b, rank).issues;
+    std::vector<rad_op> reads;
+    for (int l = kSplit; l < 8; ++l) reads.push_back(m.layers[(size_t)l].hc_mix.op_read);
+    const std::vector<size_t> at = starts(stock, reads, m.mixer.op_read);
+    std::vector<RecIssue> out;
+    for (size_t i = 0; i < at[0]; ++i) {
+        if (stock[i].op == m.layers[0].hc_mix.op_read)
+            out.push_back({k.op_mask, {praw(b.cu_seqlens + b.n_seq - 1, RAD_I32, 2), praw(b.token_ids, RAD_I32, b.n_tok),
+                           praw(b.positions, RAD_I32, b.n_tok), RAD_NONE, brows(k.b_mask, b.n_tok),
+                           brows(k.b_bounds, 4), brows(k.b_zeros, k.n_zeros)}, b.n_tok});
+        out.push_back(stock[i]);
+        if (stock[i].op == m.layers[kSplit - 3].mlp.op_gu)
+            for (int p = kSplit - 1; p < 8; ++p) out.push_back(probe_of(stock, p, rank));
+    }
+    for (int l = kSplit; l < 8; ++l)
+        append(out, decoders_layer_expected(slice(stock, at[(size_t)(l - kSplit)], at[(size_t)(l - kSplit + 1)]), x, l, rank));
+    for (size_t i = at.back(); i < stock.size(); ++i) out.push_back(stock[i]);
+    return out;
+}
+
+/* R55 -- SPEED BESIDE DECODERS keeps the lean fill for its bulk rows and runs the full late blocks
+ * over the decoder rows only, at TP1 and on rank 0 of TP2 (where the connection writes carry the
+ * all-reduce), one decoder and four verifying 1 + 3 rows; the log names the path; nothing reaches
+ * the device. RADIANCE_KVA_MASK=all and TAIL_ONLY=0 keep the masked path (the controls/oracle). */
+TEST(speed_beside_decoders_runs_full_late_blocks_over_the_decoder_rows_only) {
+    struct Case { int world; Shape s; };
+    for (const Case& c : {Case{1, {{1, 128}, 1, 2048}}, Case{2, {{1, 128}, 1, 2048}},
+                          Case{2, {{4, 4, 4, 4, 128}, 4, 2048, 4096, 3}}}) {
+        Pair p;
+        declare_pair(p, "speed", 0, c.world, 0, c.s.n_spec);
+        REQUIRE_EQ(p.st, RAD_OK);
+        Batch x = make_step(p.kva, c.s);
+        const Run got = run_step(qwen4exp_kva::step, x.b);
+        CHECK_EQ(differ_at(got.issues, decoders_expected(x)), 0);
+        CHECK(has(got.log, "decoders, stage stream"));
+        CHECK_EQ(got.device_calls, 0);
+    }
+    for (auto [name, value] : {std::pair<const char*, const char*>{"RADIANCE_KVA_MASK", "all"}, {"RADIANCE_KVA_TAIL_ONLY", "0"}}) {
+        Env e({{name, value}});
+        Pair p;
+        declare_pair(p, "speed");
+        REQUIRE_EQ(p.st, RAD_OK);
+        Batch x = make_step(p.kva, {{1, 128}, 1, 2048});
+        CHECK_EQ(qwen4exp_kva::derive(qwen4exp_kva::g_kva[0], &x.b).path, qwen4exp_kva::PATH_MASKED);
+    }
+}
+
 /* A.1 -- A SPEED STRADDLE RUNS ITS LATE BLOCKS OVER THE TAIL ROWS ONLY: 64 tokens ahead of a 128-row
  * chunk (b = 64). The mask (for the split scan's bounds) ahead of layer 0, layers 0..S-1 stock with
  * no probes (a tile of exact rows already reads most experts: the pass stages), then per late layer
@@ -1563,7 +1691,14 @@ TEST(r53_mixed_steps_are_the_in_tree_step_with_only_the_last_sequence_masked) {
             REQUIRE_EQ(p.st, RAD_OK);
             Batch x = make_step(p.kva, c.s);
             const qwen4exp_kva::Pass pass = qwen4exp_kva::derive(qwen4exp_kva::g_kva[0], &x.b);
-            CHECK_EQ(pass.path, qwen4exp_kva::PATH_MASKED);
+            const bool decoders = !quality && c.b == x.b.n_tok && x.b.n_seq - x.b.n_seq_decode == 1;
+            CHECK_EQ(pass.path, decoders ? qwen4exp_kva::PATH_DECODERS : qwen4exp_kva::PATH_MASKED);
+            if (decoders) {
+                const Run got = run_step(qwen4exp_kva::step, x.b);
+                CHECK_EQ(differ_at(got.issues, decoders_expected(x)), 0);
+                CHECK(has(got.log, "decoders, stage stream"));
+                continue;
+            }
             Want w;
             w.b = c.b; w.s_lb = c.s_lb; w.rho_rows = c.b;
             w.stream = w.project = w.correct = true;

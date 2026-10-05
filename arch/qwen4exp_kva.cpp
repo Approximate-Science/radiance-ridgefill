@@ -215,7 +215,7 @@ static void approximate_step(RadCtx* c, const Kva& k, const RadBatch* batch, con
     qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
     prologue(c, m, batch);
     if (k.op_ring) ring_copy(c, k, k.split);   /* layer S's map lands during layers 0 .. S-1 */
-    if (p.path == PATH_MASKED || p.path == PATH_STRADDLE) mask_rows(c, k, batch, p);
+    if (p.path != PATH_LEAN) mask_rows(c, k, batch, p);   /* masked, straddle, decoders: zeros + bounds */
     const MoeArm probes = probe_arm(c, k, m);
     for (int64_t li = 0; li < k.split; ++li)
         layer(c, m, li, batch, p.stream && li == k.split - 3 ? &probes : nullptr);
@@ -229,6 +229,7 @@ static void approximate_step(RadCtx* c, const Kva& k, const RadBatch* batch, con
     for (int64_t li = k.split; li < m.g.n_layer; ++li) {
         if (p.path == PATH_LEAN)          fill_layer(c, k, m, li, batch, sd);
         else if (p.path == PATH_STRADDLE) straddle_layer(c, k, m, li, batch, p, sd);
+        else if (p.path == PATH_DECODERS) decoders_layer(c, k, m, li, batch, p, sd);
         else                              masked_layer(c, k, m, li, batch, p, sd);
     }
     epilogue(c, m, batch);
@@ -323,7 +324,7 @@ static void capture_mixed(RadCtx* c, const Kva& k, const RadBatch* batch, bool a
 static bool misaligned(const Kva& k, const RadBatch* batch, const Pass& p) {
     int64_t D = 0, DT = 0;
     batch_split(batch, &D, &DT);
-    return (p.path == PATH_MASKED || p.path == PATH_STRADDLE) && batch->n_seq - D == 1 &&
+    return p.path != PATH_LEAN && batch->n_seq - D == 1 &&
            !k.cfg.force_split && (p.b - DT) % k.tile != 0;
 }
 

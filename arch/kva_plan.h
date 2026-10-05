@@ -12,6 +12,12 @@
  *   straddle  speed, one prefill sequence, no decoders, the chunk straddles the bulk end b: the bulk
  *             rows [0, b) get the lean pieces and the full late blocks run over the tail rows [b, n)
  *             only (the adapter needs every late attention layer on its per-row sparse form).
+ *   decoders  speed, one prefill sequence whose chunk is all bulk, decoders beside it: the bulk rows get
+ *             the lean pieces and the full late blocks run over the decoder rows [0, DT) only --
+ *             their dense GEMMs at M = DT, the shape a decode-only step gives them (ident.sh's
+ *             ksplit-from-M class; Dylan, 2026-10-05: byte-identity to off not required here). Needs
+ *             the per-row sparse attention (straddle_ok) and the stager lever (the decoders'
+ *             experts stream).
  *   masked    any other shape: every late block over all rows, the device mask choosing which rows use
  *             the projection. Taken only while the pass can STREAM its late experts (few exact rows,
  *             the stager lever on): measured on this deployment, a masked pass that has to stage its
@@ -33,8 +39,8 @@
 
 namespace qwen4exp_kva {
 
-enum Path { PATH_STOCK = 0, PATH_LEAN, PATH_MASKED, PATH_STRADDLE };
-static const char* const kPathNames[] = { "stock", "lean", "masked", "straddle" };
+enum Path { PATH_STOCK = 0, PATH_LEAN, PATH_MASKED, PATH_STRADDLE, PATH_DECODERS };
+static const char* const kPathNames[] = { "stock", "lean", "masked", "straddle", "decoders" };
 enum PlanMode { PLAN_OFF = 0, PLAN_PLUMB, PLAN_SPEED, PLAN_QUALITY };
 
 /* The keyed numbers of one pass, and whether the adapter can serve each shape. */
@@ -93,6 +99,12 @@ inline Pass plan_pass(const PlanIn& in, const PlanConfig& c) {
     const bool one = in.n_seq_decode == 0 && Pn == 1;
     if (in.mode == PLAN_SPEED && one && !p.split) { p.path = PATH_LEAN; return p; }
     if (in.mode == PLAN_SPEED && one && in.straddle_ok) { p.path = PATH_STRADDLE; return p; }
+    if (in.mode == PLAN_SPEED && Pn == 1 && in.n_seq_decode > 0 && !p.split && in.straddle_ok &&
+        in.stream_ok && !c.mask_step) {
+        p.path = PATH_DECODERS;
+        p.stream = true;
+        return p;
+    }
     const int64_t exact_rows = in.n_tok - (b - p.s_lb);
     p.stream = in.stream_ok && (c.force_stream || exact_rows <= c.stage_rows);
     if (p.stream || in.mode == PLAN_PLUMB) p.path = PATH_MASKED;
