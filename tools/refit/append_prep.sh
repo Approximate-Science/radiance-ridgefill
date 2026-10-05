@@ -60,7 +60,7 @@ sets=$(sed 's/^/--set /' "$ev/set.txt" | tr '\n' ' ')
 # shellcheck disable=SC2086  # one --set key=value pair per word by construction (asserted in kva_sidecar)
 run /stage/opt/radiance/bin/rad-convert "/kva/$(rel "$stub")" --reuse "/models/$rad" --in-place \
     --recipe "/models/$(basename "$RK_RECIPE")" --home "/kva/$(rel "$RK_PLUGIN_HOME"):/stage/opt/radiance/share/radiance" \
-    $sets --set kva.mode=quality --set kva.tail=2048 --plan-only -v > "$ev/plan-only.log" 2>&1
+    $sets --set kva.mode=off --set kva.tail=2048 --plan-only -v > "$ev/plan-only.log" 2>&1
 # The tensors allowed to be new: the whole shard for projr; for full only kva.str.* (kva.projr.* is already held
 # after append #1), written as a shard of just those names because plan_diff reads names from a shard header.
 expect=$side/kva-sidecar-refit.safetensors
