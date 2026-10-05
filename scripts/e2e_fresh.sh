@@ -54,6 +54,9 @@
 #   RK_E2E_SERVE_TIMEOUT  default 1800 s: how long to wait for /health a case (114 GiB load)
 #   RK_E2E_TTFT_LEN       default 16384: the TTFT prompt length
 #   RK_E2E_TTFT_REPS      default 3: timed reps after one warm-up (median is compared)
+#   RK_E2E_CACHE_ROOT     default unset: with flags that turn the prefix cache's disk tier on
+#                         (--prefix-cache-dir /kvcache), each case gets <root>/<case> mounted at /kvcache,
+#                         so no case reuses another's cached KV
 #   RK_E2E_SEQS           default 8 (the measurement deployment's --max-num-seqs); `default` passes
 #                         none, so a run with RK_FLAGS="--tp 2" serves radiance's own defaults throughout
 #   RK_E2E_PREFLIGHT     default 1: run scripts/preflight.sh before each container; 0 skips it
@@ -257,6 +260,9 @@ e2e_serve() {
     fi
     e_container=radiance-kva-e2e-$e_name
     e_args=$E2E_LOGS/$e_name.cmd
+    if [ -n "${RK_E2E_CACHE_ROOT:-}" ]; then   # a fresh prefix-cache dir per case (mounted at /kvcache)
+        RK_CACHE_DIR=$RK_E2E_CACHE_ROOT/$e_name; mkdir -p "$RK_CACHE_DIR"; export RK_CACHE_DIR
+    fi
     {
         printf '%s\n' -d --name "$e_container"
         rk_docker_prefix "$e_mode"

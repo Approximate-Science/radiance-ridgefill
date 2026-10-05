@@ -3,9 +3,8 @@
 #
 #   gpuq.sh release env RK_RELEASE_VERSION=0.2.0 sh scripts/release_session.sh   (from a checkout of main's HEAD)
 #
-# Every server runs radiance's DEFAULT flags, as a user would, plus the host pool the model needs to load:
-# RK_FLAGS="--tp 2 --host-pool-mib 12288" (RK_RELEASE_FLAGS), no --max-num-seqs (the scripts' `default`), so MTP is
-# auto, the prefix cache is on, steps are 8,192 tokens, the context is the model's. Only the
+# Every server runs radiance 1.0.13's shipped flashnext profile (RK_RELEASE_FLAGS, below: MTP 3, prefix cache on with
+# host and disk tiers, 2,048-token steps, wht6 wire, 8 sequences), headroom 3,072 MiB instead of 96. Only the
 # R64 servers add --num-speculative-tokens 0 --profile-ops (the logits capture follows one greedy decoder and must
 # see every pass).
 #   0  frozen home of HEAD (scripts/frozen_home.sh: the build runs the host tests)
@@ -37,9 +36,22 @@ export RK_RADIANCE_SRC RK_BUILD_IMAGE RK_IMAGE
 : "${RK_RELEASE_DIST:=/var/home/dylan/AI-Work/radiance-kva-plugin-20261004/dist}"
 export RK_MODEL=/var/home/dylan/models/rad/qwen3.8-next-flash-fp8-iq4r-moe.rad
 export RK_DOCS=/var/home/dylan/AI-Work/kva-flashnext-tests-data/samples/quick/ppl.jsonl
-# radiance's defaults plus the one flag this 114 GiB model needs on two 32 GB cards: the defaults (--host-pool-mib 0,
-# no --weights-disk-tier) refuse to load it ("DID NOT FIT ... the host pool is full", evidence/r1013/def13-a.serve.log)
-: "${RK_RELEASE_FLAGS:=--tp 2 --host-pool-mib 12288}"
+# THE USER'S CONFIG (orchestrator, 2026-10-05): radiance 1.0.13's own shipped profile for this model,
+# deploy/compose/flashnext.yaml, with ONE deviation -- --gpu-headroom-mib 3072 instead of 96, because the display runs
+# on card 0000:03:00.0 (Dylan's rule). Its prefix cache (VRAM + 4 GiB host + 128 GiB disk under --prefix-cache-dir) is
+# ON: every server gets a FRESH cache dir (RK_CACHE_DIR, mounted at /kvcache by scripts/common.sh), so no server reuses
+# another's KV, and every timed prompt carries a leading nonce, so no TTFT is answered from the cache. Radiance's pure
+# defaults do not load this model on two 32 GB cards (--host-pool-mib 0: "DID NOT FIT", evidence/r1013/def13-a.serve.log).
+# common.yaml's docker settings are mirrored by scripts/common.sh (devices, seccomp=unconfined, --init, memlock -1,
+# models read-only); NOT mirrored here: network_mode host (it hides the GPUs under rootless docker: loopback -p
+# instead), user 1000:1000 (rootless root already maps to the host user), group_add (the scratch image has no group
+# entries; the device nodes are world-rw here), --api-key / restart / healthcheck (test runs).
+: "${RK_RELEASE_FLAGS:=--tp 2 --tp-wire wht6 --max-num-seqs 8 --max-model-len 200000 --placement expert_tiered --host-pool-mib 12288 --gpu-headroom-mib 3072 --expert-vs-cache-ratio 0.82 --kv-cache-dtype fp8 --prefix-cache-host-mib 4096 --prefix-cache-dir /kvcache --prefix-cache-disk-mib 131072 --num-speculative-tokens 3 --max-num-batched-tokens 2048}"
+K=$E/kvcache; mkdir -p "$K"
+fresh_cache() {   # label: a fresh prefix-cache dir for the next server; the previous one's size logged, then removed
+  for c in "$K"/*/; do [ -d "$c" ] && { echo "  kvcache $(basename "$c"): $(du -sh "$c" | cut -f1)" >> "$E/kvcache.txt"; rm -rf "$c"; }; done
+  export RK_CACHE_DIR=$K/$1; mkdir -p "$RK_CACHE_DIR"
+}
 export RK_FLAGS="$RK_RELEASE_FLAGS" RK_SERVE_SEQS=default RK_E2E_SEQS=default RK_STAGE=release
 PY=/var/home/dylan/projects/research/kva/.venv/bin/python
 T0=$(date '+%Y-%m-%d %H:%M:%S')
@@ -72,7 +84,7 @@ export RK_PLUGIN_HOME=${PLUGIN%/}
 MOUNT="-v ${PROJ%/}:/models/projector:ro"   # the extracted projector beside the model, as a user lays it out
 
 # 2 ----------------------------------------------------------------------------------------------------
-RK_DIST=$RK_RELEASE_DIST RK_E2E_WORK=$E/e2e scripts/e2e_fresh.sh > "$E/e2e.out" 2>&1; rc=$?
+RK_DIST=$RK_RELEASE_DIST RK_E2E_WORK=$E/e2e RK_E2E_CACHE_ROOT=$K/e2e scripts/e2e_fresh.sh > "$E/e2e.out" 2>&1; rc=$?
 log "e2e exit $rc: $(grep -E '^e2e: case' "$E/e2e.out" | sed 's/^e2e: //' | tr '\n' '|')"
 klog
 
@@ -95,7 +107,7 @@ EOF
 }
 arm() {   # label mode: serve, warm, time, decode (stock/quality), needle (round a)
   label=$1 mode=$2; r=${label##*-}
-  q=$(quiet)
+  q=$(quiet); fresh_cache "$label"
   if env RK_DOCKER_EXTRA="$MOUNT" scripts/serve.sh "$mode" > "$E/serve-$label.out" 2>&1; then
     [ "$label" = exact-a ] && needle_build
     python3 tools/settle.py --out "$E/warm-$label.json" --docs "$RK_DOCS" --cycles 3 --lengths "2048 16384 32768" > "$E/warm-$label.txt" 2>&1
@@ -120,8 +132,10 @@ done
 R=$E/r64; mkdir -p "$R"
 r64() {   # label mode extra-flags
   label=$1 mode=$2 extra=$3
-  mkdir -p "$R/dump-$label"
-  if env RK_FLAGS="$RK_RELEASE_FLAGS --num-speculative-tokens 0 $extra" RK_DOCKER_EXTRA="$MOUNT -v $R/dump-$label:/dump" \
+  mkdir -p "$R/dump-$label"; fresh_cache "r64-$label"
+  # the profile with MTP off (the capture follows one greedy decoder a row a step) and --profile-ops (no replayed pass)
+  f=$(echo "$RK_RELEASE_FLAGS" | sed 's/--num-speculative-tokens 3/--num-speculative-tokens 0/')
+  if env RK_FLAGS="$f $extra" RK_DOCKER_EXTRA="$MOUNT -v $R/dump-$label:/dump" \
        RADIANCE_KVA_DUMP_LOGITS=/dump scripts/serve.sh "$mode" --profile-ops > "$R/serve-$label.out" 2>&1; then
     [ -f "$R/conv.json" ] || python3 tools/turn2.py build --docs "$RK_DOCS" --out "$R/conv.json" > "$R/build.out" 2>&1
     python3 tools/turn2.py run --conv "$R/conv.json" --dump "$R/dump-$label" --out "$R/manifest-$label.json" > "$R/run-$label.out" 2>&1
@@ -138,5 +152,6 @@ for i in 0 1 2 3 4; do
     $PY tools/logit_compare.py "$R/dump-exact:$R/manifest-exact.json:solo$i:0" "$R/dump-$c:$R/manifest-$c.json:solo$i:0" 2>&1 | tee -a "$E/session.log"
   done
 done
+fresh_cache done; rm -rf "$K/done"; log "prefix-cache dirs used: $(tr '\n' ' ' < "$E/kvcache.txt" 2>/dev/null)"
 log "klog after: $(journalctl -k --since "$T0" | grep -ciE 'amdgpu.*(MES|SMU|timeout|reset)')"
 log "RELEASE end $(date -u +%FT%TZ)"
