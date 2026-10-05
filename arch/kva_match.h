@@ -24,7 +24,9 @@
 
 #include <rad_encoding.h>
 
-namespace qwen4exp_kva {
+namespace kva {
+
+using namespace rad::arch;
 
 static_assert(sizeof(RadFileHeader) == 248 && sizeof(RadFileEntry) == 136 &&
               sizeof(RadFilePlane) == 16 && sizeof(RadFileKV) == 24 && sizeof(RadVocabHeader) == 128,
@@ -177,6 +179,10 @@ inline Match match_model(const Folder& f, const RadModelMeta* meta, RadBuilder* 
     return m;
 }
 
-}  /* namespace qwen4exp_kva */
+}  /* namespace kva */
+
+/* The adapter and its static test still name these qwen4exp_kva:: (the split moves them, the names
+ * stay). */
+namespace qwen4exp_kva { using namespace kva; }
 
 #endif /* QWEN4EXP_KVA_MATCH_H */

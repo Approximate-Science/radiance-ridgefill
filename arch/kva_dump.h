@@ -46,7 +46,7 @@
 #include <initializer_list>
 #include <vector>
 
-namespace qwen4exp_kva {
+namespace kva {
 
 using namespace rad::arch;
 
@@ -329,6 +329,10 @@ inline void mixed_state_end(RadCtx* c, const std::string& dir, const RadBatch* b
               mode + "\"}");
 }
 
-}  /* namespace qwen4exp_kva */
+}  /* namespace kva */
+
+/* The adapter and its static test still name these qwen4exp_kva:: (the split moves them, the names
+ * stay). */
+namespace qwen4exp_kva { using namespace kva; }
 
 #endif /* QWEN4EXP_KVA_DUMP_H */

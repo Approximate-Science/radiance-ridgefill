@@ -14,7 +14,9 @@
 #include <utility>
 #include <vector>
 
-namespace qwen4exp_kva {
+namespace kva {
+
+using namespace rad::arch;
 
 struct Json {
     enum Kind { NUL, BOOL, NUM, STR, ARR, OBJ };
@@ -166,6 +168,10 @@ inline bool json_parse(const char* text, size_t n, Json* out) {
     return r.p == r.end;
 }
 
-}  /* namespace qwen4exp_kva */
+}  /* namespace kva */
+
+/* The adapter and its static test still name these qwen4exp_kva:: (the split moves them, the names
+ * stay). */
+namespace qwen4exp_kva { using namespace kva; }
 
 #endif /* QWEN4EXP_KVA_JSON_H */

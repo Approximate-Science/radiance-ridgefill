@@ -96,7 +96,9 @@
 #include <cstring>
 #include <initializer_list>
 
-namespace qwen4exp_kva {
+namespace kva {
+
+using namespace rad::arch;
 
 enum Mode     { MODE_OFF = 0, MODE_PLUMB, MODE_SPEED, MODE_QUALITY };
 enum Rowsel   { ROWSEL_CLASS = 0, ROWSEL_RANDOM, ROWSEL_ALL };
@@ -282,6 +284,10 @@ inline int read_config(const RadModelMeta* meta, Config* c, int64_t min_tail = k
     return RAD_OK;
 }
 
-}  /* namespace qwen4exp_kva */
+}  /* namespace kva */
+
+/* The adapter and its static test still name these qwen4exp_kva:: (the split moves them, the names
+ * stay). */
+namespace qwen4exp_kva { using namespace kva; }
 
 #endif /* QWEN4EXP_KVA_CONFIG_H */

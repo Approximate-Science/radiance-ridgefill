@@ -16,11 +16,9 @@
 #include <string>
 #include <vector>
 
-namespace qwen4exp_kva {
+namespace kva {
 
 using namespace rad::arch;
-using kva::KvaAdapter;
-using kva::StateShape;
 
 struct Kva {
     /* The model's facts (kva_adapter.h), filled first by the declare: everything below that the core
@@ -102,6 +100,13 @@ struct Kva {
 };
 
 static Kva g_kva[MAX_RANKS];
+
+}  /* namespace kva */
+
+namespace qwen4exp_kva {
+
+using namespace rad::arch;
+using namespace kva;
 
 /* A LINEAR group of [heads, 1, inner] f32 a sequence, bound to every late delta-net layer: one
  * slot per sequence the engine zeroes at admission, keeps for the sequence's life and snapshots

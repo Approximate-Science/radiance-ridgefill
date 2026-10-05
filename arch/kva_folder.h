@@ -36,7 +36,9 @@
 #include <thread>
 #include <vector>
 
-namespace qwen4exp_kva {
+namespace kva {
+
+using namespace rad::arch;
 
 /* ---------------------------------------------------------------- where it is */
 
@@ -274,6 +276,10 @@ inline bool read_folder(Folder* f, std::string* why) {
     return true;
 }
 
-}  /* namespace qwen4exp_kva */
+}  /* namespace kva */
+
+/* The adapter and its static test still name these qwen4exp_kva:: (the split moves them, the names
+ * stay). */
+namespace qwen4exp_kva { using namespace kva; }
 
 #endif /* QWEN4EXP_KVA_FOLDER_H */

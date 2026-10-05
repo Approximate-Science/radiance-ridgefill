@@ -23,7 +23,9 @@
 #include <string>
 #include <vector>
 
-namespace qwen4exp_kva {
+namespace kva {
+
+using namespace rad::arch;
 
 /* The int8 encoding's scale group (i8*bf16[1x128]): libr4d's int8 rows and quant_act_i8g read 128. */
 constexpr int64_t kI8Group = 128;
@@ -122,6 +124,10 @@ inline bool relayout_i8(const std::vector<const RadKernelInfo*>& rows, int64_t n
     return true;
 }
 
-}  /* namespace qwen4exp_kva */
+}  /* namespace kva */
+
+/* The adapter and its static test still name these qwen4exp_kva:: (the split moves them, the names
+ * stay). */
+namespace qwen4exp_kva { using namespace kva; }
 
 #endif /* QWEN4EXP_KVA_INT8_H */

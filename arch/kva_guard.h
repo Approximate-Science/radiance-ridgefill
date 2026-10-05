@@ -32,7 +32,9 @@
 #error "KVA_RADIANCE_VERSION (the radiance release this plugin is built against) is not defined; arch/CMakeLists.txt sets it from RADIANCE_SRC"
 #endif
 
-namespace qwen4exp_kva {
+namespace kva {
+
+using namespace rad::arch;
 
 /* How many times "\0<version>\0" occurs in the file, or -1 when it cannot be read. Streams the
  * file in 1 MiB blocks, keeping the pattern's length minus one bytes across each boundary. */
@@ -226,6 +228,10 @@ inline int open_guard(const char* so) {
     return RAD_E_UNSUPPORTED;
 }
 
-}  /* namespace qwen4exp_kva */
+}  /* namespace kva */
+
+/* The adapter and its static test still name these qwen4exp_kva:: (the split moves them, the names
+ * stay). */
+namespace qwen4exp_kva { using namespace kva; }
 
 #endif /* QWEN4EXP_KVA_GUARD_H */

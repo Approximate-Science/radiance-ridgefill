@@ -32,7 +32,9 @@
 
 #include <mutex>
 
-namespace qwen4exp_kva {
+namespace kva {
+
+using namespace rad::arch;
 
 /* The folder this process loaded, once, by the first real declare to get here. */
 struct Loaded {
@@ -395,6 +397,10 @@ inline void free_uploads() {
     for (Upload& u : g_upload) free_upload(u);
 }
 
-}  /* namespace qwen4exp_kva */
+}  /* namespace kva */
+
+/* The adapter and its static test still name these qwen4exp_kva:: (the split moves them, the names
+ * stay). */
+namespace qwen4exp_kva { using namespace kva; }
 
 #endif /* QWEN4EXP_KVA_PROJECTOR_H */

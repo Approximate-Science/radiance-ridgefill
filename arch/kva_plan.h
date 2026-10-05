@@ -37,7 +37,9 @@
 #include <algorithm>
 #include <cstdint>
 
-namespace qwen4exp_kva {
+namespace kva {
+
+using namespace rad::arch;
 
 enum Path { PATH_STOCK = 0, PATH_LEAN, PATH_MASKED, PATH_STRADDLE, PATH_DECODERS };
 static const char* const kPathNames[] = { "stock", "lean", "masked", "straddle", "decoders" };
@@ -117,6 +119,10 @@ inline Pass plan_pass(const PlanIn& in, const PlanConfig& c) {
     return p.path == PATH_MASKED ? p : Pass{};
 }
 
-}  /* namespace qwen4exp_kva */
+}  /* namespace kva */
+
+/* The adapter and its static test still name these qwen4exp_kva:: (the split moves them, the names
+ * stay). */
+namespace qwen4exp_kva { using namespace kva; }
 
 #endif /* QWEN4EXP_KVA_PLAN_H */

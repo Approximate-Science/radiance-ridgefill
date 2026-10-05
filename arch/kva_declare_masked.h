@@ -169,7 +169,7 @@ static bool take_folder(RadBuilder* b, const RadModelMeta* meta, const qwen4exp_
 /* This rank's copies (the real declare only) handed to the issue sites. */
 static int take_upload(const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva& k) {
     if (!upload_rank(g_loaded, k.ad, k.cfg, ctx->rank, k.want_final)) return RAD_E_DEVICE;
-    const Upload& u = g_upload[ctx->rank];
+    const kva::Upload& u = g_upload[ctx->rank];
     if (k.cfg.mode == MODE_PLUMB) return RAD_OK;
     k.proj_w = u.proj_w;
     k.proj_b = u.proj_b;
