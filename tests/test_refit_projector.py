@@ -14,6 +14,7 @@ from safetensors.torch import load_file, save_file
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "refit"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "dev"))   # the append route (A')
 pytestmark = pytest.mark.skipif(not os.environ.get("KVA_RESEARCH_ROOT"), reason="KVA_RESEARCH_ROOT not set")
 
 from test_refit_capture import CHUNK, HC, HIDDEN, LAYERS, SPLIT, write_prompt  # noqa: E402

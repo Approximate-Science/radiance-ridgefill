@@ -10,6 +10,7 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "dev"))   # the append route (A')
 import stub_checkpoint as S  # noqa: E402
 
 

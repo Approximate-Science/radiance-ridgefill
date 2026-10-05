@@ -38,13 +38,13 @@ mkdir -p "$ev"
 rel() { r=$(readlink -f "$1"); printf '%s' "${r#"$repo"/}"; }   # repo-relative path: the repo is mounted at /kva
 
 # shellcheck disable=SC2086  # st_args is empty or two paths without spaces
-"$RK_PYTHON" "$repo/tools/kva_sidecar.py" build --names refit --proj "$proj" $st_args --out "$side"
+"$RK_PYTHON" "$repo/tools/dev/kva_sidecar.py" build --names refit --proj "$proj" $st_args --out "$side"
 # shellcheck disable=SC2086
-"$RK_PYTHON" "$repo/tools/kva_sidecar.py" verify "$side/kva-sidecar-refit.safetensors" --names refit --proj "$proj" \
+"$RK_PYTHON" "$repo/tools/dev/kva_sidecar.py" verify "$side/kva-sidecar-refit.safetensors" --names refit --proj "$proj" \
     $st_args > "$ev/verify-shard.txt" || { cat "$ev/verify-shard.txt"; echo "shard verify FAILED" >&2; exit 1; }
 cat "$ev/verify-shard.txt"
 rm -rf "$stub"
-"$RK_PYTHON" "$repo/tools/stub_checkpoint.py" --repo Qwen/Qwen3.8-Flash-Next --revision "$RK_STUB_REVISION" \
+"$RK_PYTHON" "$repo/tools/dev/stub_checkpoint.py" --repo Qwen/Qwen3.8-Flash-Next --revision "$RK_STUB_REVISION" \
     --out "$stub" --extra "$repo/data/sidecar/kva-sidecar.safetensors" --extra "$side/kva-sidecar-refit.safetensors"
 sort -u "$repo/data/sidecar/rad-convert-set.txt" "$side/rad-convert-set.txt" > "$ev/set.txt"
 dup=$(cut -d= -f1 "$ev/set.txt" | sort | uniq -d)
@@ -70,7 +70,7 @@ if [ "$which" = full ]; then
 t = load_file(sys.argv[1]); save_file({k: v for k, v in t.items() if k.startswith('kva.str.')}, sys.argv[2])" \
         "$side/kva-sidecar-refit.safetensors" "$expect"
 fi
-"$RK_PYTHON" "$repo/tools/plan_diff.py" --plan "$ev/plan-only.log" --container "$ev/rad-info-v-before.txt" \
+"$RK_PYTHON" "$repo/tools/dev/plan_diff.py" --plan "$ev/plan-only.log" --container "$ev/rad-info-v-before.txt" \
     --expect-new "$expect" --out "$ev/plan-diff.json" > "$ev/plan-diff.txt" ||
     { cat "$ev/plan-diff.txt"; echo "plan diff FAILED" >&2; exit 1; }
 cat "$ev/plan-diff.txt"
