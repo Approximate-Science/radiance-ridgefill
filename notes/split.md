@@ -40,17 +40,34 @@ kva_declare_masked.h (stage-c's decl_hazard, then stage-e's decl_final). After t
 | merge | 705bd0d | stage-e a005952 (D1's frozen home 406e746 green, ctest 3/3) | one conflict (Stage C's hazard line on both sides; kept split's). No code change from the merge; README held-cost paragraph + E/D notes |
 | 10 (part) | 86ae8ba | docs/ADDING-A-MODEL.md + README pointer | written to the interface AS BUILT (check_tensors core, declare_codes hook, int8 ships), with a status line for the step-7 hooks |
 
-## Remaining
+## G1 -- the split's engine gate (2026-10-05 21:17-21:23Z, boot 75e3e39b; evidence/split/g1/session.log)
 
-1. GPU gate G1 (evidence/split/scripts/g1.sh; queued 21:14Z on gpuq as `split-g1`, behind staged-d2):
-   frozen home of `split` HEAD at session start (its build runs the host suite), off ident x1 vs R3, int8
-   speed + quality KL `.rows` cmp'd to Stage E S4's i8 rows (home 5a3115b, same boot 75e3e39b),
-   RADIANCE_KVA_FINAL=off. Predictions labbook seq 446 (HS-split-off-ident), 447 (HS-split-i8-rows).
-2. Stage E's final-map default flip (Dylan: MTP final map out of the release, default off): merge
-   stage-e again when it lands.
+Frozen home **ac3bc48** (`split` HEAD at session start; its build ran the host suite 5/5 in the build image:
+kernels, arch_static, adapter_core, the purity gate). Predictions registered first (labbook seq 446-447),
+verdicts seq 450-451 (records 448-449).
+- **off ident = R3** (evidence/stage0/ident-exact-boot1.txt; diff empty). HS-split-off-ident CONFIRMED.
+- **int8 KL rows byte-identical** (`cmp`) to Stage E S4's (home 5a3115b, same boot): speed T2048 and quality
+  T2048, `data/projector-qwen38fn-int8`, RADIANCE_KVA_FINAL=off, quick9 vs ref-stage0; 67 approximate steps
+  each; 25.4 MiB VRAM / ~637 MiB host-mapped a rank, as S4. HS-split-i8-rows CONFIRMED.
+- Kernel log clean. A first attempt at 21:14:59Z stopped itself before doing anything: its guard saw another
+  lane's build container (`radiance-build` image, random name, CPU only); the guard now ignores that image.
 
-Host suite at 705bd0d: ctest -LE gpu 5/5 (kernel_test, arch_static 63 / 1,125,462, adapter_core
-5 / 115, core_headers_name_no_arch, python), pytest tests 209 passed / 33 skipped.
+After G1: a83b4a6 (comments only) and **770904f**, the merge of stage-e 445da8f -- RADIANCE_KVA_FINAL defaults
+off (6cc3f5e). G1 set that switch to off explicitly and runs no MTP, so its result stands for 770904f; the
+merge's own change is covered by the host suite (stage-e's added static check included).
+
+## Merge-readiness (2026-10-05 ~21:25Z)
+
+- `split` @ 770904f = main 7bbf161 + stage-e 445da8f + the split: main is an ancestor (fast-forward), stage-e
+  is fully contained. 76 commits, 47 files, +5,049 / -1,472.
+- Host suite at 770904f: ctest -LE gpu 5/5 (kernel_test, arch_static 63 cases / 1,125,472 checks =
+  stage-e's own count, adapter_core 5 / 115, core_headers_name_no_arch, kva_kernels_alone), pytest tests
+  209 passed / 33 skipped.
+- Engine: G1 above. Not re-run on the split (by the trimmed-gate decision): the 3-restart ident, bf16
+  arms (int8 only), TTFT/held cost (the split changes no issue: the static oracle holds every list).
+- Comment density (full-line comments / code lines, arch/): 0.27 at 1238dde -> 0.31 now; radiance arch
+  0.59 by the same count. Added where a function had none or where the why/cost was missing; no
+  restating of code.
 
 ## Also done this session
 
