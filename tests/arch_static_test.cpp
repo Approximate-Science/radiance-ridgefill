@@ -1818,8 +1818,8 @@ TEST(the_hazard_instrument_counts_on_tail_passes_and_records_on_approximate_ones
     float* host = (float*)rad_dev_host_ptr(qwen4exp_kva::g_hazard_dev[0]);
     REQUIRE(host != nullptr);
     *host = qwen4exp_kva::g_hazard_logged[0] + 1144.0f;
-    CHECK(has(run_step(qwen4exp_kva::step, tail.b).log, "kva: hazard rows 1144"));
-    CHECK(!has(run_step(qwen4exp_kva::step, tail.b).log, "hazard rows"));   /* said once */
+    CHECK(has(run_step(qwen4exp_kva::step, tail.b).log, "kva: hazard 1144 positions"));
+    CHECK(!has(run_step(qwen4exp_kva::step, tail.b).log, "kva: hazard"));   /* said once */
     Pair q;
     declare_pair(q, "plumb");
     REQUIRE_EQ(q.st, RAD_OK);
