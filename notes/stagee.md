@@ -205,3 +205,12 @@ not for minutes; the steady fast state still costs +2.3..2.9% on stock passes wh
 which holds nothing, +0.3%). OPEN: what the slow state is and what flips it (prime suspects: the expert mover's
 initial placement / heat with the plugin's already-held VRAM, or host-side state) -- the ediag3 prefill profiles
 (pp-exact vs pp-qh-held, --profile-ops) are the first evidence; e1's table above is therefore a slow-state table.
+**ediag3 prefill profiles (diagnostic only; `profcmp.py`, 2048-token prefills, fresh servers):** stock 1,289 ms,
+quality+host held 1,520 ms (+18%: the slow state, caught). Rank 1: EVERY kernel slower -- rmsnorm 7.8 → 22.5 ms,
+rope 4.3 → 13.7, gdn_gated_rmsnorm 8.6 → 24.8, gdn_chunk_scan 23.4 → 42.4, gemm_nt_q 153 → 215, moe_gemm_q 316 → 375
+(total +20.6%); rank 0's extra time is waiting in the all-reduces (ar_gather_hc_write +421 ms, ar_hc_write +164). Small
+kernels 2-3x slower on one card is contention from concurrent device activity on rank 1, not plugin work (a held pass
+issues the stock step). Prime suspect: the expert mover still migrating experts on rank 1 (its slab is smaller by the
+plugin's held VRAM; the heat engine moves 8 units a dispatch) until it converges -- the fast state. Next: the mover's
+copy counters / RADIANCE_LOG_STEPS on a slow vs fast server, and whether a stock server with the same held VRAM
+(headroom +128 MiB / +1,228 MiB) shows the same slow start.
