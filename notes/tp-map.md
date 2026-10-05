@@ -1,4 +1,9 @@
 # notes/tp-map.md -- TP 1 / 2 / 4 map for the KVA plugin on radiance 1.0.8 (report only)
+> Report by an open-model worker (GLM-5.3 via opencode-go), written against main at 9af94f7 and spot-checked by the
+> orchestrator (the engine facts in summary items 1, 4, 5 verified in the radiance source). Summary item 9 is STALE:
+> the int8 projector is built on branch stage-e (Stage E), which this map did not see. TP1/TP4 memory figures are
+> estimates, as marked.
+
 
 Model facts used throughout (Qwen3.8-Flash-Next): 48 layers = 12 x (3 GatedDeltaNet + 1 QSA attention)
 (rad:arch/qwen4exp_fp8/qwen4exp_fp8.cpp:22-23); hidden 2560, hc_count 4 (stream 10240), 512 experts of
