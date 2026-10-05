@@ -253,3 +253,88 @@ boot; exact vs it: 0 by construction):
 R51's whole-tail number for +2048 (+1.01 nats) is not a quality reading: that scored window then contains
 approximated rows, whose logits are not the model's (the SCORE_BULK caveat) -- which is why the last-512
 protocol is the one to read.
+
+### Session 3 -- TTFT (plugin 68d5d92; 2026-10-05 03:34-04:10Z; evidence/stageA/session3.log, speed-*.json)
+`scripts/speed.sh`, prompt_ms median of 5 after one warm-up, prompts of the quick ppl set, RK_FLAGS (prefix cache
+off). Exact baseline measured at both ends of the session and pooled (n = 10 a length): 5,994 / 10,014 / 20,083
+ms (Stage 0: 5,923 / 10,003 / 19,789). **Exact at 9,216 is bimodal in this session** (5,950 or ~6,850 ms;
+exact-b's median 6,775): read 9,216 ratios with that spread in mind.
+
+| arm | 9,216 | 16,384 | 32,768 |
+|---|---|---|---|
+| speed (lean + masked straddle, lever on) | 4,915 = **1.22x** | 6,573 = **1.52x** | 10,222 = **1.97x** |
+| quality, lever on (default) | 6,584 = 0.91x | 9,342 = **1.07x** | 14,510 = **1.38x** |
+| quality, RADIANCE_KVA_STAGE=stock | 6,989 = 0.86x | 11,646 = 0.86x | 22,226 = 0.90x |
+| quality, T 2560 | 7,000 = 0.86x | 10,159 = 0.99x | 16,577 = 1.21x |
+| Stage 5 compaction quality (reference) | 7,441 = 0.80x | 10,972 = 0.91x | 20,687 = 0.96x |
+
+- **R95 (TTFT half): quality is faster than exact** -- 16K -678 ms [-1,088, -260], 32K -5,689 ms [-7,110,
+  -4,249] (labbook compare, unpaired bootstrap) -- and the lever is worth -2,305 ms [-2,715, -1,887] at 16K and
+  -7,716 ms [-9,185, -6,087] at 32K against the same path with staging. Against the registered band
+  (1.15-1.20x / 1.25-1.30x): 16K below it, 32K above it. Mechanism, per op (profiles,
+  `profile-quality-{stream,stock}-steps.txt`, approximate steps 2-6, rank 1 = the card behind the Gen4 x4 hop):
+  lever off, late `moe_gemm_q` 0.35 ms a call on both ranks (staged) but rank 0 waits **21.7 ms a late layer** in
+  `ar_gather_hc_write` for rank 1's staging; lever on, rank 1's late `moe_gemm_q` ~3.5 ms a call (zero-copy of the
+  routed experts over x4) and rank 0 waits **~10.5 ms a late layer** -- ~23 -> ~11 ms, which over 24 layers x 7
+  chunks is the 2.3 s measured at 16K. The remaining late-layer cost is rank 1's PCIe limp (Dylan's rule: tune
+  for it only after parity); on symmetric links both the penalty and this gain are smaller.
+- **R96**: the straddling chunk at 64 / 512 / 1,024 / 1,984 exact rows (prompts 6,080 / 5,632 / 5,120 / 4,160),
+  quality: lever on 3,965 / 3,921 / 3,362 / 2,523 ms, lever off 4,416 / 4,332 / 3,826 / 3,067, exact 3,794 /
+  3,743 / 3,329 / 2,673. **Streaming wins at every exact-row count measured: no crossover up to 1,984 exact
+  rows**, so the code's threshold stays "always" (`stage_rows` default). The fallback (STAGE=stock) serves
+  byte-identically (R94 control) at the speeds in the table; the Stage 5 path it would "reproduce" is deleted.
+  Mixed steps (decoders beside) are Stage B's measurement.
+- **R48 REFUTED at 9,216**: speed 1.22x, band 1.35-1.50x (the Stage 3/4 whole-chunk rule also gave 1.22x). 16,384
+  1.52x is 2.9% under 1.57x (outside the +-2% row; spread 6,330-6,753) and 32,768 1.97x is inside. Decomposition:
+  three lean chunks save ~3 x 510 ms against exact, which predicts ~4,450 ms if the straddling chunk cost one
+  exact chunk; measured 4,915, so the masked straddling chunk costs ~470 ms MORE than an exact one. The masked
+  layer runs every late block over all 2,048 rows and saves only the bulk rows' routed experts, while the lean
+  fill skips the query path, attention, output projection, connections and MoE altogether. The plan's 1.35-1.50x
+  assumed the straddle saved about half a lean chunk. Follow-up runs (lever off, 16K re-measure): session 4.
+- **R36' green**: 16K quality profile, approximate steps: late routing 1,270 / 1,260 / 1,380 placements (layer
+  30, steps 0-2) = the window's class rows x top-10 (127 rows in chunk 0 = the R33 fixture's k) instead of Stage 5's
+  5,120 padded; experts 0-9 no longer the hottest (first counts 0,0,1,0,2,3,...); router / shared / hc ops at
+  n_tok; no gather_rows/scatter_rows in approximate steps (the only gather_rows is the logits gather of the exact
+  last chunk).
+- **R95 (bytes half)**: rank-0 mover copies per quick9 KL run 518.6 GiB (lever off) -> 287 GiB (on): -3.46 GiB per
+  approximate chunk, ~16 late layers' worth of ~213 MiB (the plan said ~22; not every late layer's non-resident set
+  is 213 MiB, and the mover's counter excludes zero-copy reads).
+
+### Session 4 -- R48 follow-up and the R99 soak (plugin 68d5d92; 2026-10-05 04:10-04:31Z; session4.log)
+- Speed, lever on vs off, interleaved with exact: 9,216 4,931 vs 4,992 ms; 16,384 6,441 vs 6,444 ms -- the
+  lever does not move speed mode (its lean chunks issue no late MoE). 16,384 against this session's exact (10,021
+  ms) is **1.56x** (inside R48's +-2% of 1.57x; session 3's 6,573 was a slow rep set).
+- **Harness trap (named)**: an exact server's first 1-4 reps at 9,216 run ~6.85 s and then settle to ~5.98 s
+  (the heat engine re-placing experts after start; reps a/b/c/d: 6862 6004 5970 5985 5950 / 6896 6775 6880 5959
+  5949 / 6806 6833 7004 6075 6019 / 6855 6894 6832 6429 5983); speed settles in 0-2 reps. Steady state vs steady
+  state, 9,216 speed = 5,983 / ~4,900 = **1.22x** -- R48's refutation stands. A TTFT gate at 9,216 needs either
+  more warm-up reps or the settled reps only; speed.sh's single warm-up is not enough for exact at this length.
+- **R99 soak (Stage A part) green**: quality, `--no-prefix-cache`, `scripts/soak.py` 400 requests from 8
+  clients (275 short / 98 medium / 27 long; 941,860 prompt and 12,999 generated tokens, 576 s): **0 failed
+  requests; 448 approximate steps, 447 of them with decoders beside (D > 0), 96 with two prefills (Pn > 1), 112
+  straddling; 0 lines "issued differently from its recording" / RAD_E_STATE; kernel log clean.** Static half: the
+  only mutable statics are g_kva (filled at declare), the declare's sizing scratch and g_forward (set once at
+  open); every getenv is at declare or open. NOT covered here (Stage B/C): decoder text under load (R54), the
+  2,000-request soak with the prefix cache on.
+
+## 5. Stage A status (what is green, what is not, and why)
+
+| row | state | evidence |
+|---|---|---|
+| R46, R98 | **green** (kernel_test host 737 checks, gpu 945; grep RAD_PROLE_SEQ_CHUNK empty) | notes/kernels.md Stage A, §3 |
+| R52', R72, R93, R53' single-prefill subset | **green** (static, 40 cases, 21 mutants caught) | §3 |
+| R94 | **green** 3/3 boots byte-identical (probes forced) | §4 session 1 |
+| R47 | **green**, negative control catastrophic | §4 session 1 |
+| R35' | **green** byte-identical | §4 session 1 |
+| R45 | **green** static (truth table) + engine (5 lengths, mask_rule.py 5/5) | §4 session 2 |
+| R81, R83, R84, R73 | **green** | §4 sessions 1-2 |
+| R49 | **green** +0.0040 [-0.0016, +0.0097] | §4 session 2 |
+| R50 | measured: split better by -0.0088 [-0.0112, -0.0065] (whole tail), equal on last 512 -> **split kept** | §4 session 2 |
+| R51 | **green** (+2048 worse, CI excludes 0; -64 not worse) | §4 session 2 |
+| R36' | **green** | §4 session 3 |
+| R95 | mechanism **green** (per-op wait 21.7 -> ~10.5 ms a late layer; staging bytes return with STAGE=stock); TTFT **1.07x / 1.38x** vs band 1.15-1.20 / 1.25-1.30 (16K under, 32K over) | §4 session 3 |
+| R96 | **measured**: no crossover up to 1,984 exact rows -> threshold "always"; fallback serves byte-identically | §4 session 3 |
+| R48 | **red at 9,216** (1.22x vs 1.35-1.50x: the masked straddling chunk costs more than an exact chunk); 16K 1.56x and 32K 1.97x inside +-2% | §4 sessions 3-4 |
+| R100 | **green** static + engine; headline quality T 2560 last-512 dNLL +0.0021 [-0.0126, +0.0157], KL 0.037, top-1 0.916 | §4 session 2 |
+| R99 | Stage A part **green** (static grep + 400-request mixed soak, 0 audit failures) | §4 session 4 |
+| DD-B as specified (weightless alternate) | **not implementable** in v1.0.8 (§2); replaced by zero-row probes, same effect | §2 |
