@@ -374,3 +374,17 @@ round's stock 9,981 / 19,393 ms; tables: `evidence/stagee/scripts/s4table.py evi
   time; mutants run beside a correctness-only session (D2), never under timing or as a session's tail -- S4's tail
   finds no mutant scripts (renamed `mutant_*.py`); int8 arms first in D1/D2, bf16 arms skipped if
   `evidence/stagee/INT8_ONLY` exists (Dylan's decision pending).
+
+## 18. DYLAN'S DECISION (2026-10-05 ~20:30Z, via the orchestrator): int8 is the only projector going forward
+- **Shipped folder: `data/projector-qwen38fn-int8`** (shared data dir, `<radiance-kva>/data/projector-qwen38fn-int8`):
+  28 files, 698,753,818 bytes; manifest `kva.json` sha256 **5b699e27e88d2e27cb546c174c6cb6f257e20433555e96b37fe17781aa3a85ae**
+  (it lists every file's sha256; built by `tools/kva_projector.py int8 --from data/projector-qwen38fn`, d8f19eb).
+  With the MTP final map (Stage D, `tools/kva_projector.py final`): `data/projector-qwen38fn-int8-final`, 29 files,
+  908,489,957 bytes, `kva.json` sha256 fd6f3a28b0b9344117004d04d471be4d1e762991669ea7a3ca7c58b058e7cf1e -- the one to
+  ship if R70 (D1) is green, since MTP is on by default in the release flags.
+- bf16 results already measured stay as history (§11, §15, S4's round a). Every bf16 arm not yet run is dropped: S4's
+  bf16-a was stopped mid-sample at 20:31:52Z and held-bf16-b, bf16-b, p-bf16 are stopped at their start (a watcher,
+  /tmp/stagee-skipbf16.py, kills the serve/settle/speed process whose stdout is that arm's file -- S4's own script
+  is not edited while it runs; each such arm logs "serve FAILED" / "speed.sh FAILED"); D1's bf16+final and D2's
+  quality-bf16 are skipped by `evidence/stagee/INT8_ONLY`. KL identity from here: int8 quality + int8 speed.
+- The bf16 code path stays (it is the int8 builder's input); nothing in the release tests bf16.
