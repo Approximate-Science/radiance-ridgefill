@@ -894,6 +894,41 @@ TEST(each_routed_layers_expert_span_is_gate_up_to_down) {
     }
 }
 
+/* Split step 2's bridge (deleted at step 7): every adapter fact equals the direct read of the model it
+ * replaces, at both ranks of a TP2 declare and in the single-rank one. */
+TEST(the_adapter_facts_match_the_model) {
+    for (int world : {1, 2}) {
+        Pair p;
+        for (int rank = 0; rank < world; ++rank) {
+            declare_pair(p, "speed", rank, world);
+            REQUIRE_EQ(p.st, RAD_OK);
+            const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
+            const qwen4exp_kva::KvaAdapter a = qwen4exp_kva::adapter_of(m);
+            CHECK_EQ(a.wide, m.hccfg.hc * m.g.n_embd);
+            CHECK_EQ(a.tile, m.gcfg.chunk);
+            CHECK_EQ(a.split_lo, m.ple_layer + 1);
+            CHECK_EQ(a.n_layer, m.g.n_layer);
+            CHECK_EQ(a.min_tail, qwen4exp_kva::kMinTail);
+            CHECK_EQ(a.default_tail, qwen4exp_kva::Config{}.tail);
+            CHECK_EQ(a.state.n_head, m.gcfg.n_head_v);
+            CHECK_EQ(a.state.sd0, m.gcfg.head_v);
+            CHECK_EQ(a.state.sd1, m.gcfg.head_k);
+            CHECK_EQ(a.buf_stream, m.b_h);
+            CHECK_EQ(a.buf_x, m.a_x.x);
+            CHECK_EQ(a.buf_x_q, m.a_x.cq());
+            CHECK_EQ(a.buf_logits, m.b_logits);
+            REQUIRE_EQ((int64_t)a.full.size(), m.g.n_layer);
+            for (int64_t l = 0; l < m.g.n_layer; ++l) {
+                const qwen4exp_fp8::Layer& lay = m.layers[(size_t)l];
+                CHECK_EQ((bool)a.full[(size_t)l], (bool)lay.full);
+                CHECK_EQ((bool)a.ext_in[(size_t)l], (bool)(lay.full ? lay.attn.ext_in : lay.gdn.ext_in));
+                CHECK_EQ((bool)a.routed[(size_t)l], lay.mlp.c.top_k > 0);
+                CHECK_EQ((bool)a.calibrated[(size_t)l], lay.mlp.op_gram_gu != 0);
+            }
+        }
+    }
+}
+
 /* Every buffer the masked path owns takes the whole program, and so does every in-tree buffer an op
  * declared after the graph touches (PLAN D4): the mask and bounds always; the layer-S stream, the
  * projected input with its codes and the routing ids when the mode projects. */

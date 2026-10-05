@@ -37,6 +37,7 @@
 #include "kva_layer.h"
 #include "kva_hazard.h"
 #include "kva_guard.h"
+#include "qwen4exp_adapter.h"
 
 namespace qwen4exp_kva {
 
