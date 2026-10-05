@@ -1,6 +1,7 @@
 /* kva_layer.h -- one late layer of an approximate pass: the masked layer (PLAN-FIX §3, §4, §8) and
  * the lean fill (the pure all-bulk case). The blocks' own issues and the correction spliced into them
- * are the adapter's (qwen4exp_blocks.h); what stays here is the projection, the ring and the drivers.
+ * are the adapter's (its conn / late_block / ffn hooks, kva_adapter.h); what stays here is the
+ * projection, the ring and the drivers that order them.
  *
  * THE MASKED LAYER runs every in-tree op over all n_tok rows with the stock handles and lets the
  * DEVICE decide which rows use the projection: the connection read writes the exact block input for
@@ -112,11 +113,11 @@ inline void project_bulk(RadCtx* c, const Kva& k, int64_t li, int64_t b) {
                     brow_slice(a.buf_x_s, 0, b, n / RAD_FP8_BLOCK));
 }
 
-/* A STRADDLING LATE LAYER (A.1, speed): the bulk rows [0, b) get the lean pieces (projection, K/V,
- * indexer keys, the delta net's recurrence), the tail rows [b, n) the whole in-tree layer -- their
- * connection read, block output, connection write, feed-forward read, MoE and write -- issued over
- * that row range with the in-tree helpers' own r0/rows (rad_block_hc.h:360-397, rad_fp8.h:915,
- * MoeFP8::pass). Nothing reads a bulk row's late block output, so none is computed. */
+/* A STRADDLING LATE LAYER (A.1, speed): the bulk rows [0, b) get the lean pieces (projection and the
+ * blocks' cache writers), the tail rows [b, n) the whole in-tree layer -- their connection read, block
+ * output, connection write, feed-forward read, FFN and write -- issued over that row range by the
+ * adapter's hooks with the in-tree helpers' own r0/rows. Nothing reads a bulk row's late block output,
+ * so none is computed. */
 inline void straddle_layer(RadCtx* c, const Kva& k, int64_t li, const RadBatch* batch, const Pass& p,
                            StateDump* sd) {
     const KvaAdapter& a = k.ad;

@@ -3,7 +3,7 @@
  * A pure function: the keyed batch fields the decision may read (radiance core/runtime/ctx.cpp:989-995)
  * and the declare-time configuration, in; the pass plan out. No model type, no device data, no
  * host state that a recorded pass would not replay (R15/R99). A model adapter fills PlanIn from its
- * RadBatch and its declare (qwen4exp_kva.cpp derive()); tests/arch_static_test.cpp holds it to a
+ * RadBatch and its declare (derive()); tests/arch_static_test.cpp holds it to a
  * hand-computed truth table (R52').
  *
  * THE PATHS, cheapest first, and the rule that picks one (PLAN-FIX §2, A.1):

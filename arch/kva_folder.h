@@ -1,5 +1,5 @@
 /* kva_folder.h -- the projector folder: where it is, and what it holds (PACKAGING.md §0, §2, §3;
- * REFUTATION-3 §1). Model-agnostic: no qwen4exp type appears here.
+ * REFUTATION-3 §1). Model-agnostic: no model type appears here.
  *
  * WHERE. The user runs the stock model file and puts the projector in `<model dir>/projector/`. No
  * ABI call names the model's path, so it is read from the process (REFUTATION-3 §1): the engine
