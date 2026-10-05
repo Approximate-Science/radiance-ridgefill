@@ -1,5 +1,9 @@
 # Handoff 2026-10-04 23:50 (IMPL lane -> next worker)
 
+**2026-10-05 update:** A.1's engine checks are done -- see "Stage A.1 -- engine results" below (mutants,
+bytes, KL oracle, TTFT on warmed servers, R96 per chunk, the guard's trade, the ON-server VRAM finding). Two
+statements in this handoff are refuted there: the ~1.34x speed ceiling, and "R96 is WRONG".
+
 **State:** Stage A done (status table §5; the lever is zero-row probes, §2). **Stage A.1 is half done: built
 and statically tested at 5102d9c, NOT run on the engine.** Tree green (host `ctest -LE gpu` 2/2, HIP build).
 GPU lock not held.
@@ -58,6 +62,148 @@ the builder refuses table ops with no weights and pins table runs (why §2's pro
 **Open measurement list:** R48 (speed 9,216) and quality 9,216/16,384/32,768 after A.1; A.1 KL oracle; R96
 re-measured per straddle chunk (not whole prompts); R95 TTFT band (16K 1.07x under, 32K 1.38x over); Stage B
 (R53'-R61), C (R62-R68, DD-A), D (R69-R76, DD-D), E (R77-R91) untouched.
+
+# Stage A.1 -- engine results (account-B worker, 2026-10-05; plugin 1a524d8)
+
+**Provenance.** Home `data/home-1a524d8` (arch 6df57391…, kva.so 2cfe6699… = Stage A's), built by
+`scripts/frozen_home.sh 1a524d8` (host ctest 2/2 inside). Code = 5102d9c + one static case + an enum cast
+(1a524d8). Boot 75e3e39b… (KL reference data/kld/ref-stage0 and ref-off1024 valid), image
+stilldeadcode/radiance:1.0.8, RK_FLAGS of scripts/common.sh, every KL run `RADIANCE_KVA_SCORE_BULK=1`.
+Logs `evidence/stageA1/session{1..5}.log`; scripts copied in `evidence/stageA1/sessions/`. Kernel log clean
+before and after every session.
+
+### Mutants (scratch copy of arch/ + tests/ at HEAD, `evidence/stageA1/sessions/mutate_a1.py`)
+```
+A1 straddle tail range from 0            CAUGHT a_speed_straddle_runs_its_late_blocks_over_the_tail_rows_only
+A2 straddle MoE over all rows            CAUGHT a_speed_straddle_...
+A3 straddle attention loop from 0        CAUGHT a_speed_straddle_...
+A4 straddle projector over all rows      CAUGHT a_speed_straddle_...
+A5 straddle at short context             CAUGHT the_approximate_decision_truth_table
+A6 never-slower guard removed            CAUGHT a_tail_past_the_step_..., the_approximate_decision_truth_table
+A7 guard threshold off by one (<)        CAUGHT a_straddling_chunk_..., plumb_..., truth_table, the_stage_switch_...
+A8 delta-net output over all rows        CAUGHT a_speed_straddle_...
+A9 straddle with decoders beside         CAUGHT a_tail_past_the_step_..., truth_table
+A10 planner straddles in quality mode    CAUGHT the_planner_straddles_only_in_speed (NEW case, 1a524d8; before it the
+                                         declare's speed-only straddle_layers hid it -- kva_plan.h is meant for reuse)
+A11 TAIL_ONLY=0 ignored                  CAUGHT a_straddling_chunk_splits_the_last_scan_at_the_bulk_end
+A12 attention all-reduce over all rows   NOT CAUGHT -- equivalent on every served shape: TP1 declares no op_ar and
+                                         at TP2 the connection write carries the reduce (ar_taken), so the branch
+                                         never issues; it mirrors the in-tree helper
+A13 straddle without the mask (bounds)   CAUGHT a_speed_straddle_...
+A14 plumb takes the guard                CAUGHT plumb_is_the_stock_step_through_the_masked_path
+```
+Static after the new case: 42 cases, 464,834 checks; HIP build + its host ctest 2/2.
+
+### Correctness (session 1, 05:01-05:22Z) -- all green
+| gate | run | approx steps (paths) | rows |
+|---|---|---|---|
+| R94 | plumb FORCE_STREAM=1, quick9 | 67 (masked stream) | **identical** to stage-0 exact |
+| R47 | plumb FORCE_SPLIT=1024 | 67 (masked, staged) | **identical** |
+| plumb, natural straddles | plumb, quick9-off1024 | 67 (58 stream, 9 staged) | **identical** to its exact run |
+| regression | speed T 2048, quick9 (no straddle) | 67 lean | **identical** to Stage A (68d5d92) |
+| regression | quality T 2048, quick9 | 67 masked stream | **identical** to Stage A |
+| R6/R7 | off @ 1a524d8 | -- | ident.sh = R3's six hashes |
+
+**Two-path oracle** (speed, quick9-off1024: one 1,024-row straddle a doc; whole tail 2,047 scored): tail-only
+(9 straddle + 58 lean) dNLL +0.04432, KL 0.0759, top-1 0.8809; masked (TAIL_ONLY=0 FORCE_STREAM=1; 9 masked +
+58 lean) +0.04413, KL 0.0761, top-1 0.8825. **Paired tail-only - masked +0.00018 [-0.00148, +0.00158]**, largest
+per-doc |difference| 0.0054 (32k/1). Same tail up to GEMM-shape rounding: green (HA1-kl-oracle).
+
+### Quality (KL; paired per doc, bootstrap CI)
+| run | scoring | dNLL vs exact | KL | top-1 | approx steps |
+|---|---|---|---|---|---|
+| quality T 2048 quick9 (= Stage A bytes) | last 512 | +0.00576 [-0.01307, +0.02245] | 0.0592 | 0.8950 | 67 |
+| **quality T 2560 quick9, guard (default)** | last 512 | **0 -- the run is exact** (rows = stage-0 exact) | 0 | 1 | **0** |
+| quality T 2560, STAGE_ROWS=512 (= Stage A R100 bytes) | last 512 | +0.00212 [-0.01255, +0.01565] | 0.0368 | 0.9156 | 67 |
+| quality off1024, A.1 (straddle runs exact) | whole tail | +0.01926 [+0.01438, +0.02396] | 0.0494 | 0.9020 | 58 |
+| -- paired A.1 - Stage A (straddle masked) | whole tail | **-0.00755 [-0.01187, -0.00323]** (better) | | | |
+| -- same | last 512 | -0.00146 [-0.00415, +0.00115] | | | |
+
+**R100 finding (red by design, needs a decision):** at T > C the engine caps n_ahead at C, so every chunk of a
+T 2560 prompt is b = 1,536 with 512 exact rows -- above the guard's 64 -- and the guard runs EVERY chunk exact.
+The R100 headline configuration therefore no longer approximates anything (0 steps, quality = exact, speed =
+exact). The static test already asserts it (`a_tail_past_the_step_...`, quality rows 64 -> stock). With the
+guard relaxed to 512 the pass is Stage A's to the byte (rows identical), i.e. A.1 changed nothing else. Whether
+T 2560 may be served approximate is the guard's trade measured below (session 5).
+
+### TTFT -- the instrument first
+Stage A's protocol (fresh server, one warm-up, lengths ascending, RK_REPS=7 reading reps 3-7) is NOT a stable
+instrument for the approximate arms: their reps fall monotonically through the whole run (quality 32K 14,771 ->
+11,172 ms over 7 reps; heat engine, 24,566 movable units at 8 moves a dispatch, re-placing for the approximate
+routing), while exact settles in 1-3 reps. Same lean bytes measured 1.56x (Stage A) and 1.64x (session 2) at
+16K. Session 3 therefore warms each server with one pass of all three lengths (RK_REPS=2, discarded) before
+the measured label; its a/b repeats agree within 0.3% at every length. Host: session 2 after ~05:45Z ran beside
+another lane's g++ builds and kernel tests (exact-c +13%; two R96 arms aborted by preflight); those arms are
+labelled contaminated in the ledger and not used. Session 3+ start each sample only at 1-min load < 2.5 with no
+compiler/test process (`quiet` in the session script; waits logged).
+
+**Warmed server, quiet host (session 3, 06:27-07:06Z), settled median of reps 3-7, a / b:**
+| arm | 9,216 | 16,384 | 32,768 |
+|---|---|---|---|
+| exact | 5,672 / 5,672 | 9,747 / 9,752 | 19,052 / 19,053 |
+| speed (tail-only straddle) | 4,041 / 4,025 = **1.41x** | 5,271 / 5,259 = **1.85x** | 8,997 / 8,987 = **2.12x** |
+| quality (guard) | 5,138 / 5,139 = **1.10x** | 6,888 / 6,884 = **1.42x** | 10,478 / 10,478 = **1.82x** |
+| speed, TAIL_ONLY=0 (straddle chunk -> exact by the guard) | 4,813 = 1.18x | | |
+
+Differences (unpaired bootstrap, labbook stageA1-ttft-w-*): speed - exact 9,216 -1,631 ms [-1,727, -1,527];
+quality - exact 9,216 -534 [-676, -399], 16K -2,860 [-3,114, -2,601], 32K -8,574 [-8,720, -8,110]; tail-only
+straddle - straddle-chunk-exact (9,216) **-788 ms [-889, -680]**.
+
+**Fresh server (session 2, Stage A protocol, clean arms 05:23-05:45Z):** exact 5,989 / 9,975 / 19,590; speed
+4,950 (1.21x) / 6,095 (1.64x) / 9,327 (2.10x); quality 6,279 (**0.95x**, quality - exact +290 ms [-649, +1,029],
+CI includes 0) / 8,669 (1.15x) / 12,063 (1.62x).
+
+Reading:
+- **R48**: warmed, speed 9,216 = **1.41x, inside the 1.35-1.50x band**; the tail-only straddle is worth -788 ms
+  against running that chunk exact, so the handoff's "a straddle can at best equal an exact chunk (~1.34x
+  ceiling)" is refuted -- the tail-only chunk is cheaper than an exact one. 16K / 32K are 1.85x / 2.12x, ABOVE
+  the row's +-2% of 1.57x / 1.96x: those targets were taken with the fresh-server protocol, which under-reads
+  every approximate arm. Fresh-server 9,216 is 1.21x (no change from Stage A's 1.22x). The R48 row needs its
+  protocol stated before it can be called; under the warmed protocol 9,216 is in band and 16K/32K are over.
+- **Never slower than exact (quality):** warmed 1.10x / 1.42x / 1.82x, every CI excludes 0 on the fast side --
+  green at these lengths. Fresh server, first requests at 9,216: 0.95x with a CI that includes 0 -- the cold
+  transient is an open edge of the rule. Short prompts are red (next two blocks).
+
+### R96 per straddling chunk (session 4, 07:57-08:10Z, warmed, quiet host)
+The first chunk straddles (N = 4,032 / 3,584 / 3,072 / 2,112 -> 64 / 512 / 1,024 / 1,984 exact rows); the
+second chunk is the prompt's exact remainder in every arm. Settled medians, a / b:
+| arm | 4,032 (64) | 3,584 (512) | 3,072 (1,024) | 2,112 (1,984) |
+|---|---|---|---|---|
+| exact server | 2,535 / 2,532 | 2,480 / 2,481 | 1,919 / 1,920 | 1,292 / 1,291 |
+| quality, guard off (STAGE_ROWS=4096: masked, streamed) | 2,709 / 2,719 | 2,665 / 2,664 | 2,108 / 2,102 | 1,292 / 1,287 |
+| quality, guard (default: 64 streams, the rest the stock step) | 2,710 | 2,907 | 2,327 | 1,515 |
+
+- **Inside an ON server, streaming beats the stock step at every exact-row count measured**: guard off - guard
+  -241 [-257, -227], -220 [-247, -199], -223 [-238, -211] ms. Stage A's R96 reading ("no crossover up to 1,984
+  exact rows") holds per chunk too; the handoff's "R96 is WRONG" is itself refuted.
+- **An ON server is slower than a stock server on short prompts, whatever the guard picks**: guard - exact +174
+  / +426 / +409 / +223 ms (0.85-0.94x); guard off - exact +173 / +185 / +189 / 0. Mechanism (startup lines,
+  every ON server, speed and quality alike): static VRAM 5.25 vs 4.03 GiB a rank (projector, h_S, x_P, scratch),
+  slab slots 15,745 vs 16,880 (-6.7%), so the two prefill staging buffers grow 186.1 -> 213.6 MiB: +27.5 MiB a
+  layer x 48 layers = ~1.3 GB more host-to-device per staged (> 1,024-row) stock chunk, ~+220 ms over rank 1's
+  x4 link -- the size of the guard arm's excess at 512 / 1,024 / 1,984 rows. This is the projector-VRAM
+  residual (Stage E: int8 projector, host placement R80/R127-R129); it also slows every prompt that has no
+  approximable chunk at all (any prompt <= T + one chunk), and would slow OFF requests on a Stage F server. Not a
+  guard problem; flagged for Dylan's list (VRAM placement = "fewer resident experts").
+
+### The guard's trade on a warmed server (session 5, 08:11-08:30Z; exact-c = session 3's exact to 0.1%)
+| arm | 9,216 | 16,384 | 32,768 |
+|---|---|---|---|
+| exact | 5,672 | 9,750 | 19,056 |
+| quality T 2048, guard (session 3) | 5,139 = 1.10x | 6,886 = 1.42x | 10,478 = 1.82x |
+| quality T 2048, guard off (STAGE_ROWS=4096) | 4,807 = **1.18x** | 6,863 = 1.42x | 10,432 = 1.83x |
+| quality T 2560, guard (default) | = exact (0 approximate steps) | = exact | = exact |
+| quality T 2560, STAGE_ROWS=512 | 5,475 = **1.04x** | 7,886 = **1.24x** | 14,018 = **1.36x** |
+
+guard off - guard at 9,216: **-331 ms [-551, -108]** (16K / 32K: no straddle, -24 / -46, CIs include 0); T 2560
+relaxed - exact: -197 [-332, -82], -1,865 [-2,059, -1,638], -5,039 [-5,122, -4,992]. **The guard's premise is
+refuted on a warmed server** (HA1-guard-trade-warm: both kill conditions met): streaming the 1,024-row
+straddle is faster than the stock step it falls back to, and the T 2560 configuration it disables is faster than
+exact at every length. The A.1 premise came from one profiled fresh-server request (late MoE 453 vs 86 ms) and
+Stage A's fresh-server TTFT; on a fresh server the stock step is still faster for the first requests (Stage A:
+masked straddle 0.91x, T 2560 0.86x at 9,216). **Not changed here** -- the threshold (64 / 512 / unlimited, or a
+rule on server warmth, which the plugin cannot see) is the coordinator's / Dylan's decision with these numbers.
+With STAGE_ROWS=512 (or unlimited) R100 is Stage A's headline to the byte: +0.0021 [-0.0126, +0.0157].
 
 # notes/impl.md — IMPL lane: PLAN-FIX v2 Stage A (device mask, row-exact tail, stager lever, guard)
 
@@ -394,12 +540,14 @@ exact-b's median 6,775): read 9,216 ratios with that spread in mind.
 | R51 | **green** (+2048 worse, CI excludes 0; -64 not worse) | §4 session 2 |
 | R36' | **green** | §4 session 3 |
 | R95 | mechanism **green** (per-op wait 21.7 -> ~10.5 ms a late layer; staging bytes return with STAGE=stock); TTFT **1.07x / 1.38x** vs band 1.15-1.20 / 1.25-1.30 (16K under, 32K over) | §4 session 3 |
-| R96 | **measured**: no crossover up to 1,984 exact rows -> threshold "always"; fallback serves byte-identically | §4 session 3 |
-| R48 | **red at 9,216** (1.22x vs 1.35-1.50x: the masked straddling chunk costs more than an exact chunk); 16K 1.56x and 32K 1.97x inside +-2% | §4 sessions 3-4 |
-| R100 | **green** static + engine; headline quality T 2560 last-512 dNLL +0.0021 [-0.0126, +0.0157], KL 0.037, top-1 0.916 | §4 session 2 |
+| R96 | **measured** (whole prompts, Stage A) and **per straddling chunk** (A.1 session 4): inside an ON server streaming beats the stock step at 512 / 1,024 / 1,984 exact rows by ~220-240 ms; A.1's 64-row guard contradicts it on a warmed server (decision pending) | §4 session 3; A.1 |
+| R48 | A.1 (1a524d8): **warmed server 1.41x at 9,216 (in band)**, 16K 1.85x / 32K 2.12x (above the +-2% targets, which were fresh-server numbers); fresh server 1.21x / 1.64x / 2.10x. The row needs its protocol fixed (warmed) before it is called | A.1 |
+| R100 | Stage A headline +0.0021 [-0.0126, +0.0157], KL 0.037, top-1 0.916. **A.1 default: T 2560 runs 0 approximate steps** (capped n_ahead -> 512 exact rows > guard 64 -> every chunk exact); with STAGE_ROWS=512 byte-identical to Stage A and 1.04x / 1.24x / 1.36x warmed | §4 session 2; A.1 |
 | R99 | Stage A part **green** (static grep + 400-request mixed soak, 0 audit failures) | §4 session 4 |
 | DD-B as specified (weightless alternate) | **not implementable** in v1.0.8 (§2); replaced by zero-row probes, same effect | §2 |
 
-**R6/R7 at the final plugin commit**: home data/home-b6979d4 (arch d19c0308…, kva.so 2cfe6699…), `serve.sh off`:
+**R6/R7 at A.1's final plugin commit 1a524d8**: home data/home-1a524d8, `serve.sh off`: ident.sh = R3's six
+hashes; kernel log clean (2026-10-05 05:22Z, evidence/stageA1/session1.log).
+**R6/R7 at Stage A's final plugin commit**: home data/home-b6979d4 (arch d19c0308…, kva.so 2cfe6699…), `serve.sh off`:
 ident.sh = R3's six hashes; kernel log clean (2026-10-05 04:3xZ, evidence/stageA/off-b6979d4.txt). Static
 off == in-tree graph and issue sequence at HEAD (arch_static_test).
