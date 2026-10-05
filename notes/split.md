@@ -1,4 +1,4 @@
-# notes/split.md -- the core/adapter split: progress (account-B worker, 2026-10-05; updated ~20:46Z)
+# notes/split.md -- the core/adapter split: progress (account-B worker, 2026-10-05; updated ~20:49Z)
 
 Executing notes/adapter-split-spec.md on branch `split`, checked out in worktree
 `radiance-kva-wt-b` (the first worktree, `radiance-kva-wt-split`, was outside the directories this
@@ -31,17 +31,19 @@ kva_declare_masked.h (stage-c's decl_hazard, then stage-e's decl_final). After t
 | (cleanup) | 1015dae | the per-header `namespace qwen4exp_kva { using namespace kva; }` trailers removed (kva_declare.h's directive covers every later reopening); guards KVA_*_H | -- |
 | 9 (part) | 251ce01 | tests/core_purity.cmake = ctest `core_headers_name_no_arch` (host label) | SELF-TIGHTENING while the split runs: `KVA_PENDING` lists unconverted headers; fails on a model name outside the list AND on a listed header that became pure. Negative control (append `qwen4exp` to kva_json.h) fails naming the line |
 | (purity) | d59b232 | kva_layer/plan/folder pure (citations reworded) | pending 8 of 15: config, declare, declare_masked, dump, final, guard, hazard, projector |
+| (purity) | 61fe0c2 | the 48 core `radiance: qwen4exp_kva:` prefixes -> `radiance: %s:` of `kva::g_log_name` (new arch/kva_log.h; set by rad_plugin_open before the guard speaks, and by declare) | a global mirror of the `log_name` fact, because the guard/read_config/upload speak with no Kva in scope. Same served text: arch_static's stderr has 283 `radiance: qwen4exp_kva:` lines, 0 `radiance: kva:` |
+| (purity) | 2491088 | kva_guard.h WHY block reworded | pending 4 of 16: kva_declare.h, kva_declare_masked.h, kva_final.h, kva_hazard.h |
 | 10 (part) | 86ae8ba | docs/ADDING-A-MODEL.md + README pointer | written to the interface AS BUILT (check_tensors core, declare_codes hook, int8 ships), with a status line for the step-7 hooks |
 
 ## Remaining (in order)
 
-1. The 8 pending headers. Mostly mechanical: the `radiance: qwen4exp_kva:` log prefixes become
-   `radiance: %s:` of `k.ad.log_name` (same value -- several static cases match refusal text; the
-   guard and read_config run before any adapter, so they take the name as an argument like the
-   stem); kva_hazard.h needs `last_slot` (generic; move it from qwen4exp_blocks.h to the core) and
-   `g_hazard_dev` (move the decl_hazard globals with it); kva_final.h (stage-e's MTP final map) and
-   `decl_selected` still take the model (check_mode's max_tok -> ctx->max_tok after confirming they
-   agree at the real declare; final's `m.hccfg.hc` -> wide / n_embd).
+1. The 4 pending headers. kva_hazard.h: needs `last_slot`/`slot_row` (generic -- move them from
+   qwen4exp_blocks.h into an early core header, since the blocks use them too) and the
+   `g_hazard_dev`/`g_hazard_logged` globals (move them out of kva_declare_masked.h with
+   decl_hazard). kva_final.h (stage-e's MTP final map: `m.hccfg.hc` -> wide / n_embd, `m.g.dtype`
+   -> dtype, the buffers -> facts) and `decl_selected` (check_mode's max_tok -> ctx->max_tok after
+   confirming they agree at the real declare). kva_declare.h / kva_declare_masked.h: the remaining
+   qwen4exp_kva-namespace functions move to kva once they take no model.
 2. Step 7: kva_step.h (derive with `stream_ok` from `routed[]` + `probe_depth`, mask_rows,
    copy_stream, log_pass, single_prefill, misaligned, approximate_step over prologue / stock_layer /
    epilogue hooks, step + stock_step / capture hooks); delete the bridge case.
@@ -55,7 +57,8 @@ kva_declare_masked.h (stage-c's decl_hazard, then stage-e's decl_final). After t
    is not finished, and the build changes with every remaining step.
 
 Every commit above: build (plugin .so + tests) + ctest -LE gpu green (3/3, then 4/4 with the gate)
-+ arch_static 64 cases / 1,125,654 checks green. No GPU used for the split so far.
++ arch_static 64 cases / 1,125,654 checks green. No GPU used for the split so far. Final commit of
+this session: 2491088 (+ this note).
 
 ## Also done this session
 
