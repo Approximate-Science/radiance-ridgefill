@@ -24,6 +24,7 @@
 #define OPD_O(n) { (n), RAD_OPD_IN, 1 }
 #define OUT(n)   { (n), RAD_OPD_OUT, 0 }
 #define INOUT(n) { (n), RAD_OPD_INOUT, 0 }
+#define INOUT_O(n) { (n), RAD_OPD_INOUT, 1 }
 #define WGT(n)   { (n), RAD_OPD_WEIGHT, 0 }
 #define WGT_O(n) { (n), RAD_OPD_WEIGHT, 1 }
 
@@ -37,6 +38,13 @@
 static const RadParamSpec pMask[] = { P_INT("M"), P_F64("share"), P_INT("seed"), P_STR("mode") };
 static const RadOperandSpec oMask[] = { OPD("cu_last"), OPD("token_ids"), OPD("positions"),
                                         WGT_O("score"), OUT("mask"), OUT("bounds") };
+
+static const RadParamSpec pSelect[] = { P_INT("M") };
+static const RadOperandSpec oSelect[] = { OPD("mask"), OPD("x_src"), OPD_O("q_src"), OPD_O("s_src"),
+                                          INOUT("x"), INOUT_O("q"), INOUT_O("s") };
+
+static const RadParamSpec pDrop[] = { P_INT("M"), P_INT("top_k") };
+static const RadOperandSpec oDrop[] = { OPD("mask"), INOUT("ids") };
 
 static const RadParamSpec pRho[] = { P_INT("M"), P_INT("n_head") };
 static const RadOperandSpec oRho[] = { OPD("a"), OPD("mask"), WGT("A_log"), WGT("dt_bias"),
@@ -70,6 +78,19 @@ static const RadOpSchema kSchemas[] = {
   "batch's token index in its sequence (RadBatch::positions), [b] or component-major [c, b] "
   "(row 0 is read, at the operand's strides); only random mode reads it. i32 cu_last, ids, "
   "positions, mask and bounds; f32 score table." },
+{ "kva_select", ARR(pSelect), ARR(oSelect),
+  "Approximated rows take their source's values (KVA, the device mask). n = mask's extent. For "
+  "every row i < n with mask[i] == 1, row i of each present destination is overwritten with row i "
+  "of its source, byte for byte; nothing else is written (rows with any other mask value, rows "
+  "past n, row padding). Pairs (x_src, x), (q_src, q), (s_src, s): x required, q and s optional, "
+  "each pair present or absent together, one dtype and one row width (shape[1]) per pair, any "
+  "dtype of whole bytes (bf16 activations, int8 or E4M3 codes, f32 scales); rank 2, last stride "
+  "1, row pitches off each tensor, at least n rows each. i32 mask." },
+{ "kva_drop_rows", ARR(pDrop), ARR(oDrop),
+  "Approximated rows select nothing (KVA, the device mask). n = mask's extent. For every row "
+  "i < n with mask[i] == 1, ids[i, 0 .. top_k) = -1; nothing else is written (columns >= top_k, "
+  "rows with any other mask value, rows past n). ids i32 [>= n, >= top_k], last stride 1, row "
+  "pitch off the tensor; top_k >= 0. i32 mask." },
 { "kva_rho_update", ARR(pRho), ARR(oRho),
   "The decayed share of approximated rows in each GDN head's state, carried across one "
   "sequence's chunks (KVA quality mode). Per head h, sequentially over the n rows of `a` "
@@ -162,6 +183,21 @@ static int shape_mask(const RadParam* p, int n_p, int operand, RadOpdDesc* out) 
     });
 }
 
+/* Row widths are this description's to choose: a bf16 activation row, odd-width int8 codes and two
+ * f32 scales, so the 16-, 1- and 4-byte copy words are all exercised. */
+static int shape_select(const RadParam* p, int n_p, int operand, RadOpdDesc* out) {
+    const int64_t n = param(p, n_p, "M");
+    const RadOpdDesc x = opd(RAD_BF16, { n, 64 }), q = opd(RAD_I8, { n, 66 });
+    const RadOpdDesc scales = opd(RAD_F32, { n, 2 });
+    return pick(out, operand, { opd_idx({ n }, 2), x, q, scales, x, q, scales });
+}
+
+/* Three columns past top_k, which the op must leave alone; ids index a KV of 4n rows. */
+static int shape_drop(const RadParam* p, int n_p, int operand, RadOpdDesc* out) {
+    const int64_t n = param(p, n_p, "M"), top_k = rad_param_getdim(p, n_p, "top_k", -1);
+    return pick(out, operand, { opd_idx({ n }, 2), opd_idx({ n, top_k >= 0 ? top_k + 3 : 0 }, 4 * n) });
+}
+
 static int shape_rho(const RadParam* p, int n_p, int operand, RadOpdDesc* out) {
     const int64_t n = param(p, n_p, "M"), heads = param(p, n_p, "n_head");
     const int64_t slots = 4;
@@ -224,6 +260,11 @@ static const RadKernelInfo kKernels[] = {
 ROW("kva_mask_host", "kva_mask", "last-sequence window mask, O(w^2) rank counting, the oracle",
     "any n and b", "i32 cu_last / ids / mask / bounds, f32 score", RAD_DOMAIN_HOST, cMaskHost,
     kva_mask_host, shape_mask),
+ROW_NC("kva_select_host", "kva_select", "masked row copy, bytewise, the oracle",
+       "any n and row widths", "any whole-byte dtype per pair, i32 mask", RAD_DOMAIN_HOST,
+       kva_select_host, shape_select),
+ROW_NC("kva_drop_rows_host", "kva_drop_rows", "masked top-k id drop, the oracle",
+       "any n and top_k", "i32 mask / ids", RAD_DOMAIN_HOST, kva_drop_host, shape_drop),
 ROW_NC("kva_rho_update_host", "kva_rho_update", "per-head decayed approximated share, the oracle",
        "any n and n_head", "bf16 or f32 a, i32 mask, f32 A_log / dt_bias / ND", RAD_DOMAIN_HOST,
        kva_rho_host, shape_rho),
@@ -237,6 +278,11 @@ ROW_NC("kva_state_read_host", "kva_state_read", "GDN state slot copy-out, the or
 ROW("kva_mask_device", "kva_mask", "last-sequence window mask in one workgroup, keys in LDS",
     "b up to the LDS key budget (KVA_MASK_MAX_ROWS), any n", "i32 cu_last / ids / mask / bounds, f32 score",
     RAD_DOMAIN_DEVICE, cMaskDevice, kva_mask_device, shape_mask),
+ROW_NC("kva_select_device", "kva_select", "one workgroup per row, 16 / 4 / 1-byte words",
+       "any n and row widths", "any whole-byte dtype per pair, i32 mask", RAD_DOMAIN_DEVICE,
+       kva_select_device, shape_select),
+ROW_NC("kva_drop_rows_device", "kva_drop_rows", "one workgroup per row",
+       "any n and top_k", "i32 mask / ids", RAD_DOMAIN_DEVICE, kva_drop_device, shape_drop),
 ROW_NC("kva_rho_update_device", "kva_rho_update", "one thread a head, sequential over the rows",
        "any n and n_head", "bf16 or f32 a, i32 mask, f32 A_log / dt_bias / ND", RAD_DOMAIN_DEVICE,
        kva_rho_device, shape_rho),
@@ -260,9 +306,10 @@ static const RadPluginInfo kInfo = {
     "kva",
     "0.1.0",
     "KVA / RidgeFill prefill ops: kva_mask (which rows of the last sequence run exact, on the "
-    "device), kva_rho_update (decayed approximated share per GDN head), kva_state_correct (GDN "
-    "terminal-state correction), kva_state_read (GDN state slot copy-out for the correction "
-    "refit). A host row (the oracle) and, in a HIP build, a device row each.",
+    "device), kva_select (approximated rows take their source rows), kva_drop_rows (approximated "
+    "rows select no ids), kva_rho_update (decayed approximated share per GDN head), "
+    "kva_state_correct (GDN terminal-state correction), kva_state_read (GDN state slot copy-out "
+    "for the correction refit). A host row (the oracle) and, in a HIP build, a device row each.",
     KVA_BUILD_TARGET
 };
 

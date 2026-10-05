@@ -42,6 +42,11 @@ enum { MK_CU = 0, MK_TOKENS, MK_POS, MK_SCORE, MK_MASK, MK_BOUNDS };
 enum { RH_A = 0, RH_MASK, RH_ALOG, RH_DTBIAS, RH_ND, RH_SIDX, RH_BOUNDS };
 enum { SC_STATE = 0, SC_STATE_IDX, SC_APPLIED, SC_APPLIED_IDX, SC_C, SC_ND, SC_ND_IDX, SC_BOUNDS };
 enum { SR_STATE = 0, SR_STATE_IDX, SR_OUT };
+enum { SL_MASK = 0, SL_X_SRC, SL_Q_SRC, SL_S_SRC, SL_X, SL_Q, SL_S };
+enum { DR_MASK = 0, DR_IDS };
+
+/* kva_select's (source, destination) pairs: x, then the optional q codes and s scales. */
+enum { KVA_SELECT_PAIRS = 3 };
 
 /* ---------------------------------------------------------------- the shared definitions */
 
@@ -192,6 +197,29 @@ typedef struct KvaStateRead {
     int64_t        n_seq, n_head, sd0, sd1;
 } KvaStateRead;
 
+/* One kva_select pair, in BYTES (the op is dtype-agnostic). `word` is the widest load -- 16, 4
+ * or 1 bytes -- that every address, pitch and row width of the pair is a multiple of; 0 = the pair
+ * is absent. */
+typedef struct KvaCopy {
+    const unsigned char* src;
+    unsigned char*       dst;
+    int64_t              src_pitch, dst_pitch, row_bytes;
+    int                  word;
+} KvaCopy;
+
+/* kva_select: on every row i < n with mask[i] == 1, each present pair's destination row is
+ * overwritten with its source row. */
+typedef struct KvaSelect {
+    const int32_t* mask;    int64_t n;
+    KvaCopy        pair[KVA_SELECT_PAIRS];
+} KvaSelect;
+
+/* kva_drop_rows: on every row i < n with mask[i] == 1, ids[i, 0 .. top_k) = -1. */
+typedef struct KvaDrop {
+    const int32_t* mask;    int64_t n;
+    int32_t*       ids;     int64_t pitch, top_k;
+} KvaDrop;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -201,18 +229,24 @@ int kva_mask_parse(const RadArgs* a, KvaMask* out);
 int kva_rho_parse(const RadArgs* a, KvaRho* out);
 int kva_correct_parse(const RadArgs* a, KvaCorrect* out);
 int kva_state_read_parse(const RadArgs* a, KvaStateRead* out);
+int kva_select_parse(const RadArgs* a, KvaSelect* out);
+int kva_drop_parse(const RadArgs* a, KvaDrop* out);
 
 /* host_ref.cpp: the host rows (oracles). */
 int kva_mask_host(const RadArgs* a, RadStream s);
 int kva_rho_host(const RadArgs* a, RadStream s);
 int kva_correct_host(const RadArgs* a, RadStream s);
 int kva_state_read_host(const RadArgs* a, RadStream s);
+int kva_select_host(const RadArgs* a, RadStream s);
+int kva_drop_host(const RadArgs* a, RadStream s);
 
-/* mask.hip, rho.hip, state_correct.hip: the device rows. */
+/* mask.hip, rho.hip, state_correct.hip, select.hip: the device rows. */
 int kva_mask_device(const RadArgs* a, RadStream s);
 int kva_rho_device(const RadArgs* a, RadStream s);
 int kva_correct_device(const RadArgs* a, RadStream s);
 int kva_state_read_device(const RadArgs* a, RadStream s);
+int kva_select_device(const RadArgs* a, RadStream s);
+int kva_drop_device(const RadArgs* a, RadStream s);
 
 #ifdef __cplusplus
 }

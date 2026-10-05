@@ -211,6 +211,67 @@ extern "C" int kva_state_read_parse(const RadArgs* a, KvaStateRead* g) {
     return RAD_OK;
 }
 
+/* The widest word (16, 4 or 1 bytes) that every address, pitch and row width of a pair is a
+ * multiple of. The device row copies in such words: a byte at a time would be 16x the loads on a
+ * bf16 activation row, the bulk of what the op moves. */
+static int copy_word(const KvaCopy& p) {
+    const uint64_t all = (uint64_t)(uintptr_t)p.src | (uint64_t)(uintptr_t)p.dst |
+                         (uint64_t)p.src_pitch | (uint64_t)p.dst_pitch | (uint64_t)p.row_bytes;
+    return all % 16 == 0 ? 16 : (all % 4 == 0 ? 4 : 1);
+}
+
+/* One kva_select pair: present or absent together, one dtype of whole bytes, one row width
+ * (shape[1]), last stride 1, at least n rows each; the row pitches come off each tensor. */
+static int select_pair(const RadTensor* src, const RadTensor* dst, int64_t n, KvaCopy* p) {
+    *p = KvaCopy{};
+    if (!src && !dst) return RAD_OK;
+    if (!src || !dst) return RAD_E_INVAL;
+    const int bits = rad_dtype_bits(src->dtype);
+    if (dst->dtype != src->dtype || bits <= 0 || bits % 8 != 0) return RAD_E_DTYPE;
+    if (src->rank != 2 || dst->rank != 2 || src->shape[1] != dst->shape[1] || src->shape[0] < n ||
+        dst->shape[0] < n) return RAD_E_SHAPE;
+    if (src->stride[1] != 1 || dst->stride[1] != 1) return RAD_E_STRIDE;
+    const int64_t bytes = bits / 8;
+    p->src = (const unsigned char*)src->data;
+    p->dst = (unsigned char*)dst->data;
+    p->src_pitch = src->stride[0] * bytes;
+    p->dst_pitch = dst->stride[0] * bytes;
+    p->row_bytes = src->shape[1] * bytes;
+    p->word = copy_word(*p);
+    return RAD_OK;
+}
+
+extern "C" int kva_select_parse(const RadArgs* a, KvaSelect* g) {
+    const RadTensor* mask = rad_arg_in(a, SL_MASK);
+    if (!mask || !rad_arg_in(a, SL_X_SRC) || !rad_arg_in(a, SL_X)) return RAD_E_INVAL;
+    if (mask->dtype != RAD_I32) return RAD_E_DTYPE;
+    if (!dense(mask)) return RAD_E_STRIDE;
+    g->mask = (const int32_t*)mask->data;
+    g->n = rad_tensor_numel(mask);
+    for (int k = 0; k < KVA_SELECT_PAIRS; ++k) {
+        const int rc = select_pair(rad_arg_in(a, SL_X_SRC + k), rad_arg_in(a, SL_X + k), g->n,
+                                   &g->pair[k]);
+        if (rc != RAD_OK) return rc;
+    }
+    return RAD_OK;
+}
+
+extern "C" int kva_drop_parse(const RadArgs* a, KvaDrop* g) {
+    const RadTensor* mask = rad_arg_in(a, DR_MASK);
+    const RadTensor* ids = rad_arg_in(a, DR_IDS);
+    long long top_k = -1;
+    if (!mask || !ids || !rad_args_geti(a, "top_k", &top_k) || top_k < 0) return RAD_E_INVAL;
+    if (mask->dtype != RAD_I32 || ids->dtype != RAD_I32) return RAD_E_DTYPE;
+    if (!dense(mask) || (ids->rank == 2 && ids->stride[1] != 1)) return RAD_E_STRIDE;
+    g->n = rad_tensor_numel(mask);
+    if (ids->rank != 2 || ids->shape[0] < g->n || ids->shape[1] < top_k) return RAD_E_SHAPE;
+    g->mask = (const int32_t*)mask->data;
+    g->ids = (int32_t*)ids->data;
+    g->pitch = ids->stride[0];
+    g->top_k = top_k;
+    return RAD_OK;
+}
+
 /* ================================================================== kva_mask */
 
 /* How many rows of the window rank before window row j, by the mode's key. */
@@ -332,5 +393,29 @@ extern "C" int kva_state_read_host(const RadArgs* a, RadStream) {
                                  : 0.0f;
                 }
     }
+    return RAD_OK;
+}
+
+/* ================================================================== kva_select, kva_drop_rows */
+
+extern "C" int kva_select_host(const RadArgs* a, RadStream) {
+    KvaSelect g{};
+    const int rc = kva_select_parse(a, &g);
+    if (rc != RAD_OK) return rc;
+    for (int64_t i = 0; i < g.n; ++i)
+        for (int k = 0; k < KVA_SELECT_PAIRS && g.mask[i] == 1; ++k) {
+            const KvaCopy& p = g.pair[k];
+            /* memmove: a destination may be its own source, which is a no-op copy. */
+            if (p.word) std::memmove(p.dst + i * p.dst_pitch, p.src + i * p.src_pitch, (size_t)p.row_bytes);
+        }
+    return RAD_OK;
+}
+
+extern "C" int kva_drop_host(const RadArgs* a, RadStream) {
+    KvaDrop g{};
+    const int rc = kva_drop_parse(a, &g);
+    if (rc != RAD_OK) return rc;
+    for (int64_t i = 0; i < g.n; ++i)
+        for (int64_t j = 0; j < g.top_k && g.mask[i] == 1; ++j) g.ids[i * g.pitch + j] = -1;
     return RAD_OK;
 }

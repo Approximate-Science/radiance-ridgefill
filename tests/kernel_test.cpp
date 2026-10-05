@@ -267,6 +267,8 @@ static Buf from_desc(const RadOpdDesc& d, int64_t prev_extent, int64_t m, Rng& r
 static std::vector<RadParam> described_params(const char* op) {
     if (!std::strcmp(op, "kva_mask"))
         return { pint("M", 64), pf64("share", 0.25), pint("seed", 7), pstr("mode", "class") };
+    if (!std::strcmp(op, "kva_select")) return { pint("M", 37) };
+    if (!std::strcmp(op, "kva_drop_rows")) return { pint("M", 37), pint("top_k", 5) };
     if (!std::strcmp(op, "kva_rho_update")) return { pint("M", 48), pint("n_head", 4) };
     if (!std::strcmp(op, "kva_state_read"))
         return { pint("M", 3), pint("n_head", 2), pint("sd0", 8), pint("sd1", 8) };
@@ -294,8 +296,8 @@ static bool described_operands(const RadKernelInfo* row, const std::vector<RadPa
     return true;
 }
 
-static const char* const kOps[] = { "kva_mask", "kva_rho_update", "kva_state_correct",
-                                    "kva_state_read" };
+static const char* const kOps[] = { "kva_mask", "kva_select", "kva_drop_rows", "kva_rho_update",
+                                    "kva_state_correct", "kva_state_read" };
 
 /* Rows whose launch is still a stub (R8). Emptied as each row was implemented (all six were stubs
  * at the Stage 1 commit, 43bfeda); with none left the case skips and says R8 is retired. */
@@ -368,6 +370,21 @@ TEST(described_operands_launch, "both") {
     if (implemented == 0) skip("every row in this domain is still a stub");
 }
 
+/* R98: no parameter of any schema carries RAD_PROLE_SEQ_CHUNK (the scheduler would cut steps on
+ * it), and with `cap` gone none carries RAD_PROLE_CAPACITY either. */
+TEST(params_carry_no_role, "both") {
+    if (!group_runnable()) return;
+    for (int i = 0; i < g_schema_count(); ++i) {
+        const RadOpSchema* sc = g_schema_at(i);
+        for (int j = 0; j < sc->n_params; ++j) {
+            const int role = sc->params[j].role;
+            CHECK(role == RAD_PROLE_NONE || role == RAD_PROLE_CAPACITY);   /* R98 as written */
+            CHECK_EQ(role, RAD_PROLE_NONE);                                 /* and in fact none */
+        }
+    }
+    CHECK_EQ(g_schema_count(), (int)(sizeof kOps / sizeof kOps[0]));
+}
+
 /* ================================================================== op runners
  * Each builds one op's operands from plain vectors, runs the given row (host or device, by its
  * domain), and hands back the outputs. Output buffers start as a sentinel, so a row that leaves an
@@ -431,6 +448,61 @@ static bool mask_shaped(const MaskOut& o, int32_t s, int32_t end, int32_t e) {
     for (size_t i = 0; i < o.mask.size(); ++i)
         if (o.mask[i] != 0 && (o.mask[i] != 1 || (int64_t)i < s || (int64_t)i >= end)) return false;
     return o.bounds == std::vector<int32_t>{ s, end, end, e };
+}
+
+/* kva_select's operands: sources filled with a pattern, destinations with a sentinel byte, so a
+ * byte the op should not write shows. A pair whose source is an empty Buf is passed absent. */
+struct SelectRun { Buf mask, xs, qs, ss, x, q, s; };
+
+static void fill_pattern(Buf& b, int tag) {
+    for (size_t i = 0; i < b.bytes.size(); ++i) b.bytes[i] = (unsigned char)(tag * 31 + i * 7 + 1);
+}
+
+static void fill_sentinel(Buf& b) { std::fill(b.bytes.begin(), b.bytes.end(), (unsigned char)0xA5); }
+
+static int run_select(const RadKernelInfo* row, SelectRun& k) {
+    auto opd = [](Buf& b) { return b.t.data ? &b : nullptr; };
+    return run_group(row, { &k.mask, &k.xs, opd(k.qs), opd(k.ss), &k.x, opd(k.q), opd(k.s) },
+                     { pint("M", k.mask.t.shape[0]) });
+}
+
+/* After kva_select: every destination byte is its source's on rows i < n with mask[i] == 1 inside
+ * the row width, and what it was before everywhere else (padding, rows past n, other mask values). */
+static bool selected_exactly(const Buf& src, const Buf& before, const Buf& after,
+                             const std::vector<int32_t>& mask) {
+    const int64_t bytes = rad_dtype_bytes(src.t.dtype, 1), width = src.t.shape[1] * bytes;
+    const int64_t src_pitch = src.t.stride[0] * bytes, dst_pitch = before.t.stride[0] * bytes;
+    if (after.bytes.size() != before.bytes.size()) return false;
+    for (size_t at = 0; at < after.bytes.size(); ++at) {
+        const int64_t row = (int64_t)at / dst_pitch, col = (int64_t)at % dst_pitch;
+        const bool copied = row < (int64_t)mask.size() && mask[(size_t)row] == 1 && col < width;
+        if (after.bytes[at] != (copied ? src.bytes[(size_t)(row * src_pitch + col)] : before.bytes[at]))
+            return false;
+    }
+    return true;
+}
+
+static Buf mask_buf(const std::vector<int32_t>& mask) {
+    Buf m = make(RAD_I32, { (int64_t)mask.size() });
+    for (size_t i = 0; i < mask.size(); ++i) seti(m, (int64_t)i, mask[i]);
+    return m;
+}
+
+static int run_drop(const RadKernelInfo* row, Buf& mask, Buf& ids, long long top_k) {
+    return run_group(row, { &mask, &ids }, { pint("M", mask.t.shape[0]), pint("top_k", top_k) });
+}
+
+/* After kva_drop_rows: -1 exactly on columns < top_k of rows i < n with mask[i] == 1, every other
+ * element (columns >= top_k, padding, rows past n) as before. */
+static bool dropped_exactly(const Buf& before, const Buf& after, const std::vector<int32_t>& mask,
+                            int64_t top_k) {
+    const int64_t pitch = before.t.stride[0];
+    for (int64_t at = 0; at < (int64_t)after.bytes.size() / 4; ++at) {
+        const int64_t row = at / pitch, col = at % pitch;
+        const bool dropped = row < (int64_t)mask.size() && mask[(size_t)row] == 1 && col < top_k;
+        if (geti(after, at) != (dropped ? -1 : geti(before, at))) return false;
+    }
+    return true;
 }
 
 struct RhoRun {
@@ -932,6 +1004,94 @@ TEST(rho_in_unit_interval, "host") {
     }
 }
 
+/* kva_select copies exactly the mask==1 rows of a bf16 x, int8 q and f32 s pair -- padded row
+ * pitches that differ between source and destination, destinations with more rows than n, mask
+ * values other than 0 and 1 -- and no other byte; the sources are left alone; absent q and s
+ * pairs leave x's copy unchanged. */
+TEST(select_copies_masked_rows, "host") {
+    const RadKernelInfo* row = find_row("kva_select", RAD_DOMAIN_HOST);
+    REQUIRE(row != nullptr);
+    const std::vector<int32_t> mask = { 1, 0, 1, 1, 2, 0, -1, 1, 0 };   /* only 1 copies */
+    const int64_t n = (int64_t)mask.size();
+    SelectRun k{ mask_buf(mask),
+                 make(RAD_BF16, { n, 5 }, { 6, 1 }), make(RAD_I8, { n + 1, 7 }),
+                 make(RAD_F32, { n, 2 }, { 3, 1 }),
+                 make(RAD_BF16, { n + 2, 5 }, { 8, 1 }), make(RAD_I8, { n, 7 }, { 9, 1 }),
+                 make(RAD_F32, { n + 3, 2 }) };
+    fill_pattern(k.xs, 1); fill_pattern(k.qs, 2); fill_pattern(k.ss, 3);
+    fill_sentinel(k.x); fill_sentinel(k.q); fill_sentinel(k.s);
+    const SelectRun before = k;
+    CHECK_EQ(run_select(row, k), RAD_OK);
+    CHECK(selected_exactly(k.xs, before.x, k.x, mask));
+    CHECK(selected_exactly(k.qs, before.q, k.q, mask));
+    CHECK(selected_exactly(k.ss, before.s, k.s, mask));
+    CHECK(k.x.bytes != before.x.bytes);
+    CHECK(k.xs.bytes == before.xs.bytes && k.qs.bytes == before.qs.bytes && k.ss.bytes == before.ss.bytes);
+    SelectRun x_only = before;
+    x_only.qs = x_only.ss = x_only.q = x_only.s = Buf{};
+    CHECK_EQ(run_select(row, x_only), RAD_OK);
+    CHECK(x_only.x.bytes == k.x.bytes);
+}
+
+/* kva_drop_rows writes -1 on exactly the top_k first columns of the mask==1 rows (a padded pitch,
+ * columns past top_k, a row past n, mask values other than 0 and 1 all untouched); top_k 0 writes
+ * nothing; top_k equal to the width is accepted. */
+TEST(drop_rows_semantics, "host") {
+    const RadKernelInfo* row = find_row("kva_drop_rows", RAD_DOMAIN_HOST);
+    REQUIRE(row != nullptr);
+    const std::vector<int32_t> mask = { 1, 0, 1, 2, -1, 1 };
+    Buf m = mask_buf(mask), ids = make(RAD_I32, { 7, 8 }, { 10, 1 });
+    for (int64_t i = 0; i < (int64_t)ids.bytes.size() / 4; ++i) seti(ids, i, (int32_t)(100 + i));
+    const Buf before = ids;
+    CHECK_EQ(run_drop(row, m, ids, 5), RAD_OK);
+    CHECK(dropped_exactly(before, ids, mask, 5));
+    CHECK(ids.bytes != before.bytes);
+    Buf none = before, full = before;
+    CHECK_EQ(run_drop(row, m, none, 0), RAD_OK);
+    CHECK(none.bytes == before.bytes);
+    CHECK_EQ(run_drop(row, m, full, 8), RAD_OK);
+    CHECK(dropped_exactly(before, full, mask, 8));
+}
+
+/* Refusals of the two row-copy ops, by name; the parse is shared with the device rows. */
+TEST(select_drop_refuse_bad_operands, "both") {
+    if (!group_runnable()) return;
+    const RadKernelInfo* sl = find_row("kva_select", group_domain());
+    const RadKernelInfo* dr = find_row("kva_drop_rows", group_domain());
+    REQUIRE(sl && dr);
+    Buf m = mask_buf({ 1, 0, 1 }), m_f32 = make(RAD_F32, { 3 });
+    Buf x = make(RAD_BF16, { 3, 4 }), x_f32 = make(RAD_F32, { 3, 4 }), x_wide = make(RAD_BF16, { 3, 5 });
+    Buf x_short = make(RAD_BF16, { 2, 4 }), x_gap = make(RAD_BF16, { 3, 4 }, { 8, 2 });
+    Buf x_rank3 = make(RAD_BF16, { 3, 4, 1 }), x_i4 = make(RAD_I4, { 3, 4 }), q = make(RAD_I8, { 3, 6 });
+    const std::vector<RadParam> p = { pint("M", 3) };
+    CHECK_EQ(run_group(sl, { &m, &x, nullptr, nullptr, &x, nullptr, nullptr }, p), RAD_OK);
+    CHECK_EQ(run_group(sl, { nullptr, &x, nullptr, nullptr, &x, nullptr, nullptr }, p), RAD_E_INVAL);
+    CHECK_EQ(run_group(sl, { &m, nullptr, nullptr, nullptr, &x, nullptr, nullptr }, p), RAD_E_INVAL);
+    CHECK_EQ(run_group(sl, { &m, &x, nullptr, nullptr, nullptr, nullptr, nullptr }, p), RAD_E_INVAL);
+    CHECK_EQ(run_group(sl, { &m, &x, &q, nullptr, &x, nullptr, nullptr }, p), RAD_E_INVAL);   /* half a pair */
+    CHECK_EQ(run_group(sl, { &m, &x, nullptr, nullptr, &x, &q, nullptr }, p), RAD_E_INVAL);
+    CHECK_EQ(run_group(sl, { &m_f32, &x, nullptr, nullptr, &x, nullptr, nullptr }, p), RAD_E_DTYPE);
+    CHECK_EQ(run_group(sl, { &m, &x, nullptr, nullptr, &x_f32, nullptr, nullptr }, p), RAD_E_DTYPE);
+    CHECK_EQ(run_group(sl, { &m, &x_i4, nullptr, nullptr, &x_i4, nullptr, nullptr }, p), RAD_E_DTYPE);
+    CHECK_EQ(run_group(sl, { &m, &x, nullptr, nullptr, &x_wide, nullptr, nullptr }, p), RAD_E_SHAPE);
+    CHECK_EQ(run_group(sl, { &m, &x, nullptr, nullptr, &x_short, nullptr, nullptr }, p), RAD_E_SHAPE);
+    CHECK_EQ(run_group(sl, { &m, &x_short, nullptr, nullptr, &x, nullptr, nullptr }, p), RAD_E_SHAPE);
+    CHECK_EQ(run_group(sl, { &m, &x_rank3, nullptr, nullptr, &x_rank3, nullptr, nullptr }, p), RAD_E_SHAPE);
+    CHECK_EQ(run_group(sl, { &m, &x, nullptr, nullptr, &x_gap, nullptr, nullptr }, p), RAD_E_STRIDE);
+    Buf ids = make(RAD_I32, { 3, 8 }), ids_short = make(RAD_I32, { 2, 8 }), ids_f32 = make(RAD_F32, { 3, 8 });
+    Buf ids_gap = make(RAD_I32, { 3, 8 }, { 16, 2 }), ids_flat = make(RAD_I32, { 24 });
+    CHECK_EQ(run_drop(dr, m, ids, 8), RAD_OK);
+    CHECK_EQ(run_drop(dr, m, ids, 9), RAD_E_SHAPE);          /* top_k past the width */
+    CHECK_EQ(run_drop(dr, m, ids, -1), RAD_E_INVAL);
+    CHECK_EQ(run_group(dr, { &m, &ids }, { pint("M", 3) }), RAD_E_INVAL);   /* no top_k */
+    CHECK_EQ(run_group(dr, { nullptr, &ids }, { pint("M", 3), pint("top_k", 2) }), RAD_E_INVAL);
+    CHECK_EQ(run_drop(dr, m, ids_short, 2), RAD_E_SHAPE);
+    CHECK_EQ(run_drop(dr, m, ids_flat, 2), RAD_E_SHAPE);
+    CHECK_EQ(run_drop(dr, m, ids_f32, 2), RAD_E_DTYPE);
+    CHECK_EQ(run_drop(dr, m_f32, ids, 2), RAD_E_DTYPE);
+    CHECK_EQ(run_drop(dr, m, ids_gap, 2), RAD_E_STRIDE);
+}
+
 /* kva_rho_update with bounds {s, ..} equals the op without bounds on rows [s, n) alone, bit for
  * bit, with N and D carried in from an earlier chunk; bounds[0] clamps into [0, n] (below 0: every
  * row; at or past n: N and D written back untouched). */
@@ -1423,6 +1583,68 @@ TEST(state_correct_bounds_device_matches_host, "gpu") {
             ++runs;
         }
     std::fprintf(stderr, "  %d runs (undo/apply x absent/empty/inverted/non-empty bounds): device == host bytewise\n", runs);
+}
+
+/* kva_select's device leg: device == host on every destination byte, over random masks (a few
+ * non-0/1 values), padded pitches, rows past n, every copy word (16-byte bf16 rows, odd-width
+ * int8 / E4M3 codes, 3-wide f32 scales) and absent q / s pairs; and exactly the mask==1 rows. */
+TEST(select_device_matches_host, "gpu") {
+    if (!group_runnable()) return;
+    const RadKernelInfo* dev = find_row("kva_select", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("kva_select", RAD_DOMAIN_HOST);
+    REQUIRE(dev && host);
+    Rng r{ 111 };
+    int runs = 0;
+    size_t bytes = 0;
+    for (int64_t n : { 1, 300, 8192 })
+        for (int variant = 0; variant < 3; ++variant) {
+            std::vector<int32_t> mask((size_t)n);
+            const double exact = r.uniform();
+            for (int32_t& v : mask) v = r.uniform() < 0.02 ? 2 : (r.uniform() < exact ? 0 : 1);
+            const uint32_t codes = variant == 1 ? RAD_F8E4M3 : RAD_I8;
+            const int64_t x_w = 64 * (1 + variant), q_w = 33 + 16 * variant;
+            SelectRun k{ mask_buf(mask), make(RAD_BF16, { n, x_w }, { x_w + 8, 1 }),
+                         make(codes, { n, q_w }), make(RAD_F32, { n + 1, 3 }),
+                         make(RAD_BF16, { n + 1, x_w }), make(codes, { n, q_w }, { q_w + 5, 1 }),
+                         make(RAD_F32, { n, 3 }, { 4, 1 }) };
+            fill_pattern(k.xs, 4 + variant); fill_pattern(k.qs, 5); fill_pattern(k.ss, 6);
+            fill_sentinel(k.x); fill_sentinel(k.q); fill_sentinel(k.s);
+            if (variant == 2) k.qs = k.ss = k.q = k.s = Buf{};
+            SelectRun h = k, d = k;
+            CHECK_EQ(run_select(host, h), RAD_OK);
+            CHECK_EQ(run_select(dev, d), RAD_OK);
+            CHECK(d.x.bytes == h.x.bytes && d.q.bytes == h.q.bytes && d.s.bytes == h.s.bytes);
+            CHECK(selected_exactly(k.xs, k.x, d.x, mask));
+            if (variant != 2) CHECK(selected_exactly(k.qs, k.q, d.q, mask) && selected_exactly(k.ss, k.s, d.s, mask));
+            bytes += d.x.bytes.size() + d.q.bytes.size() + d.s.bytes.size();
+            ++runs;
+        }
+    std::fprintf(stderr, "  %d configurations, %zu destination bytes: device == host bytewise\n", runs, bytes);
+}
+
+/* kva_drop_rows' device leg: device == host on every ids element over random masks, top_k from 0
+ * to past a workgroup's width, padded pitches, rows past n. */
+TEST(drop_rows_device_matches_host, "gpu") {
+    if (!group_runnable()) return;
+    const RadKernelInfo* dev = find_row("kva_drop_rows", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("kva_drop_rows", RAD_DOMAIN_HOST);
+    REQUIRE(dev && host);
+    Rng r{ 121 };
+    int runs = 0;
+    for (int64_t n : { 1, 300, 8192 })
+        for (int64_t top_k : { 0, 1, 7, 300 }) {
+            std::vector<int32_t> mask((size_t)n);
+            for (int32_t& v : mask) v = r.uniform() < 0.02 ? 2 : (r.uniform() < 0.3 ? 0 : 1);
+            Buf m = mask_buf(mask), ids = make(RAD_I32, { n + 1, top_k + 4 }, { top_k + 7, 1 });
+            for (int64_t i = 0; i < (int64_t)ids.bytes.size() / 4; ++i) seti(ids, i, (int32_t)r.below(1 << 20));
+            Buf h = ids, d = ids;
+            CHECK_EQ(run_drop(host, m, h, top_k), RAD_OK);
+            CHECK_EQ(run_drop(dev, m, d, top_k), RAD_OK);
+            CHECK(d.bytes == h.bytes);
+            CHECK(dropped_exactly(ids, d, mask, top_k));
+            ++runs;
+        }
+    std::fprintf(stderr, "  %d configurations: device ids == host bytewise\n", runs);
 }
 
 /* ================================================================== main */
