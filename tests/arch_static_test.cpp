@@ -418,12 +418,26 @@ void served(RadBuilder& b) {
 
 /* setenv for one case, undone on scope exit, so cases cannot leak switches into each other. */
 struct Env {
-    std::vector<std::string> set;
-    Env(std::initializer_list<std::pair<const char*, const char*>> kv) {
-        for (const auto& [k, v] : kv) { setenv(k, v, 1); set.push_back(k); }
+    std::vector<std::pair<std::string, std::string>> saved;   /* name, value before ("\x01" = unset) */
+    Env(std::initializer_list<std::pair<const char*, const char*>> kv) {   /* a null value unsets */
+        for (const auto& [k, v] : kv) {
+            const char* old = std::getenv(k);
+            saved.push_back({k, old ? old : "\x01"});
+            if (v) setenv(k, v, 1);
+            else   unsetenv(k);
+        }
     }
-    ~Env() { for (const auto& k : set) unsetenv(k.c_str()); }
+    ~Env() {
+        for (auto it = saved.rbegin(); it != saved.rend(); ++it)
+            if (it->second == "\x01") unsetenv(it->first.c_str());
+            else                       setenv(it->first.c_str(), it->second.c_str(), 1);
+    }
 };
+
+/* The static cases run chunks of 64 to 2,048 rows; the planner's default gate (RADIANCE_KVA_MIN_BULK_ROWS,
+ * 1,024 bulk rows: a host-streamed projector's fixed cost) would send the small ones to the stock step. The
+ * suite runs with it off, as it did before the gate; the gate and its default are their own case. */
+[[maybe_unused]] const int g_min_bulk_off = setenv("RADIANCE_KVA_MIN_BULK_ROWS", "0", 1);
 
 /* What a call wrote to stderr: the refusals are fprintf'd, as the in-tree plugin's are. */
 std::string stderr_of(const std::function<void()>& fn) {
@@ -829,7 +843,7 @@ TEST(the_maps_live_in_host_mapped_memory) {
     }
     CHECK(u.host_bytes >= (int64_t)(8 - kSplit) * (2561LL * 10240 * 2) + 3 * (24LL * 128 * 128 * 4) + 248320 * 4);
     CHECK_EQ(u.vram_bytes, 2561LL * 10240 * 2);   /* the ring's one slot, nothing else */
-    CHECK(has(log, "MiB host-mapped (bf16 maps)"));
+    CHECK(has(log, "MiB host-mapped (bf16 maps, correction, row table)"));
     CHECK((uintptr_t)k.st[kSplit].raw >= (uintptr_t)u.host + kDeviceView && (uintptr_t)k.score.raw >= (uintptr_t)u.host + kDeviceView);
 }
 
@@ -1063,7 +1077,7 @@ TEST(a_host_placed_projector_approximates_only_passes_with_enough_bulk_rows) {
         CHECK_EQ(plan_pass(in, pc).path, c.path);
     }
     {
-        Env e({{"RADIANCE_KVA", "quality"}});
+        Env e({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_MIN_BULK_ROWS", nullptr}});
         Config cfg;
         RadModelMeta meta = flash_next_meta();
         REQUIRE_EQ(read_config(&meta, &cfg), RAD_OK);
@@ -2725,7 +2739,7 @@ TEST(an_int8_folder_uploads_its_maps_in_the_gemms_stored_form) {
         CHECK(relaid(block + scale_at, g_test_folder.tensors["proj." + L + ".scale"].data, 2560LL * 80 * 2));
         CHECK(std::memcmp(block + bias_at, g_test_folder.tensors["proj." + L + ".bias"].data, 5120) == 0);
     }
-    CHECK(has(log, "(int8 maps)"));
+    CHECK(has(log, "(int8 maps, correction, row table)"));
     CHECK(kva.notes.size() && has(kva.notes.back(), "(int8, streamed from host)"));
 }
 
@@ -3082,6 +3096,43 @@ void write_folder(const std::filesystem::path& dir, const std::string& files_ove
     std::ofstream(dir / "kva.json") << "{\"format\": 1, \"files\": " << files << "}";
 }
 
+
+/* THE STRADDLE'S DOWNGRADE IS SAID AT STARTUP (orchestrator, Stage E): speed's tail-only straddle needs every
+ * late attention layer's per-row sparse form; without it straddle chunks take the masked path, which only each
+ * step log's path field showed. A container with no indexer (indexer_n_heads 0) declares no selection: one line
+ * names layer 7, the missing piece and the consequence, in speed only; the published geometry says nothing. */
+RadModelMeta flash_next_meta_without_indexer() {
+    static std::vector<const char*> vals;
+    if (vals.empty()) {
+        vals.assign(kVals, kVals + kN);
+        for (int i = 0; i < kN; ++i)
+            if (!std::strcmp(kKeys[i], "indexer_n_heads")) vals[(size_t)i] = "0";
+    }
+    RadModelMeta m = flash_next_meta();
+    m.kv_val = vals.data();
+    return m;
+}
+
+TEST(a_speed_straddle_downgraded_at_declare_is_said_once_at_startup) {
+    for (bool indexer : {true, false})
+        for (const char* mode : {"speed", "quality"}) {
+            RadModelMeta meta = indexer ? flash_next_meta() : flash_next_meta_without_indexer();
+            RadBuildCtx c = served_ctx();
+            RadBuilder kva;
+            served(kva);
+            hold_kva(kva, {"kva.proj", "kva.st"});
+            hold_score(kva, "kva.rowsel.score");
+            Env env({{"RADIANCE_KVA", mode}});
+            int st = RAD_OK;
+            const std::string log = stderr_of([&] { st = qwen4exp_kva::declare(&kva, &meta, &c); });
+            REQUIRE_EQ(st, RAD_OK);
+            const bool speed = !std::strcmp(mode, "speed");
+            CHECK_EQ(qwen4exp_kva::g_kva[0].straddle_layers, speed && indexer);
+            CHECK_EQ(qwen4exp_kva::straddle_missing(qwen4exp_fp8::g_model[0].layers[7].attn) == nullptr, indexer);
+            CHECK_EQ(count(log, "takes the masked path for straddle chunks"), speed && !indexer ? 1 : 0);
+            if (speed && !indexer) CHECK(has(log, "late attention layer 7 lacks the indexer's selection (qsa_sel)"));
+        }
+}
 
 /* R74 and R76's static half -- MEDIA STEPS RUN STOCK, AND THE TEXT AFTER AN IMAGE RESUMES (PLAN-FIX §6.3), on
  * the published container's geometry for pictures: interleaved M-RoPE 11/11/10 and a vision tower (cut to two

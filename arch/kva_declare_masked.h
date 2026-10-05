@@ -60,6 +60,15 @@ static int decl_projected(RadBuilder* b, const qwen4exp_fp8::Model& m, const Rad
  * the same path (mask all 0, no projector), which is what makes it the oracle for the split scan
  * (R47) and the stager probes (R94). `kva_mask`'s mode is the mode's row rule: plumb keeps every
  * row exact, speed approximates the whole window, quality keeps its class (or random/all) rows. */
+/* What a late attention layer lacks for speed's tail-only straddle -- the per-row sparse attention (the
+ * indexer's selection and its sequence map) and the fused sparse attention + gate -- or nullptr. */
+inline const char* straddle_missing(const AttnGatedFP8& a) {
+    if (!a.qsa_sel) return "the indexer's selection (qsa_sel)";
+    if (!a.qsa_sequ) return "the indexer's sequence map (qsa_sequ)";
+    if (!a.op_attn_gq) return "the fused sparse attention + gate (attn_paged_gate_quant)";
+    return nullptr;
+}
+
 static const char* decl_masked(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx,
                                Kva& k) {
     const Config& c = k.cfg;
@@ -82,13 +91,22 @@ static const char* decl_masked(RadBuilder* b, const qwen4exp_fp8::Model& m, cons
     if (!k.op_mask) return "kva_mask";
     if (project && (!k.op_select || !k.op_drop)) return !k.op_select ? "kva_select" : "kva_drop_rows";
     if (project && !k.op_cast) return "cast";
-    k.straddle_layers = c.tail_only && c.mode == MODE_SPEED;
+    const bool straddle = c.tail_only && c.mode == MODE_SPEED;
+    int64_t lacking = -1;
+    const char* what = nullptr;
     for (int64_t l = k.split; l < m.g.n_layer; ++l) {
         const AttnGatedFP8& a = m.layers[(size_t)l].attn;
         if (!m.layers[(size_t)l].full) continue;
-        k.straddle_layers = k.straddle_layers && a.qsa_sel && a.qsa_sequ && a.op_attn_gq;
+        const char* miss = straddle_missing(a);
+        if (miss && lacking < 0) { lacking = l; what = miss; }
         k.qsa_exact_to = std::max(k.qsa_exact_to, a.qsa_exact_to);
     }
+    k.straddle_layers = straddle && lacking < 0;
+    /* Otherwise the downgrade shows only in each step log's path field: say it once, at startup. */
+    if (straddle && lacking >= 0)
+        std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: late attention layer %lld lacks %s, so speed mode "
+                             "takes the masked path for straddle chunks: slower, same output class\n",
+                     (long long)lacking, what);
     return decl_probes(b, m, k) < 0 ? "a buffer" : nullptr;
 }
 
