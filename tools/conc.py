@@ -171,7 +171,9 @@ def one_rep(length, c, n, doc_ids, logdir, tag):
     deadline = time.monotonic() + 120
     while c and min(len(d.times) for d in decoders) < 16:
         if time.monotonic() > deadline:
-            die("decoders did not reach 16 tokens in 120 s")
+            die(f"decoders did not reach 16 tokens in 120 s: tokens {[len(d.times) for d in decoders]}, "
+                f"errors {[d.error for d in decoders]}, running {metrics().get('vllm:num_requests_running')}, "
+                f"waiting {metrics().get('vllm:num_requests_waiting')}")
         time.sleep(0.05)
     a0 = time.monotonic()
     time.sleep(2.0 if c else 0)
