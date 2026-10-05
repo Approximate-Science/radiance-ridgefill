@@ -8,7 +8,8 @@ WHAT IT MEASURES: `cycles` rounds of one prefill-only request at each length (ma
 different leading nonce each, --no-prefix-cache asserted as tools/speed.py does), back to back, timings.prompt_ms
 and wall time of each; and, every `poll` seconds on a second thread, the engine's /stats counters that say what the
 placement engine is doing (experts: promotions, demotions, readmits, routed vs routed-resident, dispatches, staged
-units; link: mover h2d bytes, streamed-expert bytes, staged bytes, all-reduce bytes; cards: util, power, temp).
+units; link: mover h2d bytes, streamed-expert bytes, staged bytes, all-reduce bytes; passes: played vs recorded vs
+issued; cards: util, power, temp) and every card's current DPM sclk/mclk from sysfs.
 
 SETTLED: per length, the reference is the median of the last 4 cycles; the settle cycle is the first cycle from which
 every later value stays within 2% of it; time-to-settled is that request's start, seconds after the script began
@@ -32,6 +33,22 @@ import speed as S  # noqa: E402
 EXPERT_KEYS = ("promotions", "demotions", "readmits", "distinct_promoted", "routed", "routed_res", "dispatches",
                "refused", "starved_slab", "staged_units")
 LINK_KEYS = ("h2d_bytes", "stream_bytes", "staged_bytes", "ar_bytes")
+PASS_KEYS = ("played", "recorded", "audited", "issued_first", "dispatched")
+
+
+def clocks():
+    """{pci: "sclk/mclk"} of every card that reports DPM levels (the starred, current one). Read-only sysfs."""
+    out = {}
+    for dev in sorted(Path("/sys/class/drm").glob("card[0-9]*/device")):
+        try:
+            cur = []
+            for f in ("pp_dpm_sclk", "pp_dpm_mclk"):
+                line = next(l for l in (dev / f).read_text().splitlines() if "*" in l)
+                cur.append(line.split()[1])
+            out[dev.resolve().name] = "/".join(cur)
+        except (OSError, StopIteration, IndexError):
+            continue
+    return out
 
 
 def poll_stats(stop, every, out, t0):
@@ -39,10 +56,12 @@ def poll_stats(stop, every, out, t0):
         try:
             with urllib.request.urlopen(S.BASE + "/stats", timeout=5) as r:
                 s = json.loads(r.read())
-            e, link = s.get("experts") or {}, s.get("link") or {}
+            e, link, ps = s.get("experts") or {}, s.get("link") or {}, s.get("passes") or {}
             row = {"t": round(time.time() - t0, 2)}
             row.update({k: e.get(k) for k in EXPERT_KEYS})
             row.update({k: link.get(k) for k in LINK_KEYS})
+            row.update({"pass_" + k: ps.get(k) for k in PASS_KEYS})
+            row["clk"] = clocks()
             row["cards"] = [{k: c.get(k) for k in ("index", "util", "power_w", "temp_c")} for c in s.get("cards", [])]
             out.append(row)
         except Exception as ex:  # a missed poll is a gap in the series, not a failed measurement
