@@ -15,8 +15,8 @@
 #
 # Both forms run the engine in the FOREGROUND (docker run --rm) with RK_FLAGS plus
 # --max-num-seqs 1: KL mode admits every doc at once and the scheduler tops up a step's
-# leftover budget with the next doc's first chunk -- a step with n_seq == 2 that the
-# plugin runs exact; --max-num-seqs 1 forbids the top-up (HANDOVER §5 Stage 0 step 6).
+# leftover budget with the next doc's first chunk -- a step with n_seq == 2 (approximated since
+# Stage A's device mask); --max-num-seqs 1 forbids the top-up (HANDOVER §5 Stage 0 step 6).
 # The reference and every candidate run with the SAME flags (same-boot protocol, HANDOVER
 # §7; the noise floor is exact-vs-exact under this exact configuration -- TOOLS.md's bf16
 # reference advice is for measuring a quantisation, not this).
@@ -33,6 +33,9 @@
 #   RK_MODEL           required: host path to the .rad container
 #   RK_FLAGS           the shared engine flags (common.sh)
 #   RK_EXPECT_APPROX   unset by default: the expected approximate-step count (candidates)
+#   RK_KLD_SEQS        default 1: --max-num-seqs of a CANDIDATE run. 2 lets the scheduler top a
+#                      step up with the next doc's first chunk -- two prefills in one step, the
+#                      shape R58' scores (scripts/two_prompts.sh); the reference stays at 1
 #   plus the mode's RADIANCE_KVA*/RADIANCE_LOG_STEPS pass-through into the container.
 
 set -eu
@@ -112,7 +115,7 @@ log=$out.log
     printf '%s\n' -v "$ref_dir":/data/ref:ro -v "$out_dir":/data/out
     printf '%s\n' "$RK_IMAGE" --model "$model_arg"
     # shellcheck disable=SC2086  # RK_FLAGS is one flag or value per word by construction
-    printf '%s\n' $RK_FLAGS --max-num-seqs 1
+    printf '%s\n' $RK_FLAGS --max-num-seqs "${RK_KLD_SEQS:-1}"
     printf '%s\n' --kld-ref /data/ref --kld-out "/data/out/$(basename "$out")"
 } > "$rk_args"
 run_logged "$log"

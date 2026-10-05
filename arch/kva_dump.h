@@ -17,7 +17,8 @@
  *                            approximate chunk whose first row is at absolute position P (R17)
  *   <dir>/boundary.jsonl     one line per such file: {"chunk_start", "n_tok", "file", "token_ids"}
  *   <dir>/mask.jsonl         one line per masked approximate chunk: {"chunk_start", "n_tok",
- *                            "n_ahead", "b", "s_lb", "bounds", "mask"} (R45)
+ *                            "n_ahead", "b", "s_lb", "n_seq", "n_seq_decode", "bounds", "mask"}
+ *                            (R45; R58' reads the steps with two prefills)
  *   <dir>/rows.jsonl         the same chunks: {"chunk_start", "n_tok", "rows_idx", "token_ids"},
  *                            rows_idx = the window's exact rows -- what tools/rows_compare.py reads (R39)
  *
@@ -145,7 +146,8 @@ inline void dump_mask(RadCtx* c, const std::string& dir, rad_buf mask, rad_buf b
                              std::to_string(b->n_tok);
     dump_line(dir + "/mask.jsonl",
               head + ", \"n_ahead\": " + std::to_string(b->n_ahead) + ", \"b\": " +
-              std::to_string(bulk_end) + ", \"s_lb\": " + std::to_string(s_lb) + ", \"bounds\": [" +
+              std::to_string(bulk_end) + ", \"s_lb\": " + std::to_string(s_lb) + ", \"n_seq\": " +
+              std::to_string(b->n_seq) + ", \"n_seq_decode\": " + std::to_string(b->n_seq_decode) + ", \"bounds\": [" +
               std::to_string(bnd[0]) + ", " + std::to_string(bnd[1]) + ", " + std::to_string(bnd[2]) +
               ", " + std::to_string(bnd[3]) + "], \"mask\": \"" + bits + "\"}");
     dump_line(dir + "/rows.jsonl", head + ", \"rows_idx\": " + dump_ids_json(exact) +
