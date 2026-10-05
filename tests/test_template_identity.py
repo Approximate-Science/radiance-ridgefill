@@ -6,7 +6,7 @@ Three layers, matching what the tool itself can prove offline:
   * the pure diff rules on hand-made id lists (no server, no tokenizer);
   * an end-to-end run against a FAKE radiance server whose /tokenize renders
     a chat template through jinja2 and tokenises with the real served-model
-    tokenizer at /var/home/dylan/models-boot/tcc-qwen38-flash-next-mxfp4-fp8-gptq/
+    tokenizer named by $KVA_TEST_TOKENIZER (the served model's tokenizer directory)
     when it is present (the whole layer is skipped when it is not, naming
     that path; KVA_TEST_TOKENIZER overrides it). The fake is a stand-in: the
     engine renders with minja, so the real R119 check runs `render` against
@@ -42,12 +42,10 @@ BASE_TEMPLATE_PATH = FIXTURES / "container-chat-template.jinja"
 # The tokenizer the engine is stated to serve (the shipped model's own); the
 # whole fake-server layer skips without it, naming the path.
 TOKENIZER_ENV = "KVA_TEST_TOKENIZER"
-DEFAULT_TOKENIZER_DIR = Path("/var/home/dylan/models-boot/tcc-qwen38-flash-next-mxfp4-fp8-gptq")
-TOKENIZER_DIR = Path(os.environ.get(TOKENIZER_ENV) or DEFAULT_TOKENIZER_DIR)
+TOKENIZER_DIR = Path(os.environ.get(TOKENIZER_ENV, ""))
 needs_tokenizer = pytest.mark.skipif(
-    not TOKENIZER_DIR.is_dir(),
-    reason=f"the tokenizer at {TOKENIZER_DIR} is not present "
-           f"(set {TOKENIZER_ENV} to point elsewhere)",
+    not os.environ.get(TOKENIZER_ENV) or not TOKENIZER_DIR.is_dir(),
+    reason=f"set {TOKENIZER_ENV} to the served model's tokenizer directory",
 )
 
 SHAPE_NAMES = [
