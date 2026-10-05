@@ -317,3 +317,27 @@ declarations or per-pass work: ring 2 × 50 MiB (+ correction 27 + row table 1) 
 - **S4** (evidence/stagee/scripts/s4.sh, queued 18:45Z on gpu.lock, `HOME_E=6a68dde`): frozen home + host tests;
   correctness (off ident = R3, bf16 rows = A′ R144, int8 rows = S1's, B's 8192/10 starts); held settle vs stock and ON
   TTFT 16K/32K bf16/int8/stock, two rounds interleaved; --profile-ops copy time per rank; mutants last.
+
+## 15. S3 results (2026-10-05 18:05-19:09Z, home bc7e742 = the TWO-slot ring; evidence/stagee/s3/; labbook seq 433-435)
+**R79's speed half -- int8 through the ring is FASTER than bf16** (quality T2048, warmed, median of 7, ratio to the same
+round's stock 9,981 / 19,393 ms; tables: `evidence/stagee/scripts/s4table.py evidence/stagee/s3`):
+| arm | 16K | 32K | slab slots r0/r1 (stock 16,847/16,894) |
+|---|---|---|---|
+| bf16 a / b | 0.865x / 0.859x | 0.663x / 0.658x | −187 / −162 |
+| int8 a / b | 0.836x / 0.839x | (lost) / 0.628x | — / −163 |
+- **Copy time per rank** (`--profile-ops`, one 16K prefill, 336 ring copies = 14 approximate passes × 24 layers; a
+  profiled run is synchronised, so this is each copy alone): rank 0 bf16 0.97 ms, int8 0.49 ms a copy; **rank 1 bf16
+  8.77 ms, int8 3.94 ms** (rank 1 sits on PCIe Gen4 x4 on this machine: ~6-7 GB/s). Bytes a pass a rank: bf16 24 ×
+  2,561 × 20,480 B = 1.259 GB, int8 24 × 1,301 × 20,480 B = 0.639 GB. Rank 1's copy time a pass, bf16 210 ms vs int8
+  95 ms, is what int8 saves where the copy is not hidden behind the layer.
+- **R79 VERDICT: keep int8** -- KL at the bf16 level (§11: every paired CI includes 0), half the link bytes and the
+  ring slot, 2.5-4.7% faster ON TTFT. It is the likely shipping folder; the default stays the folder the user points
+  at (no default changed here).
+- int8-a's 32K sample was lost to a measurement-hygiene slip: an interactive command naming a path outside the repo
+  that matches the preflight's squatter pattern ran at the moment of a check (the preflight fails closed on a process
+  it cannot read). Since then every command run during samples carries the repo path, which the preflight skips.
+- **R85 (production wire `--tp-wire wht6`), minimal: GREEN.** plumb rows byte-identical to stock under wht6. Quality
+  T2560 paired vs stock under wht6: last 512 −0.0025 [−0.0145, +0.0103]; whole tail (last 2,047) +0.0102 [+0.0025,
+  +0.0176] -- the same metric on the exact wire (S1's rows, plumb = stock) is +0.0021 [−0.0126, +0.0157] and +0.0131
+  [+0.0020, +0.0235]: the production wire adds nothing to KVA's cost.
+- The held-cost controls of this session are in §14.
