@@ -11,12 +11,15 @@
 
 #include <arch/rad_arch.h>
 
+#include "kva_plan.h"   /* Pass, Path: what late_block is told */
+
 #include <cstdint>
 #include <vector>
 
 namespace kva {
 
-struct Kva;   /* kva_declare.h: the core's per-rank declare state, which the hooks fill */
+struct Kva;        /* kva_declare.h: the core's per-rank declare state, which the hooks fill */
+struct StateDump;  /* kva_dump.h: RADIANCE_KVA_CAPTURE_STATE's per-step copies */
 
 /* This rank's recurrent state per late layer, as the correction ops see it; {0,0,0} = none. */
 struct StateShape { int64_t n_head = 0, sd0 = 0, sd1 = 0; };
@@ -60,6 +63,17 @@ struct KvaAdapter {
     int (*declare_codes)(RadBuilder*, const RadBuildCtx*, Kva&) = nullptr;          /* Kva::xp's code pair */
     const char* (*decl_state_ops)(RadBuilder*, const RadBuildCtx*, Kva&) = nullptr; /* correction ops: the
                                                                      missing op's name, or nullptr */
+    /* The step's late-layer issues, which the core's drivers (kva_layer.h) order around the projection.
+     * conn: the connection in front of the block (ffn false) or the FFN, its read or its write, over
+     * rows [r0, r0 + rows) of a T-row step. late_block: the block over the path's rows -- LEAN its
+     * cache-writing pieces only, MASKED the whole block with the correction spliced in, STRADDLE /
+     * DECODERS the rows [r0, r0 + rows) whole and the rest lean. ffn: the feed-forward over rows
+     * [r0, to) (to < 0: all), dropping the rows `mask` marks with `drop` when both are set. */
+    void (*conn)(RadCtx*, int64_t li, bool ffn, bool write, int64_t T, int64_t r0, int64_t rows) = nullptr;
+    void (*late_block)(RadCtx*, const Kva&, int64_t li, const RadBatch*, const Pass&, StateDump*, Path,
+                       int64_t r0, int64_t rows) = nullptr;
+    void (*ffn)(RadCtx*, const Kva&, int64_t li, const RadBatch*, int64_t r0, int64_t to, rad_op drop,
+                rad_buf mask) = nullptr;
 };
 
 }  // namespace kva

@@ -21,11 +21,13 @@
 #ifndef QWEN4EXP_KVA_FINAL_H
 #define QWEN4EXP_KVA_FINAL_H
 
-namespace qwen4exp_kva {
-
+namespace kva {
 /* kva_layer.h: lane 0 waits for the slot's block; after its GEMM, lane 1 copies block j + 1 into the slot. */
 inline void ring_wait(RadCtx* c, const Kva& k);
 inline void ring_after(RadCtx* c, const Kva& k, int64_t li);
+}  /* namespace kva */
+
+namespace qwen4exp_kva {
 
 /* The predicted final stream's buffer and its GEMM (the engine's gemm_nt_bias, forwarded by kva.so, the map
  * block as an IN operand). Every buffer it touches takes the whole program (rad_buf_concurrent). */

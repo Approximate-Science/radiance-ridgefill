@@ -238,10 +238,10 @@ static void approximate_step(RadCtx* c, const Kva& k, const RadBatch* batch, con
             dump_mask(c, k.dump_dir, k.b_mask, k.b_bounds, batch, p.b, p.s_lb);
     }
     for (int64_t li = k.split; li < m.g.n_layer; ++li) {
-        if (p.path == PATH_LEAN)          fill_layer(c, k, m, li, batch, sd);
-        else if (p.path == PATH_STRADDLE) straddle_layer(c, k, m, li, batch, p, sd);
-        else if (p.path == PATH_DECODERS) decoders_layer(c, k, m, li, batch, p, sd);
-        else                              masked_layer(c, k, m, li, batch, p, sd);
+        if (p.path == PATH_LEAN)          fill_layer(c, k, li, batch, p, sd);
+        else if (p.path == PATH_STRADDLE) straddle_layer(c, k, li, batch, p, sd);
+        else if (p.path == PATH_DECODERS) decoders_layer(c, k, li, batch, p, sd);
+        else                              masked_layer(c, k, li, batch, p, sd);
     }
     final_stream(c, k, m, batch, p);   /* MTP: the bulk rows' predicted final stream, before the epilogue reads b_h */
     epilogue(c, m, batch);

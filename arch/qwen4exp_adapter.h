@@ -97,6 +97,52 @@ inline const char* straddle_missing(const AttnGatedFP8& a) {
     return nullptr;
 }
 
+/* ---- the step hooks: the in-tree layer's pieces (qwen4exp_fp8.cpp:1407-1425) over the rows the core's
+ * driver names. Each reads this rank's model, the one the declare filled. */
+
+/* hc_mix in front of the block, hc_ffn in front of the MoE; a write also takes the debug residual dump. */
+inline void conn(RadCtx* c, int64_t li, bool ffn, bool write, int64_t T, int64_t r0, int64_t rows) {
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
+    const qwen4exp_fp8::Layer& l = m.layers[(size_t)li];
+    const HyperConn& h = ffn ? l.hc_ffn : l.hc_mix;
+    if (!write) { h.read(c, T, r0, rows); return; }
+    h.write(c, T, r0, rows);
+    dbg_resid(c, (int)li, ffn ? "ffn" : "mix", m.g.n_embd, m.b_h, m.a_x.x);
+}
+
+inline void late_block(RadCtx* c, const Kva& k, int64_t li, const RadBatch* batch, const Pass& p,
+                       StateDump* sd, Path path, int64_t r0, int64_t rows) {
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
+    const qwen4exp_fp8::Layer& l = m.layers[(size_t)li];
+    if (path == PATH_LEAN) {   /* the cache writers only: K/V and the indexer keys, or the corrected scan */
+        if (l.full) {
+            qsa_keys(c, l.qsa, l.attn.w.h, batch);
+            attn_kv(c, l.attn, batch);
+            return;
+        }
+        gdn_project(c, l.gdn, rows);
+        correct(c, k, m, li, k.op_undo[(size_t)li], batch, false);
+        gdn_scan(c, l.gdn, batch);
+        read_state(c, k, m, li, batch, sd);
+        correct(c, k, m, li, k.op_apply[(size_t)li], batch, false);
+        return;
+    }
+    if (path == PATH_MASKED) {
+        if (l.full) { l.qsa.step(c, l.attn.w.h, batch); l.attn.step(c, batch); }
+        else        gdn_masked(c, k, m, li, batch, p, sd);
+        return;
+    }
+    if (l.full)                     attn_rows(c, l, batch, r0, rows);
+    else if (path == PATH_STRADDLE) gdn_straddle(c, k, m, li, batch, p, sd);
+    else                            gdn_decoders(c, k, m, li, batch, p, sd);
+}
+
+inline void ffn(RadCtx* c, const Kva&, int64_t li, const RadBatch* batch, int64_t r0, int64_t to, rad_op drop,
+                rad_buf mask) {
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
+    moe_layer(c, m.layers[(size_t)li].mlp, MoeArm{ drop, mask, {} }, batch, r0, to);
+}
+
 /* The fit facts the method was measured at on this model (KVA-FACTS §5). */
 constexpr int64_t kAdapterMinTail = 512, kAdapterDefaultTail = 2048;
 
@@ -138,6 +184,9 @@ inline KvaAdapter adapter_of(const qwen4exp_fp8::Model& m) {
     a.buf_logits = m.b_logits;
     a.declare_model = &declare_model;
     a.declare_codes = &declare_codes;
+    a.conn = &conn;
+    a.late_block = &late_block;
+    a.ffn = &ffn;
     a.decl_state_ops = &decl_state_ops;
     return a;
 }

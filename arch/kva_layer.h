@@ -11,11 +11,9 @@
 #ifndef QWEN4EXP_KVA_LAYER_H
 #define QWEN4EXP_KVA_LAYER_H
 
-namespace qwen4exp_kva {
+namespace kva {
 
 using namespace rad::arch;
-
-/* ---------------------------------------------------------------- the layer */
 
 /* ---------------------------------------------------------------- the staging ring (DD-L) */
 
@@ -83,24 +81,21 @@ inline void project_masked(RadCtx* c, const Kva& k, int64_t li, const Pass& p, i
                 brows(a.buf_x, T), codes ? brows(a.buf_x_q, T) : RAD_NONE, codes ? brows(a.buf_x_s, T) : RAD_NONE);
 }
 
-/* A MASKED LATE LAYER (PLAN-FIX §8): the in-tree layer (qwen4exp_fp8.cpp:1407-1425) with the
- * projection selected in after the connection read, the delta net's last sequence corrected, and
- * the MoE issued by hand (the bulk rows' slots dropped). Plumb declares no projector and no drop: it
- * is the stock layer through the same path. */
-inline void masked_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int64_t li,
-                         const RadBatch* batch, const Pass& p, StateDump* sd) {
-    const qwen4exp_fp8::Layer& l = m.layers[(size_t)li];
+/* A MASKED LATE LAYER (PLAN-FIX §8): the model's layer in its own order (the adapter's conn /
+ * late_block / ffn hooks) with the projection selected in after the connection read, the recurrent
+ * block's last sequence corrected, and the FFN's bulk-row slots dropped. Plumb declares no projector
+ * and no drop: it is the stock layer through the same path. */
+inline void masked_layer(RadCtx* c, const Kva& k, int64_t li, const RadBatch* batch, const Pass& p,
+                         StateDump* sd) {
+    const KvaAdapter& a = k.ad;
     const int64_t T = batch->n_tok;
-    l.hc_mix.read(c, T, 0, T);
+    a.conn(c, li, false, false, T, 0, T);
     if (k.op_select) project_masked(c, k, li, p, T);
-    if (l.full) { l.qsa.step(c, l.attn.w.h, batch); l.attn.step(c, batch); }
-    else        gdn_masked(c, k, m, li, batch, p, sd);
-    l.hc_mix.write(c, T, 0, T);
-    dbg_resid(c, (int)li, "mix", m.g.n_embd, m.b_h, m.a_x.x);
-    l.hc_ffn.read(c, T, 0, T);
-    moe_layer(c, l.mlp, MoeArm{ k.op_drop, k.b_mask, {} }, batch);
-    l.hc_ffn.write(c, T, 0, T);
-    dbg_resid(c, (int)li, "ffn", m.g.n_embd, m.b_h, m.a_x.x);
+    a.late_block(c, k, li, batch, p, sd, PATH_MASKED, 0, T);
+    a.conn(c, li, false, true, T, 0, T);
+    a.conn(c, li, true, false, T, 0, T);
+    a.ffn(c, k, li, batch, 0, -1, k.op_drop, k.b_mask);
+    a.conn(c, li, true, true, T, 0, T);
 }
 
 /* ---------------------------------------------------------------- the straddle: tail-only blocks */
@@ -122,20 +117,17 @@ inline void project_bulk(RadCtx* c, const Kva& k, int64_t li, int64_t b) {
  * connection read, block output, connection write, feed-forward read, MoE and write -- issued over
  * that row range with the in-tree helpers' own r0/rows (rad_block_hc.h:360-397, rad_fp8.h:915,
  * MoeFP8::pass). Nothing reads a bulk row's late block output, so none is computed. */
-inline void straddle_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int64_t li,
-                           const RadBatch* batch, const Pass& p, StateDump* sd) {
-    const qwen4exp_fp8::Layer& l = m.layers[(size_t)li];
+inline void straddle_layer(RadCtx* c, const Kva& k, int64_t li, const RadBatch* batch, const Pass& p,
+                           StateDump* sd) {
+    const KvaAdapter& a = k.ad;
     const int64_t T = batch->n_tok, r0 = p.b, rows = T - p.b;
-    l.hc_mix.read(c, T, r0, rows);
+    a.conn(c, li, false, false, T, r0, rows);
     project_bulk(c, k, li, p.b);
-    if (l.full) attn_rows(c, l, batch, r0, rows);
-    else        gdn_straddle(c, k, m, li, batch, p, sd);
-    l.hc_mix.write(c, T, r0, rows);
-    dbg_resid(c, (int)li, "mix", m.g.n_embd, m.b_h, m.a_x.x);
-    l.hc_ffn.read(c, T, r0, rows);
-    moe_layer(c, l.mlp, MoeArm{}, batch, r0);
-    l.hc_ffn.write(c, T, r0, rows);
-    dbg_resid(c, (int)li, "ffn", m.g.n_embd, m.b_h, m.a_x.x);
+    a.late_block(c, k, li, batch, p, sd, PATH_STRADDLE, r0, rows);
+    a.conn(c, li, false, true, T, r0, rows);
+    a.conn(c, li, true, false, T, r0, rows);
+    a.ffn(c, k, li, batch, r0, -1, 0, 0);
+    a.conn(c, li, true, true, T, r0, rows);
 }
 
 /* ---------------------------------------------------------------- speed beside decoders */
@@ -157,22 +149,19 @@ inline void project_beside(RadCtx* c, const Kva& k, int64_t li, int64_t r0, int6
  * read/write, block, feed-forward read, MoE, write -- with the in-tree helpers' own r0/rows. The
  * decoders' dense GEMMs run at M = DT, as in a decode-only step, so their bytes may differ from a
  * 2,048-row step's within ident.sh's ksplit-from-M class. Nothing reads a bulk row's late output. */
-inline void decoders_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int64_t li,
-                           const RadBatch* batch, const Pass& p, StateDump* sd) {
-    const qwen4exp_fp8::Layer& l = m.layers[(size_t)li];
+inline void decoders_layer(RadCtx* c, const Kva& k, int64_t li, const RadBatch* batch, const Pass& p,
+                           StateDump* sd) {
+    const KvaAdapter& a = k.ad;
     int64_t D = 0, DT = 0;
     batch_split(batch, &D, &DT);
     const int64_t T = batch->n_tok;
-    l.hc_mix.read(c, T, 0, DT);
+    a.conn(c, li, false, false, T, 0, DT);
     project_beside(c, k, li, DT, T);
-    if (l.full) attn_rows(c, l, batch, 0, DT);
-    else        gdn_decoders(c, k, m, li, batch, p, sd);
-    l.hc_mix.write(c, T, 0, DT);
-    dbg_resid(c, (int)li, "mix", m.g.n_embd, m.b_h, m.a_x.x);
-    l.hc_ffn.read(c, T, 0, DT);
-    moe_layer(c, l.mlp, MoeArm{}, batch, 0, DT);
-    l.hc_ffn.write(c, T, 0, DT);
-    dbg_resid(c, (int)li, "ffn", m.g.n_embd, m.b_h, m.a_x.x);
+    a.late_block(c, k, li, batch, p, sd, PATH_DECODERS, 0, DT);
+    a.conn(c, li, false, true, T, 0, DT);
+    a.conn(c, li, true, false, T, 0, DT);
+    a.ffn(c, k, li, batch, 0, DT, 0, 0);
+    a.conn(c, li, true, true, T, 0, DT);
 }
 
 /* ---------------------------------------------------------------- the lean fill */
@@ -195,24 +184,16 @@ inline void quantise(RadCtx* c, const Kva& k, int64_t T) {
 /* A LEAN late layer (speed, every row bulk): the projection and its codes, then only the
  * cache-writing pieces. No connection read or write and no MoE: `b_h` stays the layer-S stream for
  * every projector. */
-inline void fill_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int64_t li,
-                       const RadBatch* batch, StateDump* sd) {
-    const qwen4exp_fp8::Layer& l = m.layers[(size_t)li];
+inline void fill_layer(RadCtx* c, const Kva& k, int64_t li, const RadBatch* batch, const Pass& p,
+                       StateDump* sd) {
     const int64_t T = batch->n_tok;
     project(c, k, li, T);
     quantise(c, k, T);
-    if (l.full) {
-        qsa_keys(c, l.qsa, l.attn.w.h, batch);
-        attn_kv(c, l.attn, batch);
-    } else {
-        gdn_project(c, l.gdn, T);
-        correct(c, k, m, li, k.op_undo[(size_t)li], batch, false);
-        gdn_scan(c, l.gdn, batch);
-        read_state(c, k, m, li, batch, sd);
-        correct(c, k, m, li, k.op_apply[(size_t)li], batch, false);
-    }
+    k.ad.late_block(c, k, li, batch, p, sd, PATH_LEAN, 0, T);
 }
 
-}  /* namespace qwen4exp_kva */
+}  /* namespace kva */
+
+namespace qwen4exp_kva { using namespace kva; }
 
 #endif /* QWEN4EXP_KVA_LAYER_H */
