@@ -103,3 +103,16 @@ approximates those positions -- so the two differ by design and identity is the 
 - **R68 GREEN**: `tools/hazard_rate.py` (superset rule from `timings`) flags exactly the 9 B's and none of
   the A/C's on this corpus, and with unnamed lines paired in order (fix above) its per-request cross-check
   with the device AGREEs (14,332 positions both). On the append-only R62 traffic: 0 flagged, 0 logged.
+
+## 4. Stage C row table (stage-c; plugin code at 041ab13 = frozen home `data/home-041ab13`)
+
+| row | state | evidence |
+|---|---|---|
+| R62 | **green**: turn-2 `cache_n` = stock's, 10/10 conversations, quality and speed | C1 |
+| R63 | **not run** (snapshot/restore of the correction state at ≤ 1 ulp needs a capture of the pre-apply state after a restore; R62/R65 show restores working end to end) | -- |
+| R64 | **redefined** (each vs exact, cached ≤ no-cache); the original form shown unsatisfiable by design (C1); the new form's session `sessions/c4.sh` + `tools/turns_kld_corpus.py` written, **not run** | C1, c4.sh |
+| R65 | **green at T_ck 0** on 9 real branches (device = oracle = records); T_ck 512 variant, answer agreement and the negative control **not run** | C2 (+C3 if it ran) |
+| R66 | **not run** unless C3 ran (session written: exact / speed T_ck 0, 512, 1,024 / quality 0, 512, 16K + 32K, cache servers) | c3.sh |
+| R68 | **green**: superset flags exactly the 9 branches, per-request AGREE with the device after the in-order pairing fix | C2 |
+| static | 56 arch cases / 680,943 checks, kernel host 851 + GPU 1,158 (incl. kva_hazard device == host); mutants F1-F5, H1-H8 caught | §1, C1 |
+| R6/R7 | **green** at 041ab13 | C1 |
