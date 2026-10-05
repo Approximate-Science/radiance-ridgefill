@@ -257,6 +257,10 @@ def write_config(real: Path, m: Mini, out: Path):
     tc["layer_types"] = ["full_attention" if (l + 1) % 4 == 0 else "linear_attention"
                          for l in range(m.layers)]
     tc["mtp"]["layer_types"] = ["full_attention"]
+    # The tower's weights are not written, so its geometry must go too: radiance declares a vision
+    # tower whenever vision_config.depth > 0 (rad_block_vit.h) and refuses its 2560-wide output
+    # rows against the mini's narrower embedding.
+    cfg.pop("vision_config", None)
     (out / "config.json").write_text(json.dumps(cfg, indent=1) + "\n", encoding="utf-8")
     return cfg
 
