@@ -13,199 +13,22 @@
 #define RAD_ARCH_NO_EXPORTS 1
 
 #include "rad_test.h"
+#include "rad_fake.h"   /* the recording builder and context, the fake device, Env, stderr_of */
 
-#include "rad_builder.h"
-#include "rad_device.h"
-#include "rad_runtime.h"
-
-#include <unistd.h>
-
-#include <cstdarg>
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
-#include <functional>
 #include <map>
 #include <sstream>
 #include <set>
 #include <string>
 #include <vector>
 
-/* ==================================================================== the recording builder */
-namespace {
-struct RecParam { std::string key; int kind = 0; long long ival = 0, ihi = 0; double dval = 0; std::string sval; };
-struct RecOp {
-    std::string op;
-    std::vector<RecParam> p;
-    std::vector<rad_weight> w;
-    std::vector<rad_buf> reads, writes;
-};
-struct RecIssue { rad_op op = 0; std::vector<RadOperand> opd; int64_t n = 0; };
-}  /* namespace */
-
-struct RadBuilder {
-    std::vector<std::pair<std::string, RadWeightDecl>> weights;
-    std::vector<std::pair<std::string, RadBufDecl>>    bufs;
-    std::vector<RecOp>                                 ops;
-    std::vector<std::string>                           maps, notes, kv_groups;
-    std::set<std::string>                              refuse;   /* ops no kernel serves */
-    std::set<rad_buf>                                  concurrent;
-    std::vector<std::pair<int, rad_kvgroup>>           binds;
-    /* What rad_weight_encoding answers: for a kva.* key, the source named by it or by it plus a
-     * '.'-suffix ("kva.proj.4" holds kva.proj.4.weight and .bias, "kva.rowsel.score" does not hold
-     * kva.rowsel.score_none); for any other key, the first source CONTAINING it, as radiance's own
-     * arch_test matches ("ffn_gate_up_exps"). */
-    std::vector<std::pair<std::string, RadEncoding>>   encs;
-};
-
-struct RadCtx {
-    const RadBatch*       batch = nullptr;
-    int                   rank = 0, world = 1;
-    std::vector<RecIssue> issues;
-    std::string           step_fail;
-    int                   device_calls = 0;   /* a step that moves bytes itself is not stock */
-    /* Each device read: its source and how many issues preceded it -- which is what pins a
-     * capture to the point in the step it claims to read. */
-    std::vector<std::pair<const void*, size_t>> reads;
-};
-
-static RadCtx* g_ctx = nullptr;   /* for the device API, which carries no context */
-
-extern "C" {
-rad_weight rad_decl_weight(RadBuilder* b, const char* name, const RadWeightDecl* d) {
-    b->weights.push_back({name, *d});
-    return (rad_weight)b->weights.size();
-}
-int rad_weight_encoding(RadBuilder* b, const char* source, RadEncoding* out, int64_t*, uint32_t*) {
-    for (const auto& [key, e] : b->encs) {
-        const size_t n = key.size();
-        const bool hit = !source ? false
-                       : key.rfind("kva.", 0) == 0
-                           ? !std::strncmp(source, key.c_str(), n) && (!source[n] || source[n] == '.')
-                           : std::strstr(source, key.c_str()) != nullptr;
-        if (hit) { *out = e; return RAD_OK; }
-    }
-    return RAD_E_NOTFOUND;
-}
-rad_buf rad_decl_buffer(RadBuilder* b, const char* name, const RadBufDecl* d) {
-    b->bufs.push_back({name, *d});
-    return (rad_buf)b->bufs.size();
-}
-rad_op rad_decl_op(RadBuilder* b, const char* op, const RadParam* p, int n_p,
-                   const rad_weight* w, int n_w) {
-    RecOp r;
-    r.op = op;
-    for (int i = 0; i < n_p; ++i)
-        r.p.push_back({p[i].key ? p[i].key : "", p[i].kind, p[i].ival, p[i].ihi, p[i].dval,
-                       p[i].sval ? p[i].sval : ""});
-    for (int i = 0; i < n_w; ++i) r.w.push_back(w[i]);
-    b->ops.push_back(r);
-    return b->refuse.count(r.op) ? RAD_NULL_HANDLE : (rad_op)b->ops.size();
-}
-int rad_op_reads(RadBuilder* b, rad_op h, const rad_buf* x, int n) {
-    if (!h) return RAD_E_INVAL;
-    b->ops[h - 1].reads.insert(b->ops[h - 1].reads.end(), x, x + n);
-    return RAD_OK;
-}
-int rad_op_writes(RadBuilder* b, rad_op h, const rad_buf* x, int n) {
-    if (!h) return RAD_E_INVAL;
-    b->ops[h - 1].writes.insert(b->ops[h - 1].writes.end(), x, x + n);
-    return RAD_OK;
-}
-rad_kvgroup rad_decl_kv_group(RadBuilder* b, const char* name, const RadKVGroupDecl*) {
-    b->kv_groups.push_back(name);
-    return (rad_kvgroup)b->kv_groups.size();
-}
-int64_t rad_kv_block_size(RadBuilder*, rad_kvgroup) { return 4; }
-int rad_bind_layer_kv(RadBuilder* b, int layer, rad_kvgroup g) { b->binds.push_back({layer, g}); return RAD_OK; }
-int rad_decl_name_map(RadBuilder* b, const RadNameMap* m) { b->maps.push_back(m->declared); return RAD_OK; }
-void rad_note(RadBuilder* b, const char* fmt, ...) {
-    char buf[1024];
-    va_list ap; va_start(ap, fmt); vsnprintf(buf, sizeof buf, fmt, ap); va_end(ap);
-    b->notes.push_back(buf);
-}
-int rad_declare_logits(RadBuilder*, rad_buf) { return RAD_OK; }
-int rad_buf_concurrent(RadBuilder* b, rad_buf h) { b->concurrent.insert(h); return RAD_OK; }
-int rad_weight_shard_span(RadBuilder*, rad_weight, int64_t, int64_t) { return RAD_OK; }
-int rad_declare_drafter(RadBuilder*, const RadDrafterDecl*) { return RAD_OK; }
-int rad_declare_encoder(RadBuilder*, const RadEncoderDecl*) { return RAD_OK; }
-
-long long rad_meta_geti(const RadModelMeta* m, const char* key, long long dflt) {
-    for (int i = 0; i < m->n_kv; ++i) if (!std::strcmp(m->kv_key[i], key)) return atoll(m->kv_val[i]);
-    return dflt;
-}
-double rad_meta_getf(const RadModelMeta* m, const char* key, double dflt) {
-    for (int i = 0; i < m->n_kv; ++i) if (!std::strcmp(m->kv_key[i], key)) return atof(m->kv_val[i]);
-    return dflt;
-}
-const char* rad_meta_gets(const RadModelMeta* m, const char* key, const char* dflt) {
-    for (int i = 0; i < m->n_kv; ++i) if (!std::strcmp(m->kv_key[i], key)) return m->kv_val[i];
-    return dflt;
-}
-
-int rad_issue(RadCtx* c, rad_op op, const RadOperand* opd, int n_opd, int64_t n) {
-    c->issues.push_back({op, std::vector<RadOperand>(opd, opd + n_opd), n});
-    return RAD_OK;
-}
-/* The second lane, recorded in the issue list as pseudo-ops (only the staging ring switches lanes). */
-constexpr rad_op kLane = 0xFFFF0000u, kJoin = 0xFFFF1000u;
-int rad_lane(RadCtx* c, int lane) { c->issues.push_back({kLane, {}, lane}); return RAD_OK; }
-int rad_lane_join(RadCtx* c, int from, int to) { c->issues.push_back({kJoin, {}, from * 16 + to}); return RAD_OK; }
-int rad_step_fail(RadCtx* c, const char* what) { c->step_fail = what ? what : ""; return RAD_E_SHAPE; }
-int rad_rank(RadCtx* c) { return c->rank; }
-RadStream rad_stream(RadCtx*) { return nullptr; }
-int rad_route_report(RadCtx*, int, const RadRouting*) { return RAD_OK; }
-int32_t* rad_route_counts(RadCtx*, int, int64_t) { return nullptr; }
-void* rad_buf_ptr(RadCtx*, rad_buf b) { return (void*)(uintptr_t)(b * 64 + 16); }
-
-/* THE PROJECTOR'S DEVICE MEMORY (kva_projector.h). VRAM is a fake address range nothing reads: a
- * copy into it is recorded, not made. Host-mapped memory is real (the plugin writes it on the
- * host), and its device view is a different fake address, as a real device view is. Declare runs
- * with no RadCtx, so only a step's device calls are counted against the step. */
-constexpr uintptr_t kFakeVram = 0x7e0000000000ull, kFakeVramEnd = 0x7f0000000000ull;
-constexpr uintptr_t kDeviceView = 0x10000000000ull;
-struct Upload { void* dst; const void* src; int64_t bytes; };
-struct FakeMem { int vram = 0, host = 0; std::vector<Upload> copies; } g_mem;
-void* rad_dev_alloc(int64_t n, int kind) {
-    if (g_ctx) ++g_ctx->device_calls;
-    if (kind == RAD_MEM_HOST_MAPPED) { ++g_mem.host; return std::calloc(1, (size_t)n); }
-    static uintptr_t next = kFakeVram;
-    ++g_mem.vram;
-    void* p = (void*)next;
-    next += ((uintptr_t)n + (1u << 20)) & ~(uintptr_t)0xFFFF;
-    return p;
-}
-void  rad_dev_free(void* p, int kind) {
-    if (g_ctx) ++g_ctx->device_calls;
-    if (kind == RAD_MEM_HOST_MAPPED) std::free(p);
-}
-void* rad_dev_host_ptr(void* p) { return p; }
-void* rad_dev_device_ptr(void* p) { return (unsigned char*)p + kDeviceView; }
-int   rad_stream_create(RadStream* s, int) { *s = (RadStream)&g_mem; return RAD_OK; }
-void  rad_stream_destroy(RadStream) {}
-const char* rad_dev_last_error(void) { return "(fake)"; }
-/* The debug paths' device reads. rad_buf_ptr hands out small fake addresses (below), which read as
- * zeros; a batch field is real host memory here and is copied, so a capture sees the batch's own
- * ids and positions. */
-int   rad_stream_sync(RadStream) { if (g_ctx) ++g_ctx->device_calls; return RAD_OK; }
-int   rad_memcpy_async(void* dst, const void* src, int64_t n, RadStream) {
-    if ((uintptr_t)dst >= kFakeVram && (uintptr_t)dst < kFakeVramEnd) {
-        g_mem.copies.push_back({dst, src, n});
-        return RAD_OK;
-    }
-    ++g_ctx->device_calls;
-    g_ctx->reads.push_back({src, g_ctx->issues.size()});
-    if ((uintptr_t)src < (1u << 20)) std::memset(dst, 0, (size_t)n);
-    else                             std::memcpy(dst, src, (size_t)n);
-    return RAD_OK;
-}
-int   rad_memset_async(void*, int, int64_t, RadStream) { ++g_ctx->device_calls; return RAD_E_UNSUPPORTED; }
-}  /* extern "C" */
-
 /* ==================================================================== the plugin under test */
 /* The release the guard compares against; the build sets it for the plugin (arch/CMakeLists.txt). */
 #define KVA_RADIANCE_VERSION "0.0.0-test"
 #include "qwen4exp_kva.cpp"
+#include "folder_fixture.h"   /* the tiny container, the test folder and its tensors */
 
 using rad::arch::bcol;
 using rad::arch::brows;
@@ -268,64 +91,6 @@ RadBuildCtx served_ctx(int rank = 0, int world = 1) {
     return c;
 }
 
-/* ==================================================================== the projector folder */
-
-/* A container of a few KiB (abi/rad_format.h): three tokens (the third with empty text), one merge
- * and one 16-byte entry. tools/kva_projector.py's test builds the same bytes and expects the same
- * two hashes (kTinyVocab, kTinyAnchor), which is what ties the two canonical forms together. */
-const char* kTinyVocab  = "3988fb447f719ad3fc2c75e5a0fa3daeb2b6a5e10e964744619d1dfbc6e95ff6";
-const char* kTinyAnchor = "be45cb2605bf36bebde684841a28f0fd43c69850a3dce5fedba69928ee3a8991";
-
-std::vector<unsigned char> tiny_container_bytes() {
-    std::vector<unsigned char> f(4096, 0);
-    auto put = [&](size_t at, const void* p, size_t n) { std::memcpy(f.data() + at, p, n); };
-    RadFileHeader h{};
-    h.magic = RAD_MAGIC; h.version = RAD_FORMAT_VER; h.file_bytes = 4096;
-    const char blob[] = "\0tok_a\0tok_b\0anchor.weight";   /* offsets 0, 1, 7, 13 */
-    h.str_off = 256; h.str_bytes = sizeof blob;
-    h.vocab_off = 512; h.vocab_bytes = 168;
-    h.dir_off = 1024; h.dir_count = 1;
-    h.plane_off = 1280; h.plane_count = 1;
-    h.data_off = 2048; h.data_bytes = 2048;
-    put(0, &h, sizeof h);
-    put(256, blob, sizeof blob);
-    RadVocabHeader v{};
-    v.kind = RAD_TOK_BPE; v.n_tokens = 3; v.n_merges = 1;
-    v.tok_text_off = 640; v.tok_type_off = 664; v.merge_off = 672;
-    put(512, &v, sizeof v);
-    const uint64_t text[3] = { 1, 7, 0 };
-    const uint8_t type[3] = { 1, 1, 3 };
-    const uint32_t merge[2] = { 0, 1 };
-    put(640, text, sizeof text); put(664, type, sizeof type); put(672, merge, sizeof merge);
-    RadFileEntry e{};
-    e.name = 13; e.rank = 1; e.shape[0] = 16; e.layer = -1; e.expert = -1; e.n_planes = 1;
-    e.offset = 2048; e.bytes = 16;
-    put(1024, &e, sizeof e);
-    const RadFilePlane pl{ 2048, 16 };
-    put(1280, &pl, sizeof pl);
-    for (int i = 0; i < 16; ++i) f[2048 + (size_t)i] = (unsigned char)i;
-    return f;
-}
-
-/* The tiny container on disk, once per process; its path. */
-const std::string& tiny_container() {
-    static std::string path;
-    if (path.empty()) {
-        char t[] = "/tmp/kva_tiny_XXXXXX";
-        const int fd = mkstemp(t);
-        const std::vector<unsigned char> f = tiny_container_bytes();
-        if (fd >= 0 && write(fd, f.data(), f.size()) == (ssize_t)f.size()) path = t;
-        if (fd >= 0) close(fd);
-    }
-    return path;
-}
-
-/* Bytes every test tensor points at (zeros, one projector map's worth): the uploads copy from them. */
-const unsigned char* tensor_bytes() {
-    static std::vector<unsigned char> z((size_t)2560 * 10240 * 2, 0);
-    return z.data();
-}
-
 /* The manifest the test folder carries: this test model's name, a few of its metadata keys, the
  * tiny container's tokenizer hash; `model` may add members to the model block. */
 qwen4exp_kva::Json test_manifest(const std::string& model = "") {
@@ -337,28 +102,6 @@ qwen4exp_kva::Json test_manifest(const std::string& model = "") {
     qwen4exp_kva::Json j;
     qwen4exp_kva::json_parse(text.data(), text.size(), &j);
     return j;
-}
-
-qwen4exp_kva::Folder g_test_folder;
-
-/* The plugin forgets every folder and copy; the next declare looks again (every case starts so). */
-void reset_projector() {
-    qwen4exp_kva::g_folder_for_test = nullptr;
-    qwen4exp_kva::g_i8_rows_for_test = nullptr;
-    qwen4exp_kva::g_loaded = qwen4exp_kva::Loaded{};
-    qwen4exp_kva::free_uploads();
-    g_mem.copies.clear();
-}
-
-void add_tensor(const std::string& name, uint32_t dtype, std::vector<int64_t> shape) {
-    qwen4exp_kva::FolderTensor t;
-    t.data = tensor_bytes();
-    t.dtype = dtype;
-    t.shape = shape;
-    int64_t n = 1;
-    for (int64_t e : shape) n *= e;
-    t.bytes = rad_dtype_bytes(dtype, n);
-    g_test_folder.tensors[name] = t;
 }
 
 /* A fresh projector folder holding, for layers kSplit..7, what `bases` name: "kva.proj" the maps
@@ -416,48 +159,12 @@ void served(RadBuilder& b) {
     b.encs.push_back({"qsa_qk", rad_enc_plain(RAD_BF16)});
 }
 
-/* setenv for one case, undone on scope exit, so cases cannot leak switches into each other. */
-struct Env {
-    std::vector<std::pair<std::string, std::string>> saved;   /* name, value before ("\x01" = unset) */
-    Env(std::initializer_list<std::pair<const char*, const char*>> kv) {   /* a null value unsets */
-        for (const auto& [k, v] : kv) {
-            const char* old = std::getenv(k);
-            saved.push_back({k, old ? old : "\x01"});
-            if (v) setenv(k, v, 1);
-            else   unsetenv(k);
-        }
-    }
-    ~Env() {
-        for (auto it = saved.rbegin(); it != saved.rend(); ++it)
-            if (it->second == "\x01") unsetenv(it->first.c_str());
-            else                       setenv(it->first.c_str(), it->second.c_str(), 1);
-    }
-};
 
 /* The static cases run chunks of 64 to 2,048 rows; the planner's default gate (RADIANCE_KVA_MIN_BULK_ROWS,
  * 1,024 bulk rows: a host-streamed projector's fixed cost) would send the small ones to the stock step. The
  * suite runs with it off, as it did before the gate; the gate and its default are their own case. */
 [[maybe_unused]] const int g_min_bulk_off = setenv("RADIANCE_KVA_MIN_BULK_ROWS", "0", 1);
 
-/* What a call wrote to stderr: the refusals are fprintf'd, as the in-tree plugin's are. */
-std::string stderr_of(const std::function<void()>& fn) {
-    fflush(stderr);
-    FILE* tmp = tmpfile();
-    const int saved = dup(2);
-    dup2(fileno(tmp), 2);
-    fn();
-    fflush(stderr);
-    dup2(saved, 2);
-    close(saved);
-    std::string out;
-    rewind(tmp);
-    char buf[4096];
-    for (size_t n; (n = fread(buf, 1, sizeof buf, tmp)) > 0;) out.append(buf, n);
-    fclose(tmp);
-    return out;
-}
-
-bool has(const std::string& s, const char* what) { return s.find(what) != std::string::npos; }
 
 const RadWeightDecl* weight(const RadBuilder& b, const std::string& name) {
     for (const auto& [n, d] : b.weights) if (n == name) return &d;
