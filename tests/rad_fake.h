@@ -25,7 +25,8 @@
 #include <vector>
 
 /* ==================================================================== the recording builder */
-namespace {
+/* One test binary includes this once; the records live at namespace scope because RadBuilder and RadCtx,
+ * the ABI's own opaque types, hold them. */
 struct RecParam { std::string key; int kind = 0; long long ival = 0, ihi = 0; double dval = 0; std::string sval; };
 struct RecOp {
     std::string op;
@@ -34,7 +35,6 @@ struct RecOp {
     std::vector<rad_buf> reads, writes;
 };
 struct RecIssue { rad_op op = 0; std::vector<RadOperand> opd; int64_t n = 0; };
-}  /* namespace */
 
 struct RadBuilder {
     std::vector<std::pair<std::string, RadWeightDecl>> weights;

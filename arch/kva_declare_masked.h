@@ -39,14 +39,16 @@ static int decl_projected(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
     for (rad_buf h : { k.b_hs, k.xp.x, k.xp.cq(), k.xp.cs(), a.buf_route_ids })
         if (h) RAD_ARCH_TRY(rad_buf_concurrent(b, h));
     /* Every buffer these three touch takes the whole program (concurrent here or in decl_fill), so
-     * they state no read/write sets. */
+     * they state no read/write sets. The drop rewrites routing slots: a model with no routed FFN
+     * declares none, and its ffn hook is handed none. */
     k.op_cast = RAD_OP(b, "cast", RAD_PARAMS(RAD_RANGE("M", 1, max_tok), RAD_INT("n", wide),
                                              RAD_STR("from", a.dtype), RAD_STR("to", a.dtype)),
                        RAD_NOWEIGHTS);
     k.op_select = RAD_OP(b, "kva_select", RAD_PARAMS(RAD_RANGE("M", 1, max_tok)), RAD_NOWEIGHTS);
-    k.op_drop = RAD_OP(b, "kva_drop_rows",
-                       RAD_PARAMS(RAD_RANGE("M", 1, max_tok), RAD_INT("top_k", a.top_k)),
-                       RAD_NOWEIGHTS);
+    if (a.top_k > 0)
+        k.op_drop = RAD_OP(b, "kva_drop_rows",
+                           RAD_PARAMS(RAD_RANGE("M", 1, max_tok), RAD_INT("top_k", a.top_k)),
+                           RAD_NOWEIGHTS);
     return RAD_OK;
 }
 
@@ -73,7 +75,8 @@ static const char* decl_masked(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
                                   RAD_INT("seed", c.seed), RAD_STR("mode", rule)),
                        RAD_NOWEIGHTS);
     if (!k.op_mask) return "kva_mask";
-    if (project && (!k.op_select || !k.op_drop)) return !k.op_select ? "kva_select" : "kva_drop_rows";
+    if (project && !k.op_select) return "kva_select";
+    if (project && k.ad.top_k > 0 && !k.op_drop) return "kva_drop_rows";
     if (project && !k.op_cast) return "cast";
     const bool straddle = c.tail_only && c.mode == MODE_SPEED;
     int64_t lacking = -1;

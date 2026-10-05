@@ -30,13 +30,7 @@
 #include <qwen4exp_fp8/qwen4exp_fp8.cpp>
 
 /* THE CORE (namespace kva; it names no model: tests/core_purity.cmake) ... */
-#include "kva_plan.h"
-#include "kva_declare.h"
-#include "kva_dump.h"
-#include "kva_layer.h"
-#include "kva_hazard.h"
-#include "kva_guard.h"
-#include "kva_step.h"
+#include "kva_core.h"
 
 /* ... THEN THIS MODEL'S ADAPTER, which sees the core's names as its own, so the hooks and the static
  * test spell them qwen4exp_kva::. */
