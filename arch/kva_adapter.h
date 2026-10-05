@@ -2,9 +2,8 @@
  *
  * The core (every kva_*.h but this file's users' adapters) is compiled into each adapter's .so and
  * names no model type: what it needs of the model it reads here, filled once per rank by the
- * adapter's `adapter_of` after the in-tree declare. Facts only, in this step of the split; the hooks
- * (late_block, ffn, conn, ...) join as the code that calls them moves into the core, so no field
- * exists before something reads it.
+ * adapter's `adapter_of` after the in-tree declare: facts, and hooks for whatever the model owns.
+ * Nothing speculative: every field is read by the core's declare or step.
  */
 #ifndef KVA_ADAPTER_H
 #define KVA_ADAPTER_H
@@ -35,6 +34,7 @@ struct KvaAdapter {
      * block makes that check vacuous; `split_lo` the lowest split whose stream has seen every
      * injected input (the PLE layer + 1). */
     int64_t n_layer = 0, n_embd = 0, n_vocab_all = 0, wide = 0;
+    int64_t n_vocab = 0;     /* this rank's logits columns (vocab-sharded under TP) */
     int64_t world = 1;       /* tensor-parallel ranks: the folder holds every rank's state heads */
     int64_t tile = 1, split_lo = 0;
     /* the stager probes ride behind the gate-up of layer S - probe_depth, so streaming needs that
@@ -74,6 +74,19 @@ struct KvaAdapter {
                        int64_t r0, int64_t rows) = nullptr;
     void (*ffn)(RadCtx*, const Kva&, int64_t li, const RadBatch*, int64_t r0, int64_t to, rad_op drop,
                 rad_buf mask) = nullptr;
+    /* The rest of the step (kva_step.h), verbatim copies of the in-tree step's pieces: prologue (embedding
+     * .. rope table) and epilogue (last connection, logits) around the layers; stock_layer one exact
+     * layer below S, carrying the stager probes when `probes` (the routed layer S - probe_depth of a
+     * streaming pass); stock_step the in-tree step itself, for every pass KVA leaves alone. */
+    void (*prologue)(RadCtx*, const RadBatch*) = nullptr;
+    void (*stock_layer)(RadCtx*, const Kva&, int64_t li, const RadBatch*, bool probes) = nullptr;
+    void (*epilogue)(RadCtx*, const RadBatch*) = nullptr;
+    void (*stock_step)(RadCtx*, const RadBatch*) = nullptr;
+    /* the debug captures (RADIANCE_KVA_CAPTURE / _CAPTURE_STATE), which interleave with the model's own
+     * blocks; null = the adapter keeps none and the core skips them */
+    void (*capture_step)(RadCtx*, const Kva&, const RadBatch*) = nullptr;
+    void (*finish_state)(RadCtx*, const Kva&, const RadBatch*, StateDump&, bool approx) = nullptr;
+    void (*capture_mixed)(RadCtx*, const Kva&, const RadBatch*, bool approx) = nullptr;
 };
 
 }  // namespace kva

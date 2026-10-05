@@ -143,6 +143,140 @@ inline void ffn(RadCtx* c, const Kva&, int64_t li, const RadBatch* batch, int64_
     moe_layer(c, m.layers[(size_t)li].mlp, MoeArm{ drop, mask, {} }, batch, r0, to);
 }
 
+/* ---- the exact layers and the step around them: copies of the in-tree step's pieces, issued by the core's
+ * approximate_step (kva_step.h) and the debug captures. */
+
+/* qwen4exp_fp8.cpp:1391-1404, verbatim: embedding, media rows, PLE hash, the stream's first value,
+ * the rope table. */
+inline void prologue(RadCtx* c, qwen4exp_fp8::Model& m, const RadBatch* batch) {
+    const int64_t T = batch->n_tok;
+    RAD_ISSUE(c, m.op_embed, praw(batch->token_ids, RAD_I32, T), RAD_W(m.w_tok), brows(m.a_x.x, T));
+    m.mrows.step(c, batch, m.a_x.x, T);
+    if (m.op_embed_ar) RAD_ISSUE_N(c, m.op_embed_ar, T * m.g.n_embd, brows(m.a_x.x, T), RAD_NONE);
+    if (m.ple_layer >= 0) m.ple.ids(c, batch);
+    m.enter.step(c, T);
+    if (m.op_rope_cs && T <= qk_fuse_rows(m.g) && !rope_mixed(batch))
+        RAD_ISSUE_N(c, m.op_rope_cs, T, rope_pos1(batch, T), RAD_B(m.b_rope_cs));
+}
+
+/* qwen4exp_fp8.cpp:1407-1425 for one layer -- with the MoE issued through `arm` when one is given
+ * (layer S-3 of a streaming pass: stock rows, the stager probes behind its gate-up GEMM). */
+inline void layer(RadCtx* c, qwen4exp_fp8::Model& m, int64_t li, const RadBatch* batch,
+                  const MoeArm* arm = nullptr) {
+    const qwen4exp_fp8::Layer& l = m.layers[(size_t)li];
+    const int64_t T = batch->n_tok;
+    if (li == m.ple_layer) m.ple.step(c, batch);
+    l.hc_mix.read(c, T, 0, T);
+    if (l.full) { l.qsa.step(c, l.attn.w.h, batch); l.attn.step(c, batch); }
+    else        l.gdn.step(c, batch);
+    l.hc_mix.write(c, T, 0, T);
+    dbg_resid(c, (int)li, "mix", m.g.n_embd, m.b_h, m.a_x.x);
+    l.hc_ffn.read(c, T, 0, T);
+    if (arm) moe_layer(c, l.mlp, *arm, batch);
+    else     l.mlp.step(c, batch);
+    l.hc_ffn.write(c, T, 0, T);
+    dbg_resid(c, (int)li, "ffn", m.g.n_embd, m.b_h, m.a_x.x);
+}
+
+/* qwen4exp_fp8.cpp:1428-1437: the 97th connection and, when the chunk asks for them, logits. On an
+ * approximate chunk they are requested only on exact rows in production (PLAN-FIX §6.2). */
+inline void epilogue(RadCtx* c, qwen4exp_fp8::Model& m, const RadBatch* batch) {
+    const int64_t T = batch->n_tok;
+    m.mixer.read(c, T, 0, T);
+    if (batch->n_out <= 0) return;
+    RAD_ISSUE_N(c, m.op_gather, batch->n_out, brows(m.a_x.x, T),
+                praw(batch->out_ids, RAD_I32, batch->n_out), brows(m.b_hout, batch->n_out));
+    RAD_ISSUE_N(c, m.op_logits, batch->n_out, brows(m.b_hout, batch->n_out), RAD_W(m.w_lm_head),
+                brows(m.b_logits, batch->n_out));
+}
+
+/* THE STAGER LEVER (notes/impl.md §2): behind layer S-3's gate-up GEMM, while the stager holds layers
+ * S-3 and S-2 in its two buffers and has released neither, probe the gate-up of every layer from S-1
+ * to the last. Each probe makes the stager start the layer after it, and a start that finds both
+ * buffers held STREAMS that layer: from here on no late layer is staged whole, and each reads only
+ * the experts its exact rows route to. Layer S-1 itself, which runs every row, is still staged when
+ * the real pass reaches layer S-2. Correctness never depends on any of it: a probe moves no number. */
+inline MoeArm probe_arm(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m) {
+    MoeArm arm;
+    arm.after_gate_up = [c, &k, &m] {
+        for (int64_t x = k.split - 1; x < m.g.n_layer; ++x)
+            moe_probe(c, m.layers[(size_t)x].mlp, k.b_zeros, k.b_probe);
+    };
+    return arm;
+}
+
+/* The hooks over them: this rank's model, as the declare filled it. */
+inline void prologue_hook(RadCtx* c, const RadBatch* batch) { prologue(c, qwen4exp_fp8::g_model[rad_rank(c)], batch); }
+inline void epilogue_hook(RadCtx* c, const RadBatch* batch) { epilogue(c, qwen4exp_fp8::g_model[rad_rank(c)], batch); }
+inline void stock_layer(RadCtx* c, const Kva& k, int64_t li, const RadBatch* batch, bool probes) {
+    qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
+    if (!probes) { layer(c, m, li, batch); return; }
+    const MoeArm arm = probe_arm(c, k, m);
+    layer(c, m, li, batch, &arm);
+}
+
+/* RADIANCE_KVA_CAPTURE (mode off, rank 0): the stock step, issued through the same pieces as
+ * every other path here (the static test holds them to the in-tree step), with host copies of the
+ * stream entering layer S and of every late layer's block input `x`, read right after its
+ * connection read and before the block writes its output over it. */
+inline void capture_step(RadCtx* c, const Kva& k, const RadBatch* batch) {
+    qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
+    const int64_t T = batch->n_tok, n = m.g.n_embd;
+    Capture cap;
+    const bool ok = capture_begin(c, batch, k.capture_dir, &cap);
+    if (!ok) std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE: device read failed\n");
+    prologue(c, m, batch);
+    for (int64_t li = 0; li < m.g.n_layer; ++li) {
+        const qwen4exp_fp8::Layer& l = m.layers[(size_t)li];
+        if (ok && li == k.split) capture_rows(c, cap, "boundary", m.b_h, T, m.hccfg.hc * n);
+        if (li == m.ple_layer) m.ple.step(c, batch);
+        l.hc_mix.read(c, T, 0, T);
+        if (ok && li >= k.split) {
+            capture_rows(c, cap, "bi." + std::to_string(li), m.a_x.x, T, n);
+            cap.layers.push_back((int)li);
+        }
+        if (l.full) { l.qsa.step(c, l.attn.w.h, batch); l.attn.step(c, batch); }
+        else        l.gdn.step(c, batch);
+        l.hc_mix.write(c, T, 0, T);
+        dbg_resid(c, (int)li, "mix", m.g.n_embd, m.b_h, m.a_x.x);
+        l.hc_ffn.read(c, T, 0, T);
+        l.mlp.step(c, batch);
+        l.hc_ffn.write(c, T, 0, T);
+        dbg_resid(c, (int)li, "ffn", m.g.n_embd, m.b_h, m.a_x.x);
+    }
+    epilogue(c, m, batch);
+    if (ok) capture_end(cap, k.split, n, m.hccfg.hc);
+}
+
+/* RADIANCE_KVA_CAPTURE_STATE: whatever late delta-net layer the step did not already copy (an
+ * exact chunk copies here, after the step; nothing touches a layer's state after its scan), then
+ * one file for this (chunk, rank). */
+inline void finish_state(RadCtx* c, const Kva& k, const RadBatch* batch, StateDump& sd, bool approx) {
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
+    for (int64_t li = k.split; li < m.g.n_layer; ++li)
+        if (!m.layers[(size_t)li].full &&
+            std::find(sd.layers.begin(), sd.layers.end(), (int)li) == sd.layers.end())
+            read_state(c, k, m, li, batch, &sd);
+    state_end(c, k.state_dir, batch, sd, m.gcfg.n_head_v, m.gcfg.head_v, m.gcfg.head_k, rad_rank(c),
+              m.g.world, approx, kModeNames[k.cfg.mode]);
+}
+
+/* R61 -- RADIANCE_KVA_CAPTURE_STATE ON A MIXED STEP (decoders beside a prefill chunk): after the
+ * step, every sequence's late delta-net states, so the decoders' slots of two runs of one arrangement
+ * (KVA and off) can be compared byte for byte; the prefill's slot is the positive control. */
+inline void capture_mixed(RadCtx* c, const Kva& k, const RadBatch* batch, bool approx) {
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
+    std::vector<int> layers;
+    for (int64_t li = k.split; li < m.g.n_layer; ++li)
+        if (!m.layers[(size_t)li].full) layers.push_back((int)li);
+    std::vector<float> data;
+    for (int64_t seq = 0; seq < batch->n_seq; ++seq)
+        for (int li : layers)
+            if (!copy_state(c, k, m, li, batch, seq, &data)) return;
+    mixed_state_end(c, k.state_dir, batch, data, layers, {m.gcfg.n_head_v, m.gcfg.head_v, m.gcfg.head_k},
+                    rad_rank(c), approx, kModeNames[k.cfg.mode]);
+}
+
 /* The fit facts the method was measured at on this model (KVA-FACTS §5). */
 constexpr int64_t kAdapterMinTail = 512, kAdapterDefaultTail = 2048;
 
@@ -155,6 +289,7 @@ inline KvaAdapter adapter_of(const qwen4exp_fp8::Model& m) {
     a.n_layer = m.g.n_layer;
     a.n_embd = m.g.n_embd;
     a.n_vocab_all = m.g.n_vocab_all;
+    a.n_vocab = m.g.n_vocab;
     a.world = m.g.world;
     a.wide = m.hccfg.hc * m.g.n_embd;
     a.tile = m.gcfg.chunk;
@@ -187,6 +322,13 @@ inline KvaAdapter adapter_of(const qwen4exp_fp8::Model& m) {
     a.conn = &conn;
     a.late_block = &late_block;
     a.ffn = &ffn;
+    a.prologue = &prologue_hook;
+    a.stock_layer = &stock_layer;
+    a.epilogue = &epilogue_hook;
+    a.stock_step = &qwen4exp_fp8::step;
+    a.capture_step = &capture_step;
+    a.finish_state = &finish_state;
+    a.capture_mixed = &capture_mixed;
     a.decl_state_ops = &decl_state_ops;
     return a;
 }

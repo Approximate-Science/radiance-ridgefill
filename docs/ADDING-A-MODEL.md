@@ -28,10 +28,12 @@ qwen4exp_moe.h, qwen4exp_kva.cpp.
    is your `match_name`.
 5. Static test: copy tests/arch_static_test.cpp's oracle pattern -- off must declare and issue
    exactly what your in-tree plugin does; add your derive truth-table rows, your projector
-   refusals, and a facts-vs-model case (`the_adapter_facts_match_the_model`).
+   refusals, and -- while you write adapter_of -- a case asserting each fact against the direct
+   read it replaces (the split carried one, the_adapter_facts_match_the_model, until its step 7).
 6. Fit the projector from exact captures (RADIANCE_KVA=off + RADIANCE_KVA_CAPTURE; notes/refit.md),
    then gate: `ctest -LE gpu`, off ≡ stock (scripts/ident.sh), and the KL rows (scripts/grade.sh).
 
-Status (2026-10-05): the split is in progress on branch `split` (notes/split.md). The step-side
-hooks for the exact layers and the debug captures (prologue / stock_layer / epilogue / stock_step /
-capture_*) arrive with kva_step.h; until then derive/step live in qwen4exp_kva.cpp.
+The step around the late layers is the core's too (arch/kva_step.h): the adapter adds prologue /
+stock_layer / epilogue / stock_step (copies of its in-tree step's pieces) and, if it keeps the debug
+captures, capture_step / finish_state / capture_mixed. tests/adapter_core_test.cpp is a whole
+adapter in one file -- a toy dense model -- and the smallest example of the contract.
