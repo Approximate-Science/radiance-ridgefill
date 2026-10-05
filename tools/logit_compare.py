@@ -2,9 +2,12 @@
 """logit_compare.py -- gate 1: a decoder's next-token distributions in two captures, token by token.
 
 Each side is <dump dir>:<manifest.json>:<segment>:<sequence>, segment "batched" or "soloN" (the lines
-logit_capture.py recorded), sequence the decoder's index in that request (its position in the batch;
-0 for a solo). Per side, every logits row of that sequence is keyed by its position; the ranks' rows
-are joined (identical rows: each rank holds the whole vocabulary; else concatenated in rank order).
+logit_capture.py recorded), sequence the decoder's index in that request's FIRST step (its place in the
+batch; 0 for a solo). A decoder is then FOLLOWED, not looked up by index -- once the long prompt starts
+decoding the engine reorders the decode entries, so an index can point at another sequence: its row
+in a later step is the one at position + 1 whose input token is the greedy pick of its previous row
+(temperature 0), preferring the same index on a tie. The ranks' rows are joined (identical rows: each
+rank holds the whole vocabulary; else concatenated in rank order).
 Compared position by position while the two sides' input tokens agree (after the first input
 difference the contexts differ and nothing is comparable): KL(A || B) of the softmax, and top-1
 agreement. Prints n, mean / max KL, top-1 agreement, and where the inputs first differ.
@@ -22,19 +25,23 @@ def side(spec):
     dump, manifest, seg, seq = spec.rsplit(":", 3)
     m = json.load(open(manifest))
     lo, hi = m["batched"] if seg == "batched" else m["solo"][int(seg[4:])]
-    lines = open(os.path.join(dump, "logits.jsonl")).read().splitlines()[lo:hi]
-    by_pos = {}
-    for line in lines:
-        j = json.loads(line)
-        rows = np.load(os.path.join(dump, j["file"]))
-        for out_j, row, s, pos, tok in j["rows"]:
-            if s == int(seq):
-                by_pos.setdefault(pos, {"token": tok, "ranks": {}})["ranks"][j["rank"]] = rows[out_j]
-    out = {}
-    for pos, v in by_pos.items():
-        rs = [v["ranks"][r] for r in sorted(v["ranks"])]
-        same = all(np.array_equal(rs[0], x) for x in rs[1:])
-        out[pos] = (v["token"], rs[0] if same else np.concatenate(rs))
+    lines = [json.loads(x) for x in open(os.path.join(dump, "logits.jsonl")).read().splitlines()[lo:hi]]
+    steps = {}   # step file key -> {rank: (rows array, row list)}, in order
+    for j in lines:
+        steps.setdefault(j["file"].rsplit(".r", 1)[0], {})[j["rank"]] = (np.load(os.path.join(dump, j["file"])), j["rows"])
+    out, want_pos, want_tok, want_seq = {}, None, None, int(seq)
+    for ranks in steps.values():
+        rows0 = ranks[min(ranks)][1]
+        cands = [r for r in rows0 if (want_pos is None and r[2] == want_seq) or
+                 (want_pos is not None and r[3] == want_pos and r[4] == want_tok)]
+        if not cands:
+            continue
+        r = next((c for c in cands if c[2] == want_seq), cands[0])
+        parts = [ranks[k][0][r[0]] for k in sorted(ranks)]
+        same = all(np.array_equal(parts[0], x) for x in parts[1:])
+        logits = parts[0] if same else np.concatenate(parts)
+        out[r[3]] = (r[4], logits)
+        want_pos, want_tok, want_seq = r[3] + 1, int(logits.argmax()), r[2]
     return out
 
 
