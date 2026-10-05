@@ -31,5 +31,23 @@ while others hold the GPUs"). Rows: R69-R71, R74-R76, R97 (fix-246/REQUIREMENTS-
   Predictions registered first (labbook seq 430-431: HD-R76-plumb-media, HD-R70-final).
 - R75 (post-image tail NLL on 5 image + ≥ 12K-text docs) needs that corpus: asked the orchestrator for its location.
 
-## 3. Results
-(pending D1)
+## 3. Results -- D1 (2026-10-05 20:55-21:03Z, frozen home 406e746 = stage-e with main + Stage C merged: ctest -LE gpu 3/3;
+evidence/staged/d1/session.log; int8 only)
+- **R76 GREEN -- plumb after an image = off, byte for byte.** One picture (radiance's tests/data/media/red.png) then quick
+  doc 3 cut to 48,000 characters: 12,155 prompt tokens, greedy 64: off and plumb (FORCE_STREAM) text sha256 c6cfeba6…
+  both; 4 approximate passes logged in plumb and quality (chunks 2-5: the chunk with the picture's rows ran stock, the
+  last chunk is the exact tail). This build returns no logprobs (the server refuses them), so text is the comparison.
+  quality's text differs (04681d98…), as an approximation may.
+- **R70 -- the final map's gain is small, and the deficit it was built for does not show here.** MTP depth 3, 16K
+  prompts (tools/speed.py's builder), 256 greedy tokens, 5 reps, median tokens/step: stock 2.265; int8 + final
+  **2.339 (1.033x)**; int8, RADIANCE_KVA_FINAL=off **2.297 (1.014x)**. final and off produce byte-identical texts in all
+  5 reps (the drafts change speed, never text), so final vs off is a paired comparison: final ≥ off in 5/5 reps, +1.8%
+  tokens a step. Against stock the continuations differ (KVA changes the text), so the ratio to stock compares
+  different texts. R9V's 0.895x deficit without the map is not reproduced at T 2048 (the draft head's recent history is
+  the exact tail). HD-R70-final: REFUTED (off is not in 0.85-0.92x; final − off = 0.019x < 0.03).
+  Cost of the map: the slot is a bf16 block (50 MiB instead of 25.4 MiB VRAM a rank), +200 MiB host, +210 MB a pass
+  over the link. Whether to ship it is Dylan's call; the data says +1.8% drafted tokens a step for ~25 MiB more VRAM.
+- **R97 -- not isolated by this instrument.** /stats link h2d a request (mover + stager): stock 125-137 GiB, KVA 43-83
+  GiB (approximate passes skip the late layers' experts), so the +213 MiB of a first exact pass after an approximate one
+  is inside the per-request totals' spread. Decode after the first request: ~7 ms/token in all three arms.
+- R75: D2 (queued).
