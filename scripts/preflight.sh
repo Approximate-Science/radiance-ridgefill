@@ -104,12 +104,15 @@ if pgrep -af 'radiance|llama|vllm|r9v' > "$tmp_squat" 2>/dev/null; then
             print
         }' "$tmp_squat")
     # A name match is a squatter only if it holds the GPU (/dev/kfd open). A port forwarder
-    # or a log tailer named after an engine is not; a process whose fds we cannot read is
-    # counted (fail closed).
+    # or a log tailer named after an engine is not; a LIVE process whose fds we cannot read is
+    # counted (fail closed). One that exited between pgrep and this check is not: a gone
+    # process holds no GPU, and counting it aborted samples on every short-lived ls or grep
+    # whose argv merely named a path containing the pattern (Stage E S3, 2026-10-05).
     bad=$(printf '%s\n' "$bad" | while read -r spid srest; do
         [ -n "$spid" ] || continue
-        if ls -l "/proc/$spid/fd" 2>/dev/null | grep -q '/dev/kfd' \
-           || ! ls "/proc/$spid/fd" >/dev/null 2>&1; then
+        if ls -l "/proc/$spid/fd" 2>/dev/null | grep -q '/dev/kfd'; then
+            printf '%s %s\n' "$spid" "$srest"
+        elif ! ls "/proc/$spid/fd" >/dev/null 2>&1 && [ -d "/proc/$spid" ]; then
             printf '%s %s\n' "$spid" "$srest"
         fi
     done)
