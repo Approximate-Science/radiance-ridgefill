@@ -356,3 +356,66 @@ round's stock 9,981 / 19,393 ms; tables: `evidence/stagee/scripts/s4table.py evi
   from `git show 1a53237^:evidence` (no session had started; nothing written in between).
 - Verification: S4 builds its frozen home from b316096 (the host suite, static case set included, runs in that build;
   falls back to 6a68dde if it fails) and measures everything on it; its mutants run on that source.
+
+## 17. S4 correctness half on 5a3115b (2026-10-05 19:58-20:18Z, boot 75e3e39b; evidence/stagee/s4/session.log)
+- Frozen home **5a3115b** (= 6a68dde's reductions + main merged + the static fixes + the straddle line): `ctest -LE gpu`
+  3/3 (arch_static with every case: R74 media, straddle downgrade, int8 vs bf16 on the decoders path, B's set). arch
+  14b7d304…, kva.so ff82ad62…. (S4's first attempt at 19:33Z and D1's at 19:34Z aborted at this step on 6a68dde/
+  b316096: two cases read the pre-6a68dde log text, and the merge's 1,024-row gate sent small static chunks to stock.)
+- **off ident = R3.** **KL rows byte-identical**: bf16 speed and quality T2048 = A′'s R144 rows (one slot, correction
+  and row table in host memory, merged code); int8 speed and quality T2048 = S1's int8-ring rows (codes from b_h at
+  layer S, no h_S). 67 approximate steps each.
+- **Plugin VRAM a rank (startup line): bf16 50.0 MiB, int8 25.4 MiB** -- the ring's one slot, nothing else uploaded;
+  host-mapped 1,228 / 637 MiB (maps, correction, row table). Arena: h_S 40 MiB (bf16 or MTP only), x_P + codes ~15 MiB,
+  int8 stream codes 20 MiB.
+- **B's 8192/10 config starts and serves** (quality, bf16: the larger slot): 9K prompt 7,253 ms, 8 decoders; pinned
+  pool 9,782 / 9,735 slots.
+- GPU-time audit (orchestrator ~20:15Z) applied from here: KL identity needs 2 runs (bf16 quality + int8 speed) next
+  time; mutants run beside a correctness-only session (D2), never under timing or as a session's tail -- S4's tail
+  finds no mutant scripts (renamed `mutant_*.py`); int8 arms first in D1/D2, bf16 arms skipped if
+  `evidence/stagee/INT8_ONLY` exists (Dylan's decision pending).
+
+## 18. DYLAN'S DECISION (2026-10-05 ~20:30Z, via the orchestrator): int8 is the only projector going forward
+- **Shipped folder: `data/projector-qwen38fn-int8`** (shared data dir, `<radiance-kva>/data/projector-qwen38fn-int8`):
+  28 files, 698,753,818 bytes; manifest `kva.json` sha256 **5b699e27e88d2e27cb546c174c6cb6f257e20433555e96b37fe17781aa3a85ae**
+  (it lists every file's sha256; built by `tools/kva_projector.py int8 --from data/projector-qwen38fn`, d8f19eb).
+  With the MTP final map (Stage D, `tools/kva_projector.py final`): `data/projector-qwen38fn-int8-final`, 29 files,
+  908,489,957 bytes, `kva.json` sha256 fd6f3a28b0b9344117004d04d471be4d1e762991669ea7a3ca7c58b058e7cf1e -- the folder for
+  deployments that draft (`--num-speculative-tokens` > 0), if R70 (D1) is green; without MTP the map is not declared.
+- bf16 results already measured stay as history (§11, §15, S4's round a). Every bf16 arm not yet run is dropped: S4's
+  bf16-a was stopped mid-sample at 20:31:52Z and held-bf16-b, bf16-b, p-bf16 are stopped at their start (a watcher,
+  /tmp/stagee-skipbf16.py, kills the serve/settle/speed process whose stdout is that arm's file -- S4's own script
+  is not edited while it runs; each such arm logs "serve FAILED" / "speed.sh FAILED"); D1's bf16+final and D2's
+  quality-bf16 are skipped by `evidence/stagee/INT8_ONLY`. KL identity from here: int8 quality + int8 speed.
+- The bf16 code path stays (it is the int8 builder's input); nothing in the release tests bf16.
+
+## 19. S4 timing half (5a3115b, rounds a/b; int8 only from 20:31Z) -- the held cost after the reductions
+Settle from /health, settled 2K / 8K, ratio to the same round's stock (exact-a 1,251 / 5,057; exact-b 1,249 / 5,063 ms):
+| arm | 2K | 8K | slab slots r0 (stock 16,851 / 16,847) | engine's "already held" (stock 341-345 MiB) |
+|---|---|---|---|---|
+| held int8 a | **+0.9%** | **+1.2%** | 16,788 (−63) | 371.0 MiB (+26: the slot) |
+| held int8 b | +2.0% | +1.1% | 16,766 (−81) | 400.4 MiB (+55: the slot + 29.3) |
+| held bf16 a (history) | +1.4% | +2.3% | 16,749 (−102) | 397.0 MiB |
+- **What remains is VRAM, ~67 MiB a rank with int8:** the ring slot 25.4 MiB ("already held") and +41.0 MiB of activation
+  arena (657.43 → 698.43 MiB: the int8 stream codes 20 MiB, the projected input and its codes ~15 MiB, the in-tree
+  buffers the plugin's ops touch made whole-program ~6 MiB) -- −63 slab slots, the same rate as S3's control (stock with
+  128 MiB less: +1.6%).
+- **The extra 29.3 MiB of "already held" in some boots is not the plugin's**: it appears in plugin boots of every kind
+  (int8 371.0 / 400.4, bf16 397.0 / 426.4, two-slot int8 425.0 / 454.3) AND in a stock boot (S2 exact-3: 374.36 = 345.0
+  + 29.3). The engine reads it once at startup (core/engine_bringup.cpp:704-730) and sizes the slab from it, so a boot
+  that reads it serves with ~26 fewer slots; round b's +2.0% at 2K is that boot. Round a is the clean comparison.
+- Further plugin-side cuts are small: half-layer ring blocks would free 12.7 MiB (~11 slots, ~0.15%) at two copies and
+  a split GEMM a layer; the stream codes (20 MiB) are what replaced h_S (40 MiB) and the masked path needs them (b_h's
+  bulk rows are rewritten by the in-tree layer there). Arena aliasing (d) is engine-side (§14).
+- ON TTFT int8 one slot (quality T2048, median of 7): a 16K 0.821x, 32K 0.583x; b: see below.
+- Round b: ON int8 16K **0.825x**, 32K **0.583x** (a: 0.821x / 0.583x). Copy profile, one slot, int8 (`p-int8`, one 16K
+  prefill, 336 copies): rank 0 0.50 ms, rank 1 4.53 ms a copy (two slots in S3: 0.49 / 3.94 ms; a profiled run
+  synchronises every op, so these are each copy alone); the h_S copy is gone with int8.
+
+### THE DOCUMENTED RESIDUAL (Dylan, 2026-10-05 ~20:55Z: "1% is fine" -- ACCEPTED; no half-layer slot)
+Requests that do not use KVA, int8 folder: **+0.9% (2K) / +1.2% (8K) settled prefill** against stock started in the
+same lock session, matched settled state (settle.py from /health, round a), because the plugin's ~67 MiB of VRAM a
+rank (the ring's one 25.4 MiB slot + 41 MiB of activation buffers) displaces ~63 of ~16,850 resident expert slots. Decode
+is unchanged (R77). The intermittent extra 29.3 MiB the engine sometimes reads as "already held" at startup is not
+the plugin's (a stock boot shows it too) and cannot be removed plugin-side; a boot that reads it serves with ~26 fewer
+slots whatever the mode. README "What a request that does not use KVA pays" carries this paragraph's numbers.

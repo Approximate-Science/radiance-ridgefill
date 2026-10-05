@@ -122,6 +122,13 @@ table in one host-mapped block (1.2 GiB bf16, 0.6 GiB int8) and ONE VRAM slot th
 lane copies layer L+1's map into it while the rest of layer L computes. Every request pays that slot and the
 plugin's arena buffers in resident experts (the layer-S stream, kept with bf16 maps or MTP only, and the projected
 inputs), so they are kept as small as the pass allows (notes/stagee.md §14).
+
+**What a request that does not use KVA pays (the documented residual, accepted):** with the int8 folder, about 67 MiB
+of VRAM a rank -- the ring's 25.4 MiB slot and 41 MiB of plugin activation buffers -- that the engine would otherwise
+give to resident experts (63 of ~16,850 slab slots). Measured on a server holding the projector with every pass
+running the stock step, settled, against stock started in the same session: **+0.9% at 2K and +1.2% at 8K prompt
+tokens** (notes/stagee.md §19). Decode is unchanged. With KVA on, prefill is 0.82x stock at 16K and 0.58x at 32K tokens
+(quality, tail 2,048).
 Keeping the maps in VRAM instead (an earlier option, removed) cost ~1,100 expert slots a card and made a
 configuration stock radiance serves refuse to start (`--max-num-batched-tokens 8192 --max-num-seqs 10`: the pinned
 pool overflowed), and the plugin cannot see the engine's budget when it declares (notes/stagee.md §8).
