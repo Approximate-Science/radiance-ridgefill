@@ -52,7 +52,14 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         srv = self.server
-        if self.path == "/tokenize":
+        if self.path == "/tokenize" and "messages" in body:
+            # the chat form: a word-level stand-in for the model's template, one user turn + the generation prompt
+            assert body.get("chat_template_kwargs") == {"enable_thinking": False}, "the needle asks with thinking off"
+            words = (["<|im_start|>user"] + body["messages"][0]["content"].split()
+                     + ["<|im_end|>", "<|im_start|>assistant", "<think></think>"])
+            ids = [srv.word_id(w) for w in words]
+            self._json({"count": len(ids), "tokens": ids, "max_model_len": 49152})
+        elif self.path == "/tokenize":
             srv.n_tokenize += 1
             words = body["prompt"].split()
             ids = [srv.word_id(w) for w in words]
@@ -146,10 +153,10 @@ def write_docs(path):
 
 
 def build(needle, server, docs, out, lengths="512,1024", depths="0.05,0.5,0.98",
-          keys=4, seed=0):
+          keys=4, seed=0, chat=False):
     needle.cmd_build(SimpleNamespace(
         docs=docs, lengths=lengths, depths=depths, keys=keys, seed=seed,
-        server=server.url(), out=str(out), timeout=30.0))
+        server=server.url(), out=str(out), timeout=30.0, chat=chat))
     return [json.loads(l) for l in open(out, encoding="utf-8") if l.strip()]
 
 
@@ -444,3 +451,21 @@ def test_compare_refuses_mismatched_ids(stock_server, tmp_path, capsys):
     with pytest.raises(SystemExit):
         needle.cmd_compare(SimpleNamespace(a_file=str(a), b_file=str(b)))
     assert "only in A" in capsys.readouterr().err
+
+def test_build_chat_wraps_each_prompt_in_the_template_at_the_exact_length(stock_server, tmp_path):
+    """--chat: every prompt is the template's user turn (thinking off) around filler + needles + question, still
+    EXACTLY `length` ids, the needle positions shifted by the template's head; stock retrieves every needle."""
+    needle = load_needle()
+    docs = write_docs(tmp_path / "docs.jsonl")
+    items = build(needle, stock_server, docs, tmp_path / "c.jsonl", chat=True)
+    head = [stock_server.vocab["<|im_start|>user"]]
+    tail = [stock_server.vocab[w] for w in ("<|im_end|>", "<|im_start|>assistant", "<think></think>")]
+    for it in items:
+        ids = it["prompt_ids"]
+        assert len(ids) == it["length"] == it["prompt_tokens"]
+        assert ids[:1] == head and ids[-3:] == tail
+        for n in it["needles"]:
+            assert stock_server.rev[ids[n["position"]]] == "The"
+    needle.WRAP = ([], [])   # module state: the next test builds raw prompts
+    res = run(needle, stock_server, tmp_path / "c.jsonl", tmp_path / "r.jsonl")
+    assert all(r["correct"] for r in res)

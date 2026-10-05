@@ -6,7 +6,7 @@
 # A VERSION CHANGE RE-RUNS ONLY THE VERSION-DEPENDENT PART (the measurements never read the version string):
 #   gpuq.sh release-pkg env RK_RELEASE_PARTS="package e2e" RK_RELEASE_VERSION=<x.y.z> RK_RELEASE_DIST=<fresh dir> \
 #       sh scripts/release_session.sh
-# RK_RELEASE_PARTS (default "package e2e measure") picks the parts; the frozen home of RK_RELEASE_COMMIT (default HEAD)
+# RK_RELEASE_PARTS (default "package e2e headline needle r64") picks the parts; the frozen home of RK_RELEASE_COMMIT (default HEAD)
 # is reused when it exists; extraction and the e2e work dir are per version (evidence/release/{extract,e2e}-<version>).
 #
 # Every server runs radiance 1.0.13's shipped flashnext profile (RK_RELEASE_FLAGS, below: MTP 3, prefix cache on with
@@ -31,7 +31,7 @@ W=$(CDPATH= cd "$(dirname "$0")/.." && pwd)
 cd "$W" || exit 1
 D=$(readlink -f "$W/data")
 COMMIT=$(git rev-parse "${RK_RELEASE_COMMIT:-HEAD}") SHORT=$(git rev-parse --short "${RK_RELEASE_COMMIT:-HEAD}")
-: "${RK_RELEASE_PARTS:=package e2e measure}"
+: "${RK_RELEASE_PARTS:=package e2e headline needle r64}"
 has() { case " $RK_RELEASE_PARTS " in *" $1 "*) return 0 ;; esac; return 1; }
 E=$W/evidence/release; mkdir -p "$E"
 : "${RK_RELEASE_VERSION:=0.1.0}"
@@ -55,7 +55,9 @@ export RK_DOCS=/var/home/dylan/AI-Work/kva-flashnext-tests-data/samples/quick/pp
 # instead), user 1000:1000 (rootless root already maps to the host user), group_add (the scratch image has no group
 # entries; the device nodes are world-rw here), --api-key / restart / healthcheck (test runs).
 : "${RK_RELEASE_FLAGS:=--tp 2 --tp-wire wht6 --max-num-seqs 8 --max-model-len 200000 --placement expert_tiered --host-pool-mib 12288 --gpu-headroom-mib 3072 --expert-vs-cache-ratio 0.82 --kv-cache-dtype fp8 --prefix-cache-host-mib 4096 --prefix-cache-dir /kvcache --prefix-cache-disk-mib 131072 --num-speculative-tokens 3 --max-num-batched-tokens 2048}"
-K=$E/kvcache; mkdir -p "$K"
+# the prefix cache's disk tier can fill its volume (2026-10-05: 19 GB a server filled /var/mnt/qwen-storage): the
+# cache root is a parameter, one server's dir at a time, removed before the next
+K=${RK_RELEASE_CACHE_ROOT:-$E/kvcache}; mkdir -p "$K"
 fresh_cache() {   # label: a fresh prefix-cache dir for the next server; the previous one's size logged, then removed
   for c in "$K"/*/; do [ -d "$c" ] && { echo "  kvcache $(basename "$c"): $(du -sh "$c" | cut -f1)" >> "$E/kvcache.txt"; rm -rf "$c"; }; done
   export RK_CACHE_DIR=$K/$1; mkdir -p "$RK_CACHE_DIR"
@@ -105,34 +107,15 @@ RK_DIST=$RK_RELEASE_DIST RK_E2E_WORK=$E/e2e-$RK_RELEASE_VERSION RK_E2E_CACHE_ROO
 log "e2e exit $rc: $(grep -E '^e2e: case' "$E/e2e-$RK_RELEASE_VERSION.out" | sed 's/^e2e: //' | tr '\n' '|')"
 klog
 fi
-has measure || { log "RELEASE end $(date -u +%FT%TZ) (parts: $RK_RELEASE_PARTS)"; exit 0; }
 
-# 3 + 4 ------------------------------------------------------------------------------------------------
-N=$E/needle; mkdir -p "$N"
-needle_build() {   # three seeds = three sets of distinct keys and numbers; ids prefixed by the seed
-  for s in 1 2 3; do
-    python3 tools/needle.py build --docs "$RK_DOCS" --lengths 16384,32768 --depths 0.10,0.30,0.50,0.70,0.85,0.98 \
-      --keys 4 --seed $s --out "$N/corpus-s$s.jsonl" > "$N/build-s$s.out" 2>&1 || { log "needle build FAILED (seed $s)"; return 1; }
-  done
-  python3 - "$N" <<'EOF'
-import json, sys
-n = sys.argv[1]
-with open(f"{n}/corpus.jsonl", "w") as out:
-    for s in (1, 2, 3):
-        for line in open(f"{n}/corpus-s{s}.jsonl"):
-            item = json.loads(line); item["id"] = f"S{s}/{item['id']}"; out.write(json.dumps(item) + "\n")
-EOF
-  log "needle corpus: $(wc -l < "$N/corpus.jsonl") items (16K/32K, depths 0.10-0.85 in the approximated bulk + 0.98 tail, single + 4-key, seeds 1-3)"
-}
-arm() {   # label mode: serve, warm, time, decode (stock/quality), needle (round a)
-  label=$1 mode=$2; r=${label##*-}
+# 3 headline -------------------------------------------------------------------------------------------
+arm() {   # label mode: serve, warm, time, decode (stock/quality)
+  label=$1 mode=$2
   q=$(quiet); fresh_cache "$label"
   if env RK_DOCKER_EXTRA="$MOUNT" scripts/serve.sh "$mode" > "$E/serve-$label.out" 2>&1; then
-    [ "$label" = exact-a ] && needle_build
     python3 tools/settle.py --out "$E/warm-$label.json" --docs "$RK_DOCS" --cycles 3 --lengths "2048 16384 32768" > "$E/warm-$label.txt" 2>&1
     RK_LENGTHS="16384 32768" RK_REPS=7 scripts/speed.sh "$label" > "$E/speed-$label.out" 2>&1 || log "$label: speed.sh FAILED"
     [ "$mode" = speed ] || python3 tools/mtp_accept.py --docs "$RK_DOCS" --reps 3 --out "$E/decode-$label.json" > "$E/decode-$label.txt" 2>&1
-    [ "$r" = a ] && python3 tools/needle.py run --corpus "$N/corpus.jsonl" --out "$N/results-$mode.jsonl" > "$N/run-$mode.out" 2>&1
     docker logs "radiance-kva-$mode" > "$E/$label.serve.log" 2>&1
     log "== $label ($mode; $q) $(grep -m1 -oE 'I\[0\] mover: [0-9]+ slab slots' "$E/$label.serve.log")"
     sed 's/^/    warm /' "$E/warm-$label.txt" | tee -a "$E/session.log"
@@ -142,12 +125,45 @@ arm() {   # label mode: serve, warm, time, decode (stock/quality), needle (round
        docker logs "radiance-kva-$mode" > "$E/$label.serve.log" 2>&1; fi
   scripts/stop.sh > /dev/null 2>&1; klog
 }
-for r in a b; do arm exact-$r exact; arm quality-$r quality; arm speed-$r speed; done
-for m in quality speed; do
-  log "== needle stock vs $m"; python3 tools/needle.py compare "$N/results-exact.jsonl" "$N/results-$m.jsonl" 2>&1 | tee "$N/compare-$m.txt" | head -40 | tee -a "$E/session.log"
-done
+if has headline; then
+  for a in ${RK_RELEASE_ARMS:-exact-a quality-a speed-a exact-b quality-b speed-b}; do arm "$a" "${a%-*}"; done
+fi
+
+# 4 needle: its own three servers; chat prompts (the template's user turn, thinking off), max_tokens 32 -------------
+N=$E/needle; mkdir -p "$N"
+needle_serve() {   # mode
+  fresh_cache "needle-$1"
+  env RK_DOCKER_EXTRA="$MOUNT" scripts/serve.sh "$1" > "$N/serve-$1.out" 2>&1 || { log "needle $1: serve FAILED"; return 1; }
+}
+needle_stop() { docker logs "radiance-kva-$1" > "$N/$1.serve.log" 2>&1; scripts/stop.sh > /dev/null 2>&1; klog; }
+if has needle; then
+  if needle_serve exact; then
+    for s in 1 2 3; do
+      python3 tools/needle.py build --chat --docs "$RK_DOCS" --lengths 16384,32768 --depths 0.10,0.30,0.50,0.70,0.85,0.98 \
+        --keys 4 --seed $s --out "$N/corpus-s$s.jsonl" > "$N/build-s$s.out" 2>&1 || log "needle build FAILED (seed $s)"
+    done
+    python3 tools/needle_merge.py "$N"
+    log "needle corpus: $(wc -l < "$N/corpus.jsonl") items (seeds 1-3 x 16K/32K x depths 0.10-0.85 bulk + 0.98 tail x single/4-key), $(grep -o -- '--chat: .*' "$N/build-s1.out")"
+    python3 tools/needle.py run --corpus "$N/smoke.jsonl" --out "$N/smoke-exact.jsonl" --max-tokens 32 > "$N/smoke-exact.out" 2>&1
+    gate=$(python3 tools/needle_merge.py --gate "$N/smoke-exact.jsonl")
+    log "needle smoke (stock, 6 items at 16K): $gate"
+    case "$gate" in
+      PASS*) python3 tools/needle.py run --corpus "$N/corpus.jsonl" --out "$N/results-exact.jsonl" --max-tokens 32 > "$N/run-exact.out" 2>&1
+             log "needle exact: $(tail -1 "$N/run-exact.out")"; needle_stop exact
+             for m in quality speed; do
+               needle_serve $m && python3 tools/needle.py run --corpus "$N/corpus.jsonl" --out "$N/results-$m.jsonl" --max-tokens 32 > "$N/run-$m.out" 2>&1
+               log "needle $m: $(tail -1 "$N/run-$m.out")"; needle_stop $m
+             done
+             for m in quality speed; do
+               log "== needle stock vs $m"; python3 tools/needle.py compare "$N/results-exact.jsonl" "$N/results-$m.jsonl" 2>&1 | tee "$N/compare-$m.txt" | head -40 | tee -a "$E/session.log"
+             done ;;
+      *) log "needle: STOPPED at the smoke gate (stock must score >= 5/6 with the tail item right)"; needle_stop exact ;;
+    esac
+  else needle_stop exact; fi
+fi
 
 # 5 ----------------------------------------------------------------------------------------------------
+if has r64; then
 R=$E/r64; mkdir -p "$R"
 r64() {   # label mode extra-flags
   label=$1 mode=$2 extra=$3
@@ -171,6 +187,7 @@ for i in 0 1 2 3 4; do
     $PY tools/logit_compare.py "$R/dump-exact:$R/manifest-exact.json:solo$i:0" "$R/dump-$c:$R/manifest-$c.json:solo$i:0" 2>&1 | tee -a "$E/session.log"
   done
 done
+fi
 fresh_cache done; rm -rf "$K/done"; log "prefix-cache dirs used: $(tr '\n' ' ' < "$E/kvcache.txt" 2>/dev/null)"
 log "klog after: $(journalctl -k --since "$T0" | grep -ciE 'amdgpu.*(MES|SMU|timeout|reset)')"
 log "RELEASE end $(date -u +%FT%TZ)"
