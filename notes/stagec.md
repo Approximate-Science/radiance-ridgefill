@@ -116,7 +116,7 @@ approximates those positions -- so the two differ by design and identity is the 
 | R63 | **not run** (snapshot/restore of the correction state at ≤ 1 ulp needs a capture of the pre-apply state after a restore; R62/R65 show restores working end to end) | -- |
 | R64 | **redefined** (each vs exact, cached ≤ no-cache); original form unsatisfiable by design (C1). **Not measured**: the KL-mode instrument (c4) cannot see the cache -- the engine forces the prefix cache off in KL mode (`core/engine_bringup.cpp:442-453`), both runs came out identical. Next instrument: `RADIANCE_KVA_DUMP_LOGITS` on cache / no-cache / exact HTTP servers, turn 2's generated tokens, per-token KL vs exact until the texts diverge (gate 1's tooling) | C1, C4 |
 | R65 | **green**: T_ck 0 on 9 real branches (device = oracle = records); T_ck 512: device = oracle − 512 on all 9. Answer agreement and the negative control **not run** | C2, C3 |
-| R66 | **not measured**: C3's first attempt was refused by speed.sh's own check (it numbers nonces from 1 per invocation, so with the cache on the measured prompts hit the warm-up's cache: 14,336 of 16,384 cached); `sessions/c3b.sh` reruns it with a per-invocation nonce, queued behind other lanes at the checkpoint | C3, c3b.sh |
+| R66 | **CUT** by the orchestrator (GPU-time audit, 2026-10-05): "covered by R62 + E's held cost" -- R62 shows the cache resumes where stock does (cache_n = stock 10/10, both modes) and Stage E measured the held cost of the ON server; the c3b rerun was cancelled unrun. (History: C3's first attempt was refused by speed.sh's own check -- it numbers nonces from 1 per invocation, so with the cache on the measured prompts hit the warm-up's cache: 14,336 of 16,384 cached.) | C3; c3b.sh not run |
 | R68 | **green**: superset flags exactly the 9 branches, per-request AGREE with the device after the in-order pairing fix | C2 |
 | static | 56 arch cases / 680,943 checks, kernel host 851 + GPU 1,158 (incl. kva_hazard device == host); mutants F1-F5, H1-H8 caught | §1, C1 |
 | R6/R7 | **green** at 041ab13 | C1 |
@@ -133,4 +133,4 @@ document past positions the reference holds"). R64 needs the HTTP instrument abo
 stage-c merges cleanly into main (ff48939); host tests 3/3, arch_static 56 cases, kernel host 851,
 test_hazard_rate 11/11. Code: T_ck floor, cache profile, kva_hazard + wiring, tools (turns, branch_send,
 turns_kld_corpus, hazard_rate pairing fix). Green: R62, R65 (T_ck 0 and 512, 9 real branches), R68,
-R6/R7, static + mutants. Not measured: R63, R64 (needs the HTTP/logits instrument), R66 (c3b queued).
+R6/R7, static + mutants. Not measured: R63, R64 (needs the HTTP/logits instrument). R66 cut (covered by R62 + E's held cost).
