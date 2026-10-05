@@ -26,6 +26,16 @@
  *                             rows inside an ON server, and A.1's 64-row guard cost 331 ms at 9,216
  *                             and ran every T 2560 chunk exact. A threshold stays available for a
  *                             machine where the link makes streaming many rows lose    default unlimited
+ *   env RADIANCE_KVA_MIN_BULK_ROWS  a pass approximates only when it has at least this many bulk rows
+ *                             (b - s_lb), else it runs the stock step. The projector is always in host
+ *                             memory, so EVERY approximate pass streams every late layer's map over the
+ *                             link whatever its rows: measured
+ *                             (notes/stageb.md session 2c), the 64-row checkpoint remainders a
+ *                             decoder-shared prompt alternates with cost 208-222 ms masked vs 61-92 ms
+ *                             stock, and the decoders riding them got 2.2-3.5x slower. The two measured
+ *                             shapes put break-even near 640 rows; 1,024 because below the stager's
+ *                             1,025-row arming the stock step does not stage and is cheaper than that
+ *                             line (unmeasured in between)                         default 1024
  *   env RADIANCE_KVA_FINAL    on | off: with MTP (--num-speculative-tokens > 0) and a folder holding the
  *                             `final` map, every approximate pass writes the predicted final stream of its
  *                             bulk rows into the trunk's stream before the epilogue, which the MTP head reads
@@ -42,6 +52,9 @@
  *   RADIANCE_KVA_FORCE_STREAM 1: the late layers stream on every masked pass (R94)
  *   RADIANCE_KVA_TAIL_ONLY    0: speed straddles take the masked path instead of the tail-only one
  *                             (the oracle the tail-only path is compared with, A.1)
+ *   RADIANCE_KVA_MASK         all: a masked pass approximates EVERY row before its bulk end, the
+ *                             decoders' and the other prompts' included -- R54's negative control,
+ *                             which must change a decoder's text (speed and quality only)
  *
  * THE PROJECTOR FOLDER (PACKAGING.md; kva_folder.h, kva_projector.h). The fitted tensors come from
  * `<model dir>/projector/` and never from the container -- kva.* weights and keys an earlier append
@@ -89,6 +102,9 @@ static const char* const kRowselNames[]   = { "class", "random", "all" };
 static const char* const kStageNames[]    = { "auto", "stock" };
 static const char* const kStraddleNames[] = { "split", "end" };
 
+/* RADIANCE_KVA_MIN_BULK_ROWS's default with the projector in host memory (the doc block above). */
+constexpr int64_t kHostMinBulkRows = 1024;
+
 /* The shortest exact tail the method was ever run at (tcc's MIN_TAIL, KVA-FACTS §5). */
 constexpr int64_t kMinTail = 512;
 
@@ -105,6 +121,7 @@ struct Config {
     int         rowsel_table = 0;          /* kScoreNames' index: score, score_none, score_all */
     int         stage       = STAGE_AUTO;
     int64_t     stage_rows  = INT64_MAX;   /* always stream: notes/impl.md A.1 R96, the guard's trade */
+    int64_t     min_bulk_rows = -1;        /* -1: the default (kHostMinBulkRows), resolved in read_config */
     bool        score_bulk  = false;
     bool        final_on    = true;        /* RADIANCE_KVA_FINAL: the MTP `final` map, when held and MTP is on */
     int         straddle    = STRADDLE_SPLIT;
@@ -112,6 +129,7 @@ struct Config {
     int64_t     shift_b     = 0;
     bool        force_stream = false;
     bool        tail_only   = true;
+    bool        mask_step   = false;       /* RADIANCE_KVA_MASK=all */
     const char* meta_mode   = nullptr;     /* the container's kva.mode, if it has one: ignored */
 };
 
@@ -200,6 +218,7 @@ inline int read_switches(Config* c) {
     int v = 0;
     RAD_ARCH_TRY(read_choice("RADIANCE_KVA_STAGE", { "auto", "stock" }, "auto|stock", &c->stage));
     RAD_ARCH_TRY(read_int("RADIANCE_KVA_STAGE_ROWS", 0, INT64_MAX, "a row count", &c->stage_rows));
+    RAD_ARCH_TRY(read_int("RADIANCE_KVA_MIN_BULK_ROWS", 0, INT64_MAX, "a row count", &c->min_bulk_rows));
     RAD_ARCH_TRY(read_choice("RADIANCE_KVA_SCORE_BULK", { "0", "1" }, "1 or unset", &v));
     c->score_bulk = v == 1;
     RAD_ARCH_TRY(read_choice("RADIANCE_KVA_FINAL", { "on", "off" }, "on|off", &v));
@@ -214,6 +233,13 @@ inline int read_switches(Config* c) {
     c->force_stream = v == 1;
     RAD_ARCH_TRY(read_choice("RADIANCE_KVA_TAIL_ONLY", { "1", "0" }, "0 or unset", &v));
     c->tail_only = v == 0;
+    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_MASK", { "rule", "all" }, "all or unset", &v));
+    c->mask_step = v == 1;
+    if (c->mask_step && c->mode == MODE_PLUMB) {
+        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_MASK=all approximates rows and mode "
+                             "plumb projects none; it takes speed or quality\n");
+        return RAD_E_INVAL;
+    }
     return RAD_OK;
 }
 
@@ -237,7 +263,9 @@ inline int read_config(const RadModelMeta* meta, Config* c) {
         return RAD_E_INVAL;
     }
     RAD_ARCH_TRY(read_switches(c));
-    return read_variants(c);
+    RAD_ARCH_TRY(read_variants(c));
+    if (c->min_bulk_rows < 0) c->min_bulk_rows = kHostMinBulkRows;
+    return RAD_OK;
 }
 
 }  /* namespace qwen4exp_kva */

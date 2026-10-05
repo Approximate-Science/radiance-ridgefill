@@ -67,8 +67,8 @@ extern "C" int kva_mask_parse(const RadArgs* a, KvaMask* g) {
     const RadTensor* mask = rad_arg_in(a, MK_MASK);
     const RadTensor* bounds = rad_arg_in(a, MK_BOUNDS);
     const RadTensor* zeros = rad_arg_in(a, MK_ZEROS);   /* optional */
-    static const char* const modes[] = { "none", "class", "random", "all" };
-    g->mode = parse_mode(rad_args_gets(a, "mode"), modes, 4);
+    static const char* const modes[] = { "none", "class", "random", "all", "step" };
+    g->mode = parse_mode(rad_args_gets(a, "mode"), modes, 5);
     g->share = rad_args_getf_or(a, "share", NAN);
     long long seed = 0;
     const bool ranked = g->mode == KVA_MODE_CLASS || g->mode == KVA_MODE_RANDOM;
@@ -320,7 +320,7 @@ extern "C" int kva_mask_host(const RadArgs* a, RadStream) {
     int64_t w[3];
     if (!kva_mask_window(g.cu_last[0], g.cu_last[1], g.b, g.n, w)) return RAD_E_INVAL;
     for (int64_t i = 0; i < g.n; ++i) g.mask[i] = 0;   /* outside the window: exact */
-    mask_window_host(g, w[0], w[1]);
+    mask_window_host(g, kva_mask_from(g.mode, w), w[1]);
     const int32_t bounds[4] = { (int32_t)w[0], (int32_t)w[1], (int32_t)w[1], (int32_t)w[2] };
     std::memcpy(g.bounds, bounds, sizeof bounds);
     for (int64_t i = 0; i < g.n_zeros; ++i) g.zeros[i] = 0;

@@ -82,7 +82,9 @@ static const RadOpSchema kSchemas[] = {
   "(cu_seqlens + n_seq - 1, read on the device); b = token_ids' extent (rows [0, b) of the step, "
   "the bulk end; M is issued at b only to pick the band); b' = min(max(b, s), e); the window is "
   "W = [s, b'). mask [n] (n = its extent) is written on every row: 0 outside W. Inside W, mode "
-  "none: 1 (every row approximated); all: 0 (every row exact); class: a row matches when "
+  "none: 1 (every row approximated); all: 0 (every row exact); step (a debug control): 1 on every "
+  "row of [0, b') when W is not empty -- the step's other sequences included -- else as none; "
+  "class: a row matches when "
   "score[token_ids[i]] is finite (an id outside the table does not); k = rint(share * matches in "
   "W), half to even (Python's round); a row is kept (0) iff it matches and fewer than k matching "
   "rows of W rank before it by (score descending, row ascending), else 1; random: the same k over "
@@ -274,8 +276,8 @@ static int shape_state_read(const RadParam* p, int n_p, int operand, RadOpdDesc*
 
 /* ================================================================== the row table */
 
-static const RadConstraint cMaskHost[] = { RAD_CIN("mode", "none class random all") };
-static const RadConstraint cMaskDevice[] = { RAD_CIN("mode", "none class random all"),
+static const RadConstraint cMaskHost[] = { RAD_CIN("mode", "none class random all step") };
+static const RadConstraint cMaskDevice[] = { RAD_CIN("mode", "none class random all step"),
                                              RAD_CLE("M", KVA_MASK_MAX_ROWS) };
 static const RadConstraint cCorrect[] = { RAD_CIN("mode", "undo apply") };
 

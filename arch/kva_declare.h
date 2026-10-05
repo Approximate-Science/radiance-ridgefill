@@ -85,7 +85,7 @@ struct Kva {
     std::string dump_dir;                     /* RADIANCE_KVA_DUMP, empty when unset */
     /* Stage 6 captures (debug; notes/arch.md "Capture"): RADIANCE_KVA_CAPTURE and
      * RADIANCE_KVA_CAPTURE_STATE, and the copy op the state capture needs. */
-    std::string capture_dir, state_dir;
+    std::string capture_dir, state_dir, logits_dir;   /* debug dumps, read at declare */
     rad_buf     b_state = 0;
     rad_op      op_state_read = 0;
 };

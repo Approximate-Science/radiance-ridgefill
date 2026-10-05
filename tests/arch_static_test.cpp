@@ -840,10 +840,12 @@ struct Pair {
     RadBuilder stock, kva;
     int        st = RAD_OK;
 };
-void declare_pair(Pair& p, const char* mode, int rank = 0, int world = 1, int64_t max_out_rows = 0) {
+void declare_pair(Pair& p, const char* mode, int rank = 0, int world = 1, int64_t max_out_rows = 0,
+                  int max_spec = 0) {
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx(rank, world);
     c.max_out_rows = max_out_rows;
+    c.max_spec = max_spec;
     served(p.stock);
     served(p.kva);
     hold_kva(p.kva, {"kva.proj", "kva.st"});
@@ -908,6 +910,7 @@ struct Shape {
     std::vector<int32_t> q;
     int64_t D = 0, ahead = 0;
     int32_t ctx = 4096;
+    int32_t n_spec = 0;   /* draft depth of the step: each decode entry verifies 1 + n_spec rows */
 };
 Batch make_step(const RadBuilder& bld, const Shape& s) {
     static int32_t ids[4096], pos[4096], cu[17], slot[4096], table[16 * 1024];
@@ -935,7 +938,7 @@ Batch make_step(const RadBuilder& bld, const Shape& s) {
     }
     b.kv = x.kv.data();
     b.phase = s.D == 0 ? RAD_PHASE_PREFILL : s.D == n ? RAD_PHASE_DECODE : RAD_PHASE_MIXED;
-    b.n_tok = T; b.n_seq = n; b.n_ahead = s.ahead;
+    b.n_tok = T; b.n_seq = n; b.n_ahead = s.ahead; b.n_spec = s.n_spec;
     b.token_ids = ids; b.positions = pos; b.cu_seqlens = cu;
     b.n_out = 0; b.out_ids = nullptr;
     b.q_lens = qlen; b.ctx_lens = ctxl; b.num_accepted = acc;
@@ -962,6 +965,7 @@ TEST(the_approximate_decision_truth_table) {
     using qwen4exp_kva::PATH_LEAN;
     using qwen4exp_kva::PATH_MASKED;
     using qwen4exp_kva::PATH_STRADDLE;
+    using qwen4exp_kva::PATH_DECODERS;
     const auto none = [](RadBatch&) {};
     const std::vector<Row> rows = {
         {"whole bulk chunk, speed", "speed", {{2048}, 0, 2048}, none, PATH_LEAN, 2048, 0, false},
@@ -983,8 +987,11 @@ TEST(the_approximate_decision_truth_table) {
         {"media rows", "quality", {{2048}, 0, 2048}, [](RadBatch& b) { b.n_mm_rows = 5; }, PATH_STOCK, 0, 0, false},
         {"mixed rope", "speed", {{2048}, 0, 2048},
          [](RadBatch& b) { static int32_t rp[3]; b.rope_pos = rp; b.rope_mixed = 1; }, PATH_STOCK, 0, 0, false},
-        {"one decoder beside", "speed", {{1, 1984}, 1, 2048}, none, PATH_MASKED, 1985, 1, true},
-        {"eight decoders beside", "speed", {{1, 1, 1, 1, 1, 1, 1, 1, 1984}, 8, 2048}, none, PATH_MASKED, 1992, 8, true},
+        {"one decoder beside", "speed", {{1, 1984}, 1, 2048}, none, PATH_DECODERS, 1985, 1, true},
+        {"eight decoders beside", "speed", {{1, 1, 1, 1, 1, 1, 1, 1, 1984}, 8, 2048}, none, PATH_DECODERS, 1992, 8, true},
+        {"decoders beside a straddle: 1,025 exact rows > the table's 64", "speed", {{1, 1984}, 1, 1024}, none, PATH_STOCK, 0, 0, false},
+        {"decoders beside, short context: dense attention", "speed", {{1, 1984}, 1, 2048, 0}, none, PATH_MASKED, 1985, 1, true},
+        {"one decoder beside, quality", "quality", {{1, 1984}, 1, 2048}, none, PATH_MASKED, 1985, 1, true},
         {"eight decoders, straddle: 1096 exact rows run exact", "quality", {{1, 1, 1, 1, 1, 1, 1, 1, 1984}, 8, 1000}, none, PATH_STOCK, 0, 0, false},
         {"two prefills, last long", "speed", {{64, 1984}, 0, 2048}, none, PATH_MASKED, 2048, 64, true},
         {"two prefills, last short", "speed", {{1984, 64}, 0, 2048}, none, PATH_MASKED, 2048, 64, true},
@@ -1025,6 +1032,48 @@ TEST(the_planner_straddles_only_in_speed) {
     }
     in.mode = PLAN_SPEED;
     CHECK_EQ(plan_pass(in, pc).path, PATH_STRADDLE);
+    /* beside decoders, whole bulk: the decoders path is speed's alone, even when an adapter claims
+     * the per-row attention form for every mode */
+    in.n_tok = 2049; in.n_seq = 2; in.n_seq_decode = 1; in.n_tok_decode = 1; in.q_prefill = 2048; in.n_ahead = 2048;
+    CHECK_EQ(plan_pass(in, pc).path, PATH_DECODERS);
+    for (int mode : {PLAN_PLUMB, PLAN_QUALITY}) {
+        in.mode = mode;
+        CHECK_EQ(plan_pass(in, pc).path, PATH_MASKED);
+    }
+}
+
+/* R56 (host placement) -- A PASS APPROXIMATES ONLY WITH ENOUGH BULK ROWS: a decoder-shared prompt's
+ * 64-row checkpoint remainder runs the stock step when the projector lives in host memory (every
+ * approximate pass streams the whole projector), the 1,984-row chunk beside it still approximates;
+ * the bound is inclusive and is the bulk superset b - s_lb, a keyed number. Plumb (the oracle) is
+ * never held back. Default 1,024 (the projector is always in host memory); the switch overrides it. */
+TEST(a_host_placed_projector_approximates_only_passes_with_enough_bulk_rows) {
+    using namespace qwen4exp_kva;
+    PlanIn in;
+    in.eligible = in.stream_ok = true;
+    in.n_seq = 2; in.n_seq_decode = 1; in.n_tok_decode = 1; in.n_ahead = 2048;
+    PlanConfig pc;
+    pc.min_bulk_rows = 1024;
+    struct Case { int mode; int64_t bulk; int path; };
+    for (const Case& c : {Case{PLAN_QUALITY, 64, PATH_STOCK}, Case{PLAN_SPEED, 64, PATH_STOCK},
+                          Case{PLAN_QUALITY, 1023, PATH_STOCK}, Case{PLAN_QUALITY, 1024, PATH_MASKED},
+                          Case{PLAN_SPEED, 1984, PATH_MASKED}, Case{PLAN_PLUMB, 64, PATH_MASKED}}) {
+        in.mode = c.mode;
+        in.n_tok = 1 + c.bulk; in.q_prefill = c.bulk;
+        CHECK_EQ(plan_pass(in, pc).path, c.path);
+    }
+    {
+        Env e({{"RADIANCE_KVA", "quality"}});
+        Config cfg;
+        RadModelMeta meta = flash_next_meta();
+        REQUIRE_EQ(read_config(&meta, &cfg), RAD_OK);
+        CHECK_EQ(cfg.min_bulk_rows, 1024);
+    }
+    Env e({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_MIN_BULK_ROWS", "0"}});
+    Config cfg;
+    RadModelMeta meta = flash_next_meta();
+    REQUIRE_EQ(read_config(&meta, &cfg), RAD_OK);
+    CHECK_EQ(cfg.min_bulk_rows, 0);
 }
 
 /* R73 -- KL MODE IS EXACT UNLESS THE SWITCH IS SET: a declare that sizes logits for every prompt
@@ -1468,6 +1517,122 @@ std::vector<RecIssue> straddle_expected(const std::vector<RecIssue>& seg, const 
     return out;
 }
 
+/* SPEED BESIDE DECODERS, one late layer as the oracle sees it: the in-tree helpers over the decoder
+ * rows [0, DT) (connection read/write, MoE pass, output linears), the attention's indexer, K/V and
+ * query path over every row and its per-row sparse attention over [0, DT); the delta net's
+ * projections, decode half, conv/kkt and corrected scan as stock issues them, its output projection
+ * over [0, DT); the bulk rows' projection from the layer-S stream into `x` and its codes. */
+std::vector<RecIssue> decoders_layer_expected(const std::vector<RecIssue>& seg, const Batch& x, int l, int rank) {
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
+    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    const qwen4exp_fp8::Layer& lay = m.layers[(size_t)l];
+    const RadBatch& bt = x.b;
+    const int64_t T = bt.n_tok, DT = bt.n_tok_decode, n = m.g.n_embd, wide = m.hccfg.hc * n, bulk = T - DT;
+    std::vector<RecIssue> out = issues_by([&](RadCtx* cx) { lay.hc_mix.read(cx, T, 0, DT); });
+    out.push_back({k.op_proj[(size_t)l], {brow_slice(m.b_h, DT, bulk, wide), k.proj_w[(size_t)l], k.proj_b[(size_t)l],
+                   RAD_NONE, brow_slice(m.a_x.x, DT, bulk, n)}, bulk});
+    out.push_back({k.quant.op, {brow_slice(m.a_x.x, DT, bulk, n), brow_slice(m.a_x.q8, DT, bulk, n),
+                   brow_slice(m.a_x.s8, DT, bulk, n / 128)}, bulk});
+    if (lay.full) {
+        const AttnGatedFP8& a = lay.attn;
+        const int64_t qw = a.g.q_dim(), hd = a.g.head_dim;
+        append(out, issues_by([&](RadCtx* cx) { lay.qsa.step(cx, a.w.h, &bt); }));
+        std::set<rad_op> kv, q;
+        add_linear(kv, a.kp);
+        add_linear(kv, a.vp);
+        for (rad_op h : {a.op_k_norm, a.op_rope_k, a.op_kv_store}) kv.insert(h);
+        add_linear(q, a.qg);
+        for (rad_op h : {a.op_q_norm, a.op_rope_q}) q.insert(h);
+        append(out, pick(seg, kv));
+        append(out, pick(seg, q));
+        out.push_back({a.op_attn_gq, {brow_slice(a.w.q, 0, DT, qw), kv_cache(a.kv, a.layer),
+                       brow_slice(a.qsa_sel, 0, DT, a.qsa_topk + 1), brow_slice(a.qsa_sequ, 0, DT, 1),
+                       RAD_NONE, RAD_NONE, RAD_NONE, brow_slice(a.w.attn.x, 0, DT, qw),
+                       bcol_at(a.w.qg, 0, a.g.n_head * 2 * hd, hd, hd, DT),
+                       brow_slice(a.w.attn.cq(), 0, DT, qw), brow_slice(a.w.attn.cs(), 0, DT, qw / 128)}, 1});
+        append(out, issues_by([&](RadCtx* cx) { a.o.step(cx, a.w.attn, a.w.h.x, T, 0, DT); }));
+        if (a.op_ar && !rad::arch::ar_taken(a.g, T, a.ar_out, a.ar_out_take))
+            out.push_back({a.op_ar, {brow_slice(a.w.h.x, 0, DT, n), RAD_NONE}, DT * n});
+    } else {
+        const GdnFP8& d = lay.gdn;
+        std::set<rad_op> front, half;
+        add_linear(front, d.in);
+        front.insert(d.op_ab);
+        for (rad_op h : {d.op_cr, d.op_conv_update, d.op_recur}) if (h) half.insert(h);
+        append(out, pick(seg, front));
+        append(out, pick(seg, half));
+        Want w;
+        w.b = T; w.correct = true;
+        for (const RecIssue& r : seg) {
+            if (r.op == d.op_conv_prep) out.push_back({k.op_undo[(size_t)l], correction_operands(x, l, rank), 1});
+            if (r.op == d.op_conv_prep || r.op == d.op_kkt) out.push_back(r);
+            if (r.op == d.op_scan) push_scans(out, r, x, l, w, rank);
+        }
+        append(out, issues_by([&](RadCtx* cx) { d.out.step(cx, d.w.o, d.w.h.x, T, 0, DT); }));
+        if (d.op_ar && !rad::arch::ar_taken(d.g, T, d.ar_out, d.ar_out_take))
+            out.push_back({d.op_ar, {brow_slice(d.w.h.x, 0, DT, n), RAD_NONE}, DT * n});
+    }
+    append(out, issues_by([&](RadCtx* cx) { lay.hc_mix.write(cx, T, 0, DT); }));
+    append(out, issues_by([&](RadCtx* cx) { lay.hc_ffn.read(cx, T, 0, DT); }));
+    append(out, issues_by([&](RadCtx* cx) { lay.mlp.pass(cx, T, 0, DT); }));
+    append(out, issues_by([&](RadCtx* cx) { lay.hc_ffn.write(cx, T, 0, DT); }));
+    return out;
+}
+
+/* The whole step of speed beside decoders: the in-tree step's issues on this batch up to layer S
+ * with the mask ahead of layer 0 (zeros and bounds) and the stager probes behind layer S-3's gate-up
+ * (the decoders' late experts stream), then decoders_layer_expected per late layer, the epilogue stock. */
+std::vector<RecIssue> decoders_expected(const Batch& x, int rank = 0) {
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
+    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    const RadBatch& b = x.b;
+    const std::vector<RecIssue> stock = run_step(qwen4exp_fp8::step, b, rank).issues;
+    std::vector<rad_op> reads;
+    for (int l = kSplit; l < 8; ++l) reads.push_back(m.layers[(size_t)l].hc_mix.op_read);
+    const std::vector<size_t> at = starts(stock, reads, m.mixer.op_read);
+    std::vector<RecIssue> out;
+    for (size_t i = 0; i < at[0]; ++i) {
+        if (stock[i].op == m.layers[0].hc_mix.op_read)
+            out.push_back({k.op_mask, {praw(b.cu_seqlens + b.n_seq - 1, RAD_I32, 2), praw(b.token_ids, RAD_I32, b.n_tok),
+                           praw(b.positions, RAD_I32, b.n_tok), RAD_NONE, brows(k.b_mask, b.n_tok),
+                           brows(k.b_bounds, 4), brows(k.b_zeros, k.n_zeros)}, b.n_tok});
+        out.push_back(stock[i]);
+        if (stock[i].op == m.layers[kSplit - 3].mlp.op_gu)
+            for (int p = kSplit - 1; p < 8; ++p) out.push_back(probe_of(stock, p, rank));
+    }
+    for (int l = kSplit; l < 8; ++l)
+        append(out, decoders_layer_expected(slice(stock, at[(size_t)(l - kSplit)], at[(size_t)(l - kSplit + 1)]), x, l, rank));
+    for (size_t i = at.back(); i < stock.size(); ++i) out.push_back(stock[i]);
+    return out;
+}
+
+/* R55 -- SPEED BESIDE DECODERS keeps the lean fill for its bulk rows and runs the full late blocks
+ * over the decoder rows only, at TP1 and on rank 0 of TP2 (where the connection writes carry the
+ * all-reduce), one decoder and four verifying 1 + 3 rows; the log names the path; nothing reaches
+ * the device. RADIANCE_KVA_MASK=all and TAIL_ONLY=0 keep the masked path (the controls/oracle). */
+TEST(speed_beside_decoders_runs_full_late_blocks_over_the_decoder_rows_only) {
+    struct Case { int world; Shape s; };
+    for (const Case& c : {Case{1, {{1, 128}, 1, 2048}}, Case{2, {{1, 128}, 1, 2048}},
+                          Case{2, {{4, 4, 4, 4, 128}, 4, 2048, 4096, 3}}}) {
+        Pair p;
+        declare_pair(p, "speed", 0, c.world, 0, c.s.n_spec);
+        REQUIRE_EQ(p.st, RAD_OK);
+        Batch x = make_step(p.kva, c.s);
+        const Run got = run_step(qwen4exp_kva::step, x.b);
+        CHECK_EQ(differ_at(got.issues, decoders_expected(x)), 0);
+        CHECK(has(got.log, "decoders, stage stream"));
+        CHECK_EQ(got.device_calls, 0);
+    }
+    for (auto [name, value] : {std::pair<const char*, const char*>{"RADIANCE_KVA_MASK", "all"}, {"RADIANCE_KVA_TAIL_ONLY", "0"}}) {
+        Env e({{name, value}});
+        Pair p;
+        declare_pair(p, "speed");
+        REQUIRE_EQ(p.st, RAD_OK);
+        Batch x = make_step(p.kva, {{1, 128}, 1, 2048});
+        CHECK_EQ(qwen4exp_kva::derive(qwen4exp_kva::g_kva[0], &x.b).path, qwen4exp_kva::PATH_MASKED);
+    }
+}
+
 /* A.1 -- A SPEED STRADDLE RUNS ITS LATE BLOCKS OVER THE TAIL ROWS ONLY: 64 tokens ahead of a 128-row
  * chunk (b = 64). The mask (for the split scan's bounds) ahead of layer 0, layers 0..S-1 stock with
  * no probes (a tile of exact rows already reads most experts: the pass stages), then per late layer
@@ -1528,6 +1693,80 @@ TEST(a_mixed_step_corrects_only_the_last_sequence) {
         CHECK_EQ(differ_at(got.issues, masked_expected(x, w)), 0);
         CHECK_EQ(count(got.log, "kva: approximate step"), 1);
     }
+}
+
+/* R53' -- THE FULL MIXED SET: D in {1, 4} decoders, verifying one row or 1 + n_spec 3 rows each, beside
+ * one or two prefill chunks, the last whole-bulk or straddling, in speed and quality. Each step is the
+ * in-tree step (its decode half over [0, DT) with num_accepted, the other prefill's scan as stock)
+ * with only the masked path's substitutions; the correction and the decay sums take M = 1 on index
+ * row n_seq - 1; the drop and every connection op run at M = n_tok. */
+TEST(r53_mixed_steps_are_the_in_tree_step_with_only_the_last_sequence_masked) {
+    struct Case { Shape s; int64_t b, s_lb; };
+    Env stream_rows({{"RADIANCE_KVA_STAGE_ROWS", "4096"}});   /* the issue shape, not the guard */
+    const std::vector<Case> cases = {
+        {{{1, 128}, 1, 2048}, 129, 1},
+        {{{1, 1, 1, 1, 128}, 4, 2048}, 132, 4},
+        {{{4, 128}, 1, 2048, 4096, 3}, 132, 4},
+        {{{4, 4, 4, 4, 128}, 4, 2048, 4096, 3}, 144, 16},
+        {{{1, 64, 128}, 1, 2048}, 193, 65},
+        {{{4, 4, 4, 4, 64, 128}, 4, 2048, 4096, 3}, 208, 80},
+        {{{1, 1, 1, 1, 128}, 4, 1984}, 68, 4},                  /* straddle: b = n_tok - 64 */
+        {{{4, 4, 4, 4, 64, 128}, 4, 1984, 4096, 3}, 144, 80},   /* straddle beside a prefill */
+    };
+    for (const char* mode : {"quality", "speed"})
+        for (const Case& c : cases) {
+            const bool quality = !std::strcmp(mode, "quality");
+            Pair p;
+            declare_pair(p, mode, 0, 1, 0, c.s.n_spec);
+            REQUIRE_EQ(p.st, RAD_OK);
+            Batch x = make_step(p.kva, c.s);
+            const qwen4exp_kva::Pass pass = qwen4exp_kva::derive(qwen4exp_kva::g_kva[0], &x.b);
+            const bool decoders = !quality && c.b == x.b.n_tok && x.b.n_seq - x.b.n_seq_decode == 1;
+            CHECK_EQ(pass.path, decoders ? qwen4exp_kva::PATH_DECODERS : qwen4exp_kva::PATH_MASKED);
+            if (decoders) {
+                const Run got = run_step(qwen4exp_kva::step, x.b);
+                CHECK_EQ(differ_at(got.issues, decoders_expected(x)), 0);
+                CHECK(has(got.log, "decoders, stage stream"));
+                continue;
+            }
+            Want w;
+            w.b = c.b; w.s_lb = c.s_lb; w.rho_rows = c.b;
+            w.stream = w.project = w.correct = true;
+            w.rho = w.scored = quality;
+            w.split = c.b < x.b.n_tok;
+            const Run got = run_step(qwen4exp_kva::step, x.b);
+            CHECK_EQ(differ_at(got.issues, masked_expected(x, w)), 0);
+            CHECK_EQ(count(got.log, "kva: approximate step"), 1);
+            CHECK_EQ(got.device_calls, 0);
+        }
+}
+
+/* R54'S NEGATIVE CONTROL (RADIANCE_KVA_MASK=all): the mask op is declared in `step` mode (every row
+ * before the bulk end approximated, decoders included) and the projector covers the step from row
+ * 0, so the decoders' rows are projected, selected and dropped like bulk rows; otherwise the issue
+ * sequence is the masked path's. It is said loudly at declare, and plumb (which projects nothing)
+ * refuses it. */
+TEST(the_mask_all_control_approximates_every_row_before_the_bulk_end) {
+    Env e({{"RADIANCE_KVA_MASK", "all"}});
+    Pair p;
+    const std::string log = stderr_of([&] { declare_pair(p, "quality"); });
+    REQUIRE_EQ(p.st, RAD_OK);
+    CHECK(has(log, "DEBUG RADIANCE_KVA_MASK=all"));
+    int step_mode = 0;
+    for (const RecOp& o : p.kva.ops)
+        for (const RecParam& q : o.p) step_mode += o.op == "kva_mask" && q.key == "mode" && q.sval == "step";
+    CHECK_EQ(step_mode, 1);
+    Batch x = make_step(p.kva, {{1, 1, 128}, 2, 2048});
+    Want w;
+    w.b = 130; w.s_lb = 0; w.rho_rows = 130;
+    w.stream = w.project = w.correct = w.rho = true;
+    const Run got = run_step(qwen4exp_kva::step, x.b);
+    CHECK_EQ(differ_at(got.issues, masked_expected(x, w)), 0);
+    CHECK(has(got.log, "s_lb 0,"));
+    Pair q;
+    const std::string err = stderr_of([&] { declare_pair(q, "plumb"); });
+    CHECK_EQ(q.st, RAD_E_INVAL);
+    CHECK(has(err, "RADIANCE_KVA_MASK=all"));
 }
 
 /* A ONE-SEQUENCE CHUNK OFF THE DELTA NET'S TILE FAILS THE STEP BY NAME: the scheduler never cuts one,
@@ -1903,6 +2142,70 @@ TEST(state_capture_copies_each_late_state_before_the_apply) {
     CHECK_EQ(descr, std::string("<f4"));
 }
 
+/* R61's instrument -- RADIANCE_KVA_CAPTURE_STATE ON A MIXED STEP copies, after the step, every
+ * sequence's state of every late delta-net layer (sequence-major, its own index row), in off (the
+ * stock step) and on a masked approximate step alike; the step's own issues are unchanged. */
+TEST(a_mixed_step_capture_copies_every_sequences_late_states_after_the_step) {
+    for (const char* mode : {"off", "quality"}) {
+        TempDir dir;
+        REQUIRE(!dir.path.empty());
+        Env env({{"RADIANCE_KVA_STAGE_ROWS", "4096"}, {"RADIANCE_KVA_CAPTURE_STATE", dir.path.c_str()}});
+        Pair q;
+        declare_pair(q, mode);
+        REQUIRE_EQ(q.st, RAD_OK);
+        const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
+        const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+        Batch x = make_step(q.kva, {{1, 1, 128}, 2, 2048});
+        Want w;   /* quality: the masked step of a_mixed_step_corrects_only_the_last_sequence */
+        w.b = 130; w.s_lb = 2; w.rho_rows = 130;
+        w.stream = w.project = w.correct = w.rho = w.scored = true;
+        const std::vector<RecIssue> plain = std::strcmp(mode, "off") ? masked_expected(x, w)
+                                                                     : run_step(qwen4exp_fp8::step, x.b).issues;
+        const Run got = run_step(qwen4exp_kva::step, x.b);
+        REQUIRE(got.issues.size() == plain.size() + 9);
+        CHECK_EQ(differ_at(std::vector<RecIssue>(got.issues.begin(), got.issues.begin() + (long)plain.size()), plain), 0);
+        for (int seq = 0; seq < 3; ++seq)
+            for (int j = 0; j < 3; ++j) {
+                const RecIssue& r = got.issues[plain.size() + (size_t)(seq * 3 + j)];
+                CHECK_EQ(r.op, k.op_state_read);
+                CHECK(same_operand(r.opd[0], kv_cache(m.kv_state, std::vector<int>{4, 5, 6}[(size_t)j])));
+                CHECK(same_operand(r.opd[1], praw2(x.b.kv[m.kv_state - 1].state_index + seq * 3, RAD_I32, 1, 3)));
+            }
+        const std::string lines = slurp(dir.path / "mixed.jsonl");
+        CHECK_EQ(count(lines, "\n"), 1);
+        CHECK(has(lines, "\"n_seq\": 3, \"n_seq_decode\": 2, \"cu\": [0, 1, 2, 130]"));
+        CHECK(has(lines, std::strcmp(mode, "off") ? "\"approximate\": true" : "\"approximate\": false"));
+        std::string descr;
+        const std::filesystem::path f = find_file(dir.path, "mixed.p", ".r0.npy");
+        REQUIRE(!f.empty());
+        CHECK(npy_shape(f, &descr) == std::vector<int64_t>({3, 3, m.gcfg.n_head_v, 128, 128}));
+    }
+}
+
+/* Gate 1's instrument -- RADIANCE_KVA_DUMP_LOGITS writes, after a pass with output rows, each rank's
+ * logits rows and what each row is (its sequence by cu_seqlens, position, token), in any mode, off
+ * included, and changes nothing the step issues. */
+TEST(the_logits_dump_names_each_rows_sequence_and_changes_no_issue) {
+    TempDir dir;
+    REQUIRE(!dir.path.empty());
+    Env e({{"RADIANCE_KVA_DUMP_LOGITS", dir.path.c_str()}});
+    Pair p;
+    declare_pair(p, "off");
+    REQUIRE_EQ(p.st, RAD_OK);
+    Batch x = make_step(p.kva, {{1, 1, 128}, 2, 0});
+    static int32_t out_ids[3] = {0, 1, 129};
+    x.b.n_out = 3;
+    x.b.out_ids = out_ids;
+    const Run got = run_step(qwen4exp_kva::step, x.b);
+    CHECK_EQ(differ(got.issues, run_step(qwen4exp_fp8::step, x.b).issues), 0);
+    const std::string lines = slurp(dir.path / "logits.jsonl");
+    CHECK_EQ(count(lines, "\n"), 1);
+    CHECK(has(lines, "\"rows\": [[0, 0, 0, 4096, 1000], [1, 1, 1, 4096, 1001], [2, 129, 2, 4223, 1129]]"));
+    std::string descr;
+    const std::filesystem::path f = find_file(dir.path, "logits.p", ".r0.npy");
+    REQUIRE(!f.empty());
+    CHECK(npy_shape(f, &descr) == std::vector<int64_t>({3, qwen4exp_fp8::g_model[0].g.n_vocab}));
+}
 
 /* Speed declares the projector per late layer and one quantiser, after the whole in-tree graph and
 
@@ -2496,7 +2799,7 @@ std::vector<std::string> as_int8(const std::vector<RecIssue>& bf16, const RadBui
 }
 
 /* THE INT8 PASS IS THE BF16 PASS WITH THE PROJECTION SWAPPED, on every path that projects (lean,
- * tail-only straddle, masked): same batch, same everything else, op for op; the stream quantised
+ * tail-only straddle, masked, speed beside decoders): same batch, same everything else, op for op; the stream quantised
  * once, at layer S, from exactly the rows the GEMMs read. */
 TEST(the_int8_projector_quantises_the_stream_once_then_gemm_and_bias_a_layer) {
     struct Case { const char* mode; Shape s; int path; };
@@ -2504,7 +2807,8 @@ TEST(the_int8_projector_quantises_the_stream_once_then_gemm_and_bias_a_layer) {
                            Case{"speed", {{128}, 0, 1984}, qwen4exp_kva::PATH_STRADDLE},
                            Case{"quality", {{128}, 0, 2048}, qwen4exp_kva::PATH_MASKED},
                            Case{"quality", {{128}, 0, 1984}, qwen4exp_kva::PATH_MASKED},
-                           Case{"quality", {{1, 64, 128}, 1, 2048}, qwen4exp_kva::PATH_MASKED}}) {   /* s_lb 65 */
+                           Case{"quality", {{1, 64, 128}, 1, 2048}, qwen4exp_kva::PATH_MASKED},   /* s_lb 65 */
+                           Case{"speed", {{1, 1984}, 1, 2048}, qwen4exp_kva::PATH_DECODERS}}) {
         RadModelMeta meta = flash_next_meta();
         RadBuildCtx c = served_ctx();
         Env env({{"RADIANCE_KVA", cs.mode}});

@@ -70,7 +70,8 @@ static const char* decl_masked(RadBuilder* b, const qwen4exp_fp8::Model& m, cons
     for (rad_buf h : { k.b_mask, k.b_bounds })
         if (rad_buf_concurrent(b, h) < 0) return "a buffer";
     if (project && decl_projected(b, m, ctx, k) < 0) return "a buffer";
-    const char* rule = c.mode == MODE_PLUMB ? "all" : c.mode == MODE_SPEED ? "none"
+    const char* rule = c.mode == MODE_PLUMB ? "all" : c.mask_step ? "step"
+                                                     : c.mode == MODE_SPEED ? "none"
                                                      : kRowselNames[c.rowsel];
     const bool scored = !std::strcmp(rule, "class") || !std::strcmp(rule, "random");
     k.mask_scored = scored;
@@ -97,14 +98,14 @@ static void note_config(RadBuilder* b, const Kva& k) {
     if (c.stage_rows != INT64_MAX) std::snprintf(rows, sizeof rows, "<= %lld", (long long)c.stage_rows);
     rad_note(b, "KVA: mode %s from layer %lld, tail %lld, tile %lld; projector %s (%s, streamed from host), correction %s "
                 "(alpha %g), row table %s, rows %s share %g seed %lld; stage %s (exact rows %s), "
-                "straddle %s%s%s",
+                "approximates >= %lld bulk rows, straddle %s%s%s",
              kModeNames[c.mode], (long long)k.split, (long long)c.tail, (long long)k.tile,
              g_loaded.folder.place.dir.c_str(), k.int8 ? "int8" : "bf16", k.have_st ? "held" : "absent",
              c.alpha, k.have_rowsel ? kScoreNames[c.rowsel_table] : "absent",
              kRowselNames[c.rowsel], c.share, (long long)c.seed, kStageNames[c.stage],
-             rows, kStraddleNames[c.straddle],
+             rows, (long long)c.min_bulk_rows, kStraddleNames[c.straddle],
              k.out_rows_ok ? "" : "; KL mode serves stock (RADIANCE_KVA_SCORE_BULK unset)",
-             c.force_split || c.shift_b || c.force_stream ? "; DEBUG switches set" : "");
+             c.force_split || c.shift_b || c.force_stream || c.mask_step ? "; DEBUG switches set" : "");
 }
 
 /* The gate-only switches, said loudly at declare so no measured run carries one unknowingly. A
@@ -121,6 +122,10 @@ static void note_debug(const Kva& k) {
                      (long long)c.shift_b);
     if (c.force_stream)
         std::fprintf(stderr, "radiance: qwen4exp_kva: DEBUG RADIANCE_KVA_FORCE_STREAM=1\n");
+    if (c.mask_step)
+        std::fprintf(stderr, "radiance: qwen4exp_kva: DEBUG RADIANCE_KVA_MASK=all: every row of a "
+                             "masked pass before its bulk end is approximated, decoders included -- "
+                             "a negative control, never a served configuration\n");
 }
 
 /* What the folder lets this mode run (kva_projector.h): false = serve stock, already said. Plumb

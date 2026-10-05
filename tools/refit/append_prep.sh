@@ -10,6 +10,8 @@
 # Env: RK_MODEL (the .rad), RK_PLUGIN_HOME (home whose arch declares every copy under RADIANCE_KVA_DECLARE=all),
 #      RK_RECIPE (default: the recipe beside the container), RK_PYTHON, RK_REFIT_DATA (default <repo>/data/refit),
 #      RK_STUB_REVISION (the source checkpoint commit the shipped stub pinned, data/stub/stub-manifest.json).
+# These set RADIANCE_KVA_PROJ/_ST/_DECLARE, which the current plugin refuses: run them only against the frozen
+# home they were written for (see tools/dev/README.md).
 set -eu
 
 [ "$#" -eq 1 ] || { echo "usage: tools/refit/append_prep.sh projr|full" >&2; exit 1; }

@@ -14,13 +14,19 @@ namespace qwen4exp_kva {
 
 using namespace rad::arch;
 
-/* A group's slot row for the step's LAST sequence (index row n_seq-1, one row): its own
- * state_index at its own pitch. The approximated sequence is always the last entry (n_ahead > 0
- * means it is a non-final prefill chunk, radiance core/sched/batch.cpp:1066-1080). */
-inline RadOperand last_slot(const RadBatch* batch, rad_kvgroup g) {
+/* A group's slot row for sequence `seq` of the step (one index row): its own state_index at its own
+ * pitch. */
+inline RadOperand slot_row(const RadBatch* batch, rad_kvgroup g, int64_t seq) {
     const RadKVGroupBatch* kb = kv_batch(batch, g);
     const int64_t pitch = kb && kb->state_index_pitch > 0 ? kb->state_index_pitch : 1;
-    return praw2(kb ? kb->state_index + (batch->n_seq - 1) * pitch : nullptr, RAD_I32, 1, pitch);
+    return praw2(kb ? kb->state_index + seq * pitch : nullptr, RAD_I32, 1, pitch);
+}
+
+/* The slot row of the step's LAST sequence (index row n_seq-1). The approximated sequence is always
+ * the last entry (n_ahead > 0 means it is a non-final prefill chunk, radiance
+ * core/sched/batch.cpp:1066-1080). */
+inline RadOperand last_slot(const RadBatch* batch, rad_kvgroup g) {
+    return slot_row(batch, g, batch->n_seq - 1);
 }
 
 /* THE +st CORRECTION (Stage 4, PLAN D7) on the last sequence, M = 1: `undo` before the layer's
@@ -53,23 +59,27 @@ inline void decay_sums(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, in
                 last_slot(batch, k.kv_rho), brows(k.b_bounds, 1));
 }
 
-/* RADIANCE_KVA_CAPTURE_STATE: layer li's state slot of this step's one sequence, copied by
- * kva_state_read into the plugin's buffer and from there to the host. Debug: synchronises. */
+/* Layer li's state slot of sequence `seq` of the step, copied by kva_state_read into the plugin's
+ * buffer and appended to `out` on the host. Debug: synchronises. */
+inline bool copy_state(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li,
+                       const RadBatch* batch, int64_t seq, std::vector<float>* out) {
+    const GdnFP8::Config& g = m.gcfg;
+    const int64_t n = g.n_head_v * g.head_v * g.head_k;
+    RAD_ISSUE_N(c, k.op_state_read, 1, kv_cache(m.kv_state, (int)li), slot_row(batch, m.kv_state, seq),
+                brows(k.b_state, 1));
+    const size_t at = out->size();
+    out->resize(at + (size_t)n);
+    if (dump_read(c, out->data() + at, rad_buf_ptr(c, k.b_state), n * 4)) return true;
+    std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE_STATE: device read failed\n");
+    out->resize(at);
+    return false;
+}
+
+/* RADIANCE_KVA_CAPTURE_STATE: layer li's state slot of this step's one sequence. */
 inline void read_state(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li,
                        const RadBatch* batch, StateDump* sd) {
     if (!sd || !k.op_state_read) return;
-    const GdnFP8::Config& g = m.gcfg;
-    const int64_t n = g.n_head_v * g.head_v * g.head_k;
-    RAD_ISSUE_N(c, k.op_state_read, 1, kv_cache(m.kv_state, (int)li), last_slot(batch, m.kv_state),
-                brows(k.b_state, 1));
-    const size_t at = sd->data.size();
-    sd->data.resize(at + (size_t)n);
-    if (!dump_read(c, sd->data.data() + at, rad_buf_ptr(c, k.b_state), n * 4)) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE_STATE: device read failed\n");
-        sd->data.resize(at);
-        return;
-    }
-    sd->layers.push_back((int)li);
+    if (copy_state(c, k, m, li, batch, batch->n_seq - 1, &sd->data)) sd->layers.push_back((int)li);
 }
 
 /* ---------------------------------------------------------------- the delta net, masked */
@@ -285,19 +295,26 @@ inline void project_bulk(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, 
                     brow_slice(m.a_x.cs(), 0, b, n / RAD_FP8_BLOCK));
 }
 
-/* rad_block_gdn_fp8.h:497-513 over the tail rows [r0, T): the delta net's output for them alone. */
-inline void gdn_tail_rows(RadCtx* c, const GdnFP8& d, int64_t T, int64_t r0) {
-    const int64_t rows = T - r0, n = d.g.n_embd, conv_dim = d.cfg.conv_dim(), v_dim = d.cfg.v_dim();
-    RAD_ISSUE_N(c, d.op_gnorm, rows, brow_slice(d.w.o.x, r0, rows, v_dim),
-                bcol_at(d.w.in.x, r0, conv_dim + v_dim, conv_dim, v_dim, rows), RAD_W(d.w_out_norm),
-                brow_slice(d.w.o.x, r0, rows, v_dim));
-    d.q_o.step(c, T, r0, rows);
+/* rad_block_gdn_fp8.h:505-513 over rows [r0, r0 + rows): the output projection of the normed,
+ * quantised delta-net output, its all-reduce and residual add. */
+inline void gdn_out_rows(RadCtx* c, const GdnFP8& d, int64_t T, int64_t r0, int64_t rows) {
+    const int64_t n = d.g.n_embd;
     d.out.step(c, d.w.o, d.w.h.x, T, r0, rows);
     if (d.op_ar && !ar_taken(d.g, T, d.ar_out, d.ar_out_take))
         RAD_ISSUE_N(c, d.op_ar, rows * n, brow_slice(d.w.h.x, r0, rows, n), RAD_NONE);
     if (d.op_add)
         RAD_ISSUE_N(c, d.op_add, rows, brow_slice(d.w.x, r0, rows, n), brow_slice(d.w.h.x, r0, rows, n),
                     brow_slice(d.w.x, r0, rows, n));
+}
+
+/* rad_block_gdn_fp8.h:497-513 over the tail rows [r0, T): the delta net's output for them alone. */
+inline void gdn_tail_rows(RadCtx* c, const GdnFP8& d, int64_t T, int64_t r0) {
+    const int64_t rows = T - r0, conv_dim = d.cfg.conv_dim(), v_dim = d.cfg.v_dim();
+    RAD_ISSUE_N(c, d.op_gnorm, rows, brow_slice(d.w.o.x, r0, rows, v_dim),
+                bcol_at(d.w.in.x, r0, conv_dim + v_dim, conv_dim, v_dim, rows), RAD_W(d.w_out_norm),
+                brow_slice(d.w.o.x, r0, rows, v_dim));
+    d.q_o.step(c, T, r0, rows);
+    gdn_out_rows(c, d, T, r0, rows);
 }
 
 /* The delta net of a straddling chunk: projections, conv window and the scans over every row (the
@@ -316,18 +333,20 @@ inline void gdn_straddle(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, 
  * keys AND every row's selection -- both cheap), K/V of every row, the query path over every row (an
  * M-RoPE position plane cannot be column-sliced), then the attention, gate and output projection
  * for the tail rows only, through the per-row sparse gated form, whose rows are independent
- * queries (:487-519; the plan admits this path only when every late layer takes that form). */
-inline void attn_straddle(RadCtx* c, const qwen4exp_fp8::Layer& l, const RadBatch* batch, int64_t r0) {
+ * queries (:487-519; the plan admits this path only when every late layer takes that form). The
+ * rows are [r0, r0 + rows): the straddle's tail, or the decoders' rows. */
+inline void attn_rows(RadCtx* c, const qwen4exp_fp8::Layer& l, const RadBatch* batch, int64_t r0,
+                      int64_t rows) {
     const AttnGatedFP8& a = l.attn;
-    const int64_t T = batch->n_tok, rows = T - r0, n = a.g.n_embd, qw = a.g.q_dim(), hd = a.g.head_dim;
+    const int64_t T = batch->n_tok, end = r0 + rows, n = a.g.n_embd, qw = a.g.q_dim(), hd = a.g.head_dim;
     l.qsa.step(c, a.w.h, batch);
     attn_kv(c, a, batch);
     a.qg.step(c, a.w.h, a.w.qg, T);
     RAD_ISSUE_N(c, a.op_q_norm, T * a.g.n_head, bcol(a.w.qg, 0, hd, T), RAD_W(a.w_q_norm), brows(a.w.q, T));
     RAD_ISSUE(c, a.op_rope_q, brows(a.w.q, T), rope_posmc(a.g, batch, T));
     const int64_t chunk = a.qsa_gq_rows();
-    for (int64_t off = r0; off < T; off += chunk) {
-        const int64_t r = (T - off) < chunk ? (T - off) : chunk;
+    for (int64_t off = r0; off < end; off += chunk) {
+        const int64_t r = (end - off) < chunk ? (end - off) : chunk;
         RAD_ISSUE_N(c, a.op_attn_gq, 1, brow_slice(a.w.q, off, r, qw), kv_cache(a.kv, a.layer),
                     brow_slice(a.qsa_sel, off, r, a.qsa_topk + 1), brow_slice(a.qsa_sequ, off, r, 1),
                     RAD_NONE, RAD_NONE, RAD_NONE, brow_slice(a.w.attn.x, off, r, qw),
@@ -353,13 +372,67 @@ inline void straddle_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int6
     const int64_t T = batch->n_tok, r0 = p.b, rows = T - p.b;
     l.hc_mix.read(c, T, r0, rows);
     project_bulk(c, k, m, li, p.b);
-    if (l.full) attn_straddle(c, l, batch, r0);
+    if (l.full) attn_rows(c, l, batch, r0, rows);
     else        gdn_straddle(c, k, m, li, batch, p, sd);
     l.hc_mix.write(c, T, r0, rows);
     dbg_resid(c, (int)li, "mix", m.g.n_embd, m.b_h, m.a_x.x);
     l.hc_ffn.read(c, T, r0, rows);
     moe_layer(c, l.mlp, MoeArm{}, batch, r0);
     l.hc_ffn.write(c, T, r0, rows);
+    dbg_resid(c, (int)li, "ffn", m.g.n_embd, m.b_h, m.a_x.x);
+}
+
+/* ---------------------------------------------------------------- speed beside decoders */
+
+/* The bulk rows' block input [r0, T), lean style: the projector over the layer-S stream (b_h's rows
+ * there stay that stream: only the decoder rows are written from here on) into `x` and its codes --
+ * through project_rows, so the ring and an int8 folder serve this path as every other. */
+inline void project_beside(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li, int64_t r0,
+                           int64_t T) {
+    const int64_t rows = T - r0, n = m.g.n_embd, wide = m.hccfg.hc * n;
+    project_rows(c, k, li, m.b_h, r0, rows, wide, brow_slice(m.a_x.x, r0, rows, n));
+    if (k.quant.op)
+        RAD_ISSUE_N(c, k.quant.op, rows, brow_slice(m.a_x.x, r0, rows, n), brow_slice(m.a_x.cq(), r0, rows, n),
+                    brow_slice(m.a_x.cs(), r0, rows, n / RAD_FP8_BLOCK));
+}
+
+/* The delta net beside decoders: projections over every row (the bulk rows' scan needs them), the
+ * in-tree decode half for the decoders (rad_block_gdn_fp8.h:450-475; it writes their normed, quantised
+ * output itself), the corrected scan of the one prefill sequence, and the output projection for the
+ * decoder rows alone. */
+inline void gdn_decoders(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li,
+                         const RadBatch* batch, const Pass& p, StateDump* sd) {
+    const GdnFP8& d = m.layers[(size_t)li].gdn;
+    int64_t D = 0, DT = 0;
+    batch_split(batch, &D, &DT);
+    gdn_project(c, d, batch->n_tok);
+    gdn_decode_half(c, d, batch, D, DT);
+    correct(c, k, m, li, k.op_undo[(size_t)li], batch, true);
+    gdn_prefill_front(c, d, batch, D);
+    gdn_prefill_scans(c, k, m, li, batch, p, sd, D);
+    gdn_out_rows(c, d, batch->n_tok, 0, DT);
+}
+
+/* A LATE LAYER OF SPEED BESIDE DECODERS (Stage B, Dylan's decision 2026-10-05): the bulk rows [DT, n)
+ * get the lean pieces; the decoder rows [0, DT) the whole in-tree layer over that range -- connection
+ * read/write, block, feed-forward read, MoE, write -- with the in-tree helpers' own r0/rows. The
+ * decoders' dense GEMMs run at M = DT, as in a decode-only step, so their bytes may differ from a
+ * 2,048-row step's within ident.sh's ksplit-from-M class. Nothing reads a bulk row's late output. */
+inline void decoders_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int64_t li,
+                           const RadBatch* batch, const Pass& p, StateDump* sd) {
+    const qwen4exp_fp8::Layer& l = m.layers[(size_t)li];
+    int64_t D = 0, DT = 0;
+    batch_split(batch, &D, &DT);
+    const int64_t T = batch->n_tok;
+    l.hc_mix.read(c, T, 0, DT);
+    project_beside(c, k, m, li, DT, T);
+    if (l.full) attn_rows(c, l, batch, 0, DT);
+    else        gdn_decoders(c, k, m, li, batch, p, sd);
+    l.hc_mix.write(c, T, 0, DT);
+    dbg_resid(c, (int)li, "mix", m.g.n_embd, m.b_h, m.a_x.x);
+    l.hc_ffn.read(c, T, 0, DT);
+    moe_layer(c, l.mlp, MoeArm{}, batch, 0, DT);
+    l.hc_ffn.write(c, T, 0, DT);
     dbg_resid(c, (int)li, "ffn", m.g.n_embd, m.b_h, m.a_x.x);
 }
 
