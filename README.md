@@ -61,12 +61,15 @@ the projector folder: `$RADIANCE_KVA_PROJECTOR`, else `projector/` beside the `-
 beside the file it resolves to (mount the model's DIRECTORY in Docker). A folder that cannot run on the model
 (other dimensions, layer layout or tokenizer, a missing or corrupt file) is refused by name and the engine
 serves stock; one fitted on another variant of the model (quantisation, recipe, base weights) is a WARNING
-naming both, and runs. `arch/kva_config.h` is the full list of switches.
+naming both, and runs. `arch/kva_config.h` is the full list of startup switches; the capture switches
+live outside it -- `RADIANCE_KVA_CAPTURE`/`_STATE` are read in `arch/qwen4exp_kva.cpp`,
+`RADIANCE_KVA_CAPTURE_SPLIT` in `arch/kva_declare_masked.h`, which with `arch/kva_declare.h` declares
+what a capture writes.
 
 | switch | values | meaning |
 |---|---|---|
 | `RADIANCE_KVA` | `off` (default), `plumb`, `speed`, `quality` | `off` is stock radiance, byte for byte, even when the container holds kva.* tensors |
-| `RADIANCE_KVA_TAIL` | tokens, default 2048, ≥ 512, ≤ 2 × `--max-num-batched-tokens` − 64 | the exact tail T. Above one step a full chunk proves only one step ahead, so its last T − step rows (rounded to 64) also run exact (lower coverage); at 2 × step − 64 and beyond no row could ever be approximated, so startup refuses |
+| `RADIANCE_KVA_TAIL` | tokens, default 2048, ≥ 512, ≤ 2 × `--max-num-batched-tokens` minus the delta net's chunk tile (64 on this model) | the exact tail T. Above one step a full chunk proves only one step ahead, so its last T − step rows (rounded to 64) also run exact (lower coverage); at 2 × step − 64 and beyond no row could ever be approximated, so startup refuses |
 | `RADIANCE_KVA_ALPHA` | 0..1, default 1 | correction strength |
 | `RADIANCE_KVA_ROWSEL` | `class`, `random`, `all` | quality mode's exact-row rule |
 | `RADIANCE_KVA_SHARE` | (0, 1], default 0.25 | share of a window's class matches kept exact |
@@ -78,7 +81,11 @@ naming both, and runs. `arch/kva_config.h` is the full list of switches.
 | `RADIANCE_KVA_STAGE_ROWS` | rows | `auto` streams only when the pass has at most this many exact rows, else the pass runs the stock step. Default: no limit -- measured on warmed servers, streaming beats the stock step by 220-240 ms a straddling chunk at 512-1,984 exact rows, and a 64-row limit cost 331 ms at 9,216 and ran every T 2560 chunk exact (notes/impl.md, Stage A.1 R96) |
 | `RADIANCE_KVA_SCORE_BULK` | `1` | KL mode (`--kld-ref`) serves stock unless set: logits on approximated rows are not the model's, so set it only when scoring the exact tail |
 | `RADIANCE_KVA_STRADDLE`, `RADIANCE_KVA_FORCE_SPLIT`, `RADIANCE_KVA_SHIFT_B`, `RADIANCE_KVA_FORCE_STREAM` | `split`/`end`, rows, ±rows, `1` | gate-only debug switches (R50, R47, R51, R94); each is said loudly at startup |
+| `RADIANCE_KVA_TAIL_ONLY` | `1` (default), `0` | gate-only debug switch: `0` makes speed-mode straddling chunks take the masked path instead of the tail-only one (the oracle the tail-only path is compared with, A.1) |
 | `RADIANCE_KVA_DUMP` | a directory | debug only, synchronises mid-step: the layer-S stream of every approximate chunk (`boundary.p<P>.npy` + `boundary.jsonl`) and the device mask of every masked one (`mask.jsonl`, `rows.jsonl`) |
+| `RADIANCE_KVA_CAPTURE` | a directory | refit/debug only: in `off` mode rank 0 records the stock step of every single-sequence prefill -- host copies of the stream entering layer S and of every late layer's block input. Refused at startup unless `RADIANCE_KVA=off`: the code says it "records exact runs" and refuses with `RAD_E_INVAL` (`arch/qwen4exp_kva.cpp`) |
+| `RADIANCE_KVA_CAPTURE_STATE` | a directory | refit/debug only: on every single-sequence prefill chunk, copies whatever late delta-net state the step did not already record, one file per (chunk, rank). Unlike `RADIANCE_KVA_CAPTURE`, the code does NOT refuse it with the mode on -- it is accepted in any mode |
+| `RADIANCE_KVA_CAPTURE_SPLIT` | a layer index | refit/debug only: the split layer S a capture uses when no usable projector folder exists (a capture fits a projector, so there may be no folder yet); declares nothing; without a folder, startup refuses unless it names a layer between the PLE and the last (`arch/kva_declare_masked.h`) |
 | `RADIANCE_KVA_PROJ`, `RADIANCE_KVA_ST`, `RADIANCE_KVA_DECLARE` | -- | retired with the container append; refused by name |
 
 A mode with no usable projector serves stock and says why. A configuration that cannot run refuses at

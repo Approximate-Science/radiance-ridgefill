@@ -10,6 +10,8 @@
 # USAGE: tools/investigate/session.sh ARM [ARM...]   ARM = name:alpha[:st]  e.g. st1:1 st0:0 swap1:1:swap
 # Env: RK_MODEL, RK_PLUGIN_HOME (frozen capture home), RK_GPU_LOCK (required); RK_INV_DATA (<repo>/data/investigate);
 #      RK_TAIL (512), RK_PROJ (refit), RK_ST (shipped), RK_PROMPTS (<repo>/data/refit/prompts/sterm.jsonl).
+# These set RADIANCE_KVA_PROJ/_ST/_DECLARE, which the current plugin refuses: run them only against the frozen
+# home they were written for (see tools/dev/README.md).
 set -eu
 [ "$#" -ge 1 ] || { echo "usage: tools/investigate/session.sh name:alpha[:st] [...]" >&2; exit 1; }
 here=$(CDPATH= cd "$(dirname "$0")" && pwd)

@@ -17,6 +17,8 @@
 #
 # Env: RK_MODEL (required), RK_PLUGIN_HOME (required: the frozen home built from the capture commit),
 #      RK_GPU_LOCK (required), RK_REFIT_DATA (default <repo>/data/refit), RK_PORT (8100), plus scripts/common.sh's.
+# These set RADIANCE_KVA_PROJ/_ST/_DECLARE, which the current plugin refuses: run them only against the frozen
+# home they were written for (see tools/dev/README.md).
 set -eu
 
 [ "$#" -eq 1 ] || { echo "usage: tools/refit/session.sh exact|speed" >&2; exit 1; }
