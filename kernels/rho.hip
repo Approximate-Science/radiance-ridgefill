@@ -19,7 +19,7 @@ __global__ void __launch_bounds__(KVA_RHO_THREADS) kva_rho_kernel(KvaRho g) {
     float n = nd[0], d = nd[g.nd_inner];
     const float decay = expf(g.a_log[h]);
     const float bias = g.dt_bias[h];
-    for (int64_t t = 0; t < g.n; ++t) {
+    for (int64_t t = kva_rho_first_row(&g); t < g.n; ++t) {
         const int64_t at = t * g.a_pitch + h * g.a_col;
         const float av = g.a_bf16 ? kva_bf16_to_f32(((const uint16_t*)g.a)[at])
                                   : ((const float*)g.a)[at];

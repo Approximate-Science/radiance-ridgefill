@@ -36,8 +36,8 @@ enum { KVA_MODE_CLASS = 0, KVA_MODE_RANDOM = 1, KVA_MODE_ALL = 2 };
 
 /* Operand positions, in schema order (rows.cpp holds the schemas). */
 enum { RS_TOKENS = 0, RS_POS, RS_SCORE, RS_ROWS, RS_MASK };
-enum { RH_A = 0, RH_MASK, RH_ALOG, RH_DTBIAS, RH_ND, RH_SIDX };
-enum { SC_STATE = 0, SC_STATE_IDX, SC_APPLIED, SC_APPLIED_IDX, SC_C, SC_ND, SC_ND_IDX };
+enum { RH_A = 0, RH_MASK, RH_ALOG, RH_DTBIAS, RH_ND, RH_SIDX, RH_BOUNDS };
+enum { SC_STATE = 0, SC_STATE_IDX, SC_APPLIED, SC_APPLIED_IDX, SC_C, SC_ND, SC_ND_IDX, SC_BOUNDS };
 enum { SR_STATE = 0, SR_STATE_IDX, SR_OUT };
 
 /* ---------------------------------------------------------------- the shared definitions */
@@ -108,8 +108,18 @@ typedef struct KvaRho {
     const float*   dt_bias;
     float*         nd;      int64_t nd_slot, nd_head, nd_inner, n_states;
     const int32_t* state_idx;
+    const int32_t* bounds;                   /* [>=1] or null: kva_mask's {s, ...} */
     int64_t        n, n_head;
 } KvaRho;
+
+/* The recurrence's first row: bounds[0] (the step's last sequence's first row, s) clamped into
+ * [0, n]; 0 when bounds is absent. Read where the row runs -- the bounds are device memory on the
+ * device row, and reading them on the host would need a synchronize. */
+KVA_HD inline int64_t kva_rho_first_row(const KvaRho* g) {
+    if (!g->bounds) return 0;
+    const int64_t s = g->bounds[0];
+    return s < 0 ? 0 : (s > g->n ? g->n : s);
+}
 
 /* Each KV operand comes with ITS OWN group's slot index: the KV manager hands every stateful group
  * the same slot per sequence today, but that is not a contract, so nothing here relies on it. */
@@ -122,9 +132,17 @@ typedef struct KvaCorrect {
     int64_t        st_pitch, ap_pitch, nd_pitch;      /* row pitch of each index; column 0 is used */
     int64_t        st_states, ap_states, nd_states;   /* each pool's slot count */
     int64_t        n_seq, n_head, sd0, sd1;
+    const int32_t* bounds;                   /* [>=2] or null: kva_mask's {s, b', ...} */
     float          alpha;
     int            apply;                    /* 1 apply, 0 undo */
 } KvaCorrect;
+
+/* False when the step's last sequence had no bulk row (bounds[1] <= bounds[0]): the op then writes
+ * nothing, so that sequence's correction stays as the previous chunk end left it (apply would add
+ * alpha * C, rho being 1 while D is 0). Always true without bounds. Read where the row runs. */
+KVA_HD inline bool kva_correct_has_bulk(const KvaCorrect* g) {
+    return !g->bounds || g->bounds[1] > g->bounds[0];
+}
 
 /* Sequence s's slot in each pool. False when any of them is outside its pool: the sequence is
  * skipped (a negative slot is how a sequence with no state is spelled). */

@@ -40,6 +40,17 @@ static int index_rows(const RadTensor* t, int64_t* rows, int64_t* pitch) {
     return RAD_OK;
 }
 
+/* An optional kva_mask `bounds` operand: i32, dense, at least `need` elements; null when absent. */
+static int optional_bounds(const RadTensor* t, int64_t need, const int32_t** out) {
+    *out = nullptr;
+    if (!t) return RAD_OK;
+    if (t->dtype != RAD_I32) return RAD_E_DTYPE;
+    if (!dense(t)) return RAD_E_STRIDE;
+    if (rad_tensor_numel(t) < need) return RAD_E_SHAPE;
+    *out = (const int32_t*)t->data;
+    return RAD_OK;
+}
+
 static int parse_mode(const char* s, const char* const* names, int n) {
     for (int i = 0; s && i < n; ++i)
         if (std::strcmp(s, names[i]) == 0) return i;
@@ -93,7 +104,8 @@ extern "C" int kva_rho_parse(const RadArgs* a, KvaRho* g) {
         alog->dtype != RAD_F32 || dtb->dtype != RAD_F32 || nd->dtype != RAD_F32)
         return RAD_E_DTYPE;
     int64_t n_seq = 0, pitch = 0;
-    const int rc = index_rows(sidx, &n_seq, &pitch);
+    int rc = index_rows(sidx, &n_seq, &pitch);
+    if (rc == RAD_OK) rc = optional_bounds(rad_arg_in(a, RH_BOUNDS), 1, &g->bounds);
     if (rc != RAD_OK) return rc;
     /* `a` is read at its own strides: a column slice of the a|b buffer, or any other layout of it. */
     if (av->rank != 2 || !dense(mask) || !dense(alog) || !dense(dtb)) return RAD_E_STRIDE;
@@ -142,6 +154,7 @@ extern "C" int kva_correct_parse(const RadArgs* a, KvaCorrect* g) {
     int rc = index_rows(sidx, &g->n_seq, &g->st_pitch);
     if (rc == RAD_OK) rc = index_rows(aidx, &ap_rows, &g->ap_pitch);
     if (rc == RAD_OK && nidx) rc = index_rows(nidx, &nd_rows, &g->nd_pitch);
+    if (rc == RAD_OK) rc = optional_bounds(rad_arg_in(a, SC_BOUNDS), 2, &g->bounds);
     if (rc != RAD_OK) return rc;
     if (ap_rows != g->n_seq || (nidx && nd_rows != g->n_seq)) return RAD_E_SHAPE;
     if (st->rank != 4 || st->shape[1] != heads || st->shape[2] != sd0 || st->shape[3] != sd1 ||
@@ -248,7 +261,7 @@ extern "C" int kva_rho_host(const RadArgs* a, RadStream) {
         float* nd = g.nd + slot * g.nd_slot + h * g.nd_head;
         float n = nd[0], d = nd[g.nd_inner];
         const float decay = expf(g.a_log[h]);
-        for (int64_t t = 0; t < g.n; ++t) {
+        for (int64_t t = kva_rho_first_row(&g); t < g.n; ++t) {
             const int64_t at = t * g.a_pitch + h * g.a_col;
             const float av = g.a_bf16 ? kva_bf16_to_f32(((const uint16_t*)g.a)[at])
                                       : ((const float*)g.a)[at];
@@ -267,7 +280,7 @@ extern "C" int kva_rho_host(const RadArgs* a, RadStream) {
 extern "C" int kva_correct_host(const RadArgs* a, RadStream) {
     KvaCorrect g{};
     const int rc = kva_correct_parse(a, &g);
-    if (rc != RAD_OK) return rc;
+    if (rc != RAD_OK || !kva_correct_has_bulk(&g)) return rc;
     for (int64_t s = 0; s < g.n_seq; ++s) {
         int64_t st_slot = 0, ap_slot = 0, nd_slot = 0;
         if (!kva_correct_slots(&g, s, &st_slot, &ap_slot, &nd_slot)) continue;

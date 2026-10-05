@@ -428,9 +428,11 @@ struct RhoRun {
     std::vector<int32_t> mask;
     std::vector<float> a_log, dt_bias;
     std::vector<float> nd;           /* [slots, heads, 2] (N, D); updated in place by run_rho */
+    std::vector<int32_t> bounds;     /* kva_mask's bounds operand; empty = absent */
 };
 
-static int run_rho(const RadKernelInfo* row, RhoRun& c) {
+/* `bounds_as` replaces c.bounds by an arbitrary operand (the refusal cases). */
+static int run_rho(const RadKernelInfo* row, RhoRun& c, const Buf* bounds_as = nullptr) {
     const int64_t pitch = c.pitch ? c.pitch : c.heads;
     Buf a = make(c.bf16 ? RAD_BF16 : RAD_F32, { c.n, c.heads }, { pitch, c.col });
     Buf mask = make(RAD_I32, { c.n }), alog = make(RAD_F32, { c.heads });
@@ -447,7 +449,11 @@ static int run_rho(const RadKernelInfo* row, RhoRun& c) {
     }
     for (size_t i = 0; i < c.nd.size(); ++i) setf(nd, (int64_t)i, c.nd[i]);
     seti(sidx, 0, c.slot);
-    const int rc = run_group(row, { &a, &mask, &alog, &dtb, &nd, &sidx },
+    Buf bounds = make(RAD_I32, { (int64_t)c.bounds.size() });
+    for (size_t i = 0; i < c.bounds.size(); ++i) seti(bounds, (int64_t)i, c.bounds[i]);
+    if (bounds_as) bounds = *bounds_as;
+    Buf* bounds_opd = bounds_as || !c.bounds.empty() ? &bounds : nullptr;
+    const int rc = run_group(row, { &a, &mask, &alog, &dtb, &nd, &sidx, bounds_opd },
                              { pint("M", c.n), pint("n_head", c.heads) });
     for (size_t i = 0; i < c.nd.size(); ++i) c.nd[i] = getf(nd, (int64_t)i);
     return rc;
@@ -468,6 +474,20 @@ static RhoRun random_rho(Rng& r, int64_t n, int64_t heads, double exact_share, b
     }
     c.nd.assign((size_t)(c.slots * heads * 2), 0.0f);
     return c;
+}
+
+/* Rows [s, n) of a case alone: what kva_rho_update with bounds {s, ..} must equal. */
+static RhoRun rho_slice(const RhoRun& c, int64_t s) {
+    RhoRun out = c;
+    out.n = c.n - s;
+    out.a.erase(out.a.begin(), out.a.begin() + s * c.heads);
+    out.mask.erase(out.mask.begin(), out.mask.begin() + s);
+    out.bounds.clear();
+    return out;
+}
+
+static bool same_bits(const std::vector<float>& a, const std::vector<float>& b) {
+    return a.size() == b.size() && std::memcmp(a.data(), b.data(), a.size() * sizeof(float)) == 0;
 }
 
 static float nd_rho(const RhoRun& c, int64_t h) {
@@ -507,10 +527,14 @@ static CorrectRun correct_operands(int64_t slots, int64_t heads, int64_t sd0, in
     return k;
 }
 
+/* `bounds` is kva_mask's bounds operand; empty = absent. */
 static int run_correct(const RadKernelInfo* row, CorrectRun& k, const char* mode, double alpha,
-                       bool with_nd) {
+                       bool with_nd, const std::vector<int32_t>& bounds = {}) {
+    Buf b = make(RAD_I32, { (int64_t)bounds.size() });
+    for (size_t i = 0; i < bounds.size(); ++i) seti(b, (int64_t)i, bounds[i]);
     return run_group(row, { &k.state, &k.sidx, &k.applied, &k.aidx, &k.c,
-                            with_nd ? &k.nd : nullptr, with_nd ? &k.nidx : nullptr },
+                            with_nd ? &k.nd : nullptr, with_nd ? &k.nidx : nullptr,
+                            bounds.empty() ? nullptr : &b },
                      { pint("M", k.sidx.t.shape[0]), pstr("mode", mode), pf64("alpha", alpha),
                        pint("n_head", k.heads), pint("sd0", k.sd0), pint("sd1", k.sd1) });
 }
@@ -656,6 +680,22 @@ TEST(refuses_bad_operands, "both") {
     CHECK_EQ(run_group(sr, { &k.state, &k.sidx, &out16 }, rp), RAD_E_DTYPE);
     CHECK_EQ(run_group(sr, { &k.state, nullptr, &out }, rp), RAD_E_INVAL);
     CHECK_EQ(run_group(sr, { &k.state, &k.sidx, &out }, rp_heads), RAD_E_SHAPE);
+    /* The optional bounds operand of kva_rho_update and kva_state_correct. */
+    Buf bounds1 = make(RAD_I32, { 1 }), bounds_f32 = make(RAD_F32, { 4 });
+    Buf bounds_gap = make(RAD_I32, { 2 }, { 2 });
+    const std::vector<Buf*> sc_base = { &k.state, &k.sidx, &k.applied, &k.aidx, &k.c, nullptr, nullptr };
+    std::vector<Buf*> sc_opds = sc_base;
+    sc_opds.push_back(&bounds1);
+    CHECK_EQ(run_group(sc, sc_opds, cp), RAD_E_SHAPE);      /* needs bounds[1] too */
+    sc_opds.back() = &bounds_f32;
+    CHECK_EQ(run_group(sc, sc_opds, cp), RAD_E_DTYPE);
+    sc_opds.back() = &bounds_gap;
+    CHECK_EQ(run_group(sc, sc_opds, cp), RAD_E_STRIDE);
+    Rng rr{ 5 };
+    RhoRun rho = random_rho(rr, 8, 2, 0.5, false);
+    CHECK_EQ(run_rho(rh, rho, &bounds_f32), RAD_E_DTYPE);
+    CHECK_EQ(run_rho(rh, rho, &bounds_gap), RAD_E_STRIDE);
+    CHECK_EQ(run_rho(rh, rho, &bounds1), RAD_OK);           /* one element is all it reads */
 }
 
 /* A straight copy of each sequence's slot through the padded strides; a negative slot and one past
@@ -805,6 +845,64 @@ TEST(rho_in_unit_interval, "host") {
             const float n = c.nd[(size_t)((2 * 8 + h) * 2)], d = c.nd[(size_t)((2 * 8 + h) * 2 + 1)];
             CHECK(n >= 0.0f && n <= d && d >= 1.0f);
         }
+    }
+}
+
+/* kva_rho_update with bounds {s, ..} equals the op without bounds on rows [s, n) alone, bit for
+ * bit, with N and D carried in from an earlier chunk; bounds[0] clamps into [0, n] (below 0: every
+ * row; at or past n: N and D written back untouched). */
+TEST(rho_bounds_semantics, "host") {
+    const RadKernelInfo* row = find_row("kva_rho_update", RAD_DOMAIN_HOST);
+    REQUIRE(row != nullptr);
+    Rng r{ 71 };
+    RhoRun base = random_rho(r, 40, 3, 0.3, true);
+    for (size_t i = 0; i < base.nd.size(); ++i) base.nd[i] = 0.25f + 0.5f * (float)(i % 5);
+    for (int32_t s : { 0, 1, 17, 39 }) {
+        RhoRun bounded = base, slice = rho_slice(base, s);
+        bounded.bounds = { s, 33, 33, 40 };
+        CHECK_EQ(run_rho(row, bounded), RAD_OK);
+        CHECK_EQ(run_rho(row, slice), RAD_OK);
+        CHECK(same_bits(bounded.nd, slice.nd));
+        CHECK(!same_bits(bounded.nd, base.nd));
+    }
+    RhoRun below = base, plain = base;
+    below.bounds = { -5 };
+    CHECK_EQ(run_rho(row, below), RAD_OK);
+    CHECK_EQ(run_rho(row, plain), RAD_OK);
+    CHECK(same_bits(below.nd, plain.nd));
+    for (int32_t s : { 40, 41, 1 << 30 }) {
+        RhoRun past = base;
+        past.bounds = { s, 0 };
+        CHECK_EQ(run_rho(row, past), RAD_OK);
+        CHECK(same_bits(past.nd, base.nd));
+    }
+}
+
+/* kva_state_correct with bounds: an empty bulk (bounds[1] <= bounds[0]) changes no byte of state
+ * or applied in either mode; a non-empty one is exactly the op without bounds. */
+TEST(state_correct_bounds, "host") {
+    const RadKernelInfo* row = find_row("kva_state_correct", RAD_DOMAIN_HOST);
+    REQUIRE(row != nullptr);
+    Rng r{ 81 };
+    CorrectRun k = correct_operands(3, 2, 2, 3, { 1, -1, 0 }, 3);
+    for (size_t i = 0; i < k.state.bytes.size() / 4; ++i) setf(k.state, (int64_t)i, r.normal());
+    for (int64_t i = 0; i < rad_tensor_numel(&k.c.t); ++i) setf(k.c, i, r.normal());
+    for (int64_t i = 0; i < rad_tensor_numel(&k.applied.t); ++i) setf(k.applied, i, 0.5f + r.uniform());
+    for (int64_t i = 0; i < rad_tensor_numel(&k.nd.t); ++i) setf(k.nd, i, 1.0f + (float)(i % 3));
+    for (const char* mode : { "undo", "apply" }) {
+        const bool nd = !std::strcmp(mode, "apply");
+        for (const std::vector<int32_t>& empty : { std::vector<int32_t>{ 5, 5, 5, 9 },
+                                                   std::vector<int32_t>{ 7, 3, 3, 9 },
+                                                   std::vector<int32_t>{ 0, 0 } }) {
+            CorrectRun t = k;
+            CHECK_EQ(run_correct(row, t, mode, 0.5, nd, empty), RAD_OK);
+            CHECK(t.state.bytes == k.state.bytes && t.applied.bytes == k.applied.bytes);
+        }
+        CorrectRun with = k, without = k;
+        CHECK_EQ(run_correct(row, with, mode, 0.5, nd, { 2, 6, 6, 9 }), RAD_OK);
+        CHECK_EQ(run_correct(row, without, mode, 0.5, nd), RAD_OK);
+        CHECK(with.state.bytes == without.state.bytes && with.applied.bytes == without.applied.bytes);
+        CHECK(with.state.bytes != k.state.bytes);
     }
 }
 
@@ -1116,6 +1214,70 @@ TEST(rho_device_matches_host, "gpu") {
     }
     std::fprintf(stderr, "  device vs host: max |rho diff| %.3g, max rel N/D diff %.3g\n", worst_rho, worst_rel);
     CHECK(worst_rho <= 1e-5);
+}
+
+/* kva_rho_update with bounds on the device: equal to the device row run on the slice [s, n) bit
+ * for bit (same kernel, same arithmetic), and to the host row within the rho tolerance (expf and
+ * log1pf are the device library's, not the host's, so host vs device is not bitwise for rho). */
+TEST(rho_bounds_device_matches_host, "gpu") {
+    if (!group_runnable()) return;
+    const RadKernelInfo* dev = find_row("kva_rho_update", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("kva_rho_update", RAD_DOMAIN_HOST);
+    REQUIRE(dev && host);
+    Rng r{ 91 };
+    RhoRun base = random_rho(r, 2048, 24, 0.1, true);
+    base.pitch = 48;
+    for (size_t i = 0; i < base.nd.size(); ++i) base.nd[i] = 0.5f + (float)(i % 7);
+    double worst_rho = 0;
+    int bitwise = 0;
+    for (int32_t s : { -3, 0, 5, 1000, 2047, 2048, 4000 }) {
+        RhoRun d = base, h = base, slice = rho_slice(base, s < 0 ? 0 : (s > 2048 ? 2048 : s));
+        d.bounds = h.bounds = { s, 2048, 2048, 2048 };
+        CHECK_EQ(run_rho(dev, d), RAD_OK);
+        CHECK_EQ(run_rho(host, h), RAD_OK);
+        CHECK_EQ(run_rho(dev, slice), RAD_OK);
+        CHECK(same_bits(d.nd, slice.nd));
+        bitwise += same_bits(d.nd, slice.nd);
+        for (int64_t k = 0; k < 24; ++k)
+            worst_rho = std::max(worst_rho, (double)std::fabs(nd_rho(h, k) - nd_rho(d, k)));
+    }
+    std::fprintf(stderr, "  7 bounds: device == device-on-slice bitwise %d/7; device vs host max |rho diff| %.3g\n",
+                 bitwise, worst_rho);
+    CHECK(worst_rho <= 1e-5);
+}
+
+/* kva_state_correct with bounds on the device: host and device agree to the byte for absent,
+ * empty, inverted and non-empty bounds in both modes, and an empty bulk leaves every byte alone. */
+TEST(state_correct_bounds_device_matches_host, "gpu") {
+    if (!group_runnable()) return;
+    const RadKernelInfo* dev = find_row("kva_state_correct", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("kva_state_correct", RAD_DOMAIN_HOST);
+    REQUIRE(dev && host);
+    Rng r{ 101 };
+    CorrectRun k = correct_operands(6, 24, 128, 128, { 4, -1, 1, 5 }, 8);
+    for (size_t i = 0; i < k.state.bytes.size() / 4; ++i) setf(k.state, (int64_t)i, r.normal());
+    for (int64_t i = 0; i < rad_tensor_numel(&k.c.t); ++i) setf(k.c, i, 0.01f * r.normal());
+    for (int64_t i = 0; i < rad_tensor_numel(&k.applied.t); ++i) setf(k.applied, i, 0.5f + r.normal());
+    for (int64_t i = 0; i < rad_tensor_numel(&k.nd.t); i += 2) {
+        setf(k.nd, i + 1, (float)(1.0 + 50.0 * r.uniform()));
+        setf(k.nd, i, (float)(getf(k.nd, i + 1) * 1.2 * r.uniform()));
+    }
+    const std::vector<std::vector<int32_t>> variants = { {}, { 9, 9, 9, 12 }, { 10, 4, 4, 12 },
+                                                         { 3, 9, 9, 12 } };
+    int runs = 0;
+    for (const char* mode : { "undo", "apply" })
+        for (const std::vector<int32_t>& b : variants) {
+            const bool nd = !std::strcmp(mode, "apply");
+            CorrectRun h = k, d = k;
+            CHECK_EQ(run_correct(host, h, mode, 0.7, nd, b), RAD_OK);
+            CHECK_EQ(run_correct(dev, d, mode, 0.7, nd, b), RAD_OK);
+            CHECK(h.state.bytes == d.state.bytes && h.applied.bytes == d.applied.bytes);
+            const bool empty = !b.empty() && b[1] <= b[0];
+            CHECK((d.state.bytes == k.state.bytes) == empty);
+            CHECK((d.applied.bytes == k.applied.bytes) == empty);
+            ++runs;
+        }
+    std::fprintf(stderr, "  %d runs (undo/apply x absent/empty/inverted/non-empty bounds): device == host bytewise\n", runs);
 }
 
 /* ================================================================== main */

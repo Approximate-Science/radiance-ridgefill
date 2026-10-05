@@ -39,7 +39,7 @@ static const RadOperandSpec oRowsel[] = { OPD("token_ids"), OPD("positions"), WG
 
 static const RadParamSpec pRho[] = { P_INT("M"), P_INT("n_head") };
 static const RadOperandSpec oRho[] = { OPD("a"), OPD("mask"), WGT("A_log"), WGT("dt_bias"),
-                                       INOUT("ND"), OPD("state_idx") };
+                                       INOUT("ND"), OPD("state_idx"), OPD_O("bounds") };
 
 static const RadParamSpec pCorrect[] = { P_INT("M"), P_STR("mode"), P_F64("alpha"),
                                          P_INT("n_head"), P_INT("sd0"), P_INT("sd1") };
@@ -47,7 +47,7 @@ static const RadParamSpec pCorrect[] = { P_INT("M"), P_STR("mode"), P_F64("alpha
  * `state` with `state_idx`: the groups need not share a slot per sequence. */
 static const RadOperandSpec oCorrect[] = { INOUT("state"), OPD("state_idx"), INOUT("applied"),
                                            OPD("applied_idx"), WGT("C"), OPD_O("ND"),
-                                           OPD_O("nd_idx") };
+                                           OPD_O("nd_idx"), OPD_O("bounds") };
 
 static const RadParamSpec pStateRead[] = { P_INT("M"), P_INT("n_head"), P_INT("sd0"), P_INT("sd1") };
 static const RadOperandSpec oStateRead[] = { OPD("state"), OPD("state_idx"), OUT("out") };
@@ -71,7 +71,9 @@ static const RadOpSchema kSchemas[] = {
   "softplus(a[t,h] + dt_bias[h]); D = e^g * D + 1; N = e^g * N + mask[t]. ND is a LINEAR slot "
   "[n_states, n_head, ...] holding (N, D) per head as two f32; the slot is state_idx[0] (one "
   "sequence); a slot outside the pool writes nothing. rho = clamp(N/D, 0, 1) is read by "
-  "kva_state_correct. a bf16 or f32; mask i32; A_log, dt_bias, ND f32." },
+  "kva_state_correct. Optional `bounds` i32 [>=1] (kva_mask's): the recurrence runs over rows "
+  "[clamp(bounds[0], 0, n), n) only; absent = every row. a bf16 or f32; mask i32; A_log, "
+  "dt_bias, ND f32." },
 { "kva_state_correct", ARR(pCorrect), ARR(oCorrect),
   "Apply or undo the GDN terminal-state correction (KVA +st) on each sequence's slots. M = n_seq "
   "(state_idx's rows). Every KV operand has its own group's index after it -- state_idx, "
@@ -82,7 +84,9 @@ static const RadOpSchema kSchemas[] = {
   "alpha 0 leaves the state's bits alone. state [n_states, n_head, sd0, sd1] f32 with the strides "
   "the operand carries (linear slots may be padded); applied [n_states, n_head, ...] one f32 a "
   "head; C [n_head, sd0, sd1] f32; ND as kva_rho_update's, optional. `alpha` is read in apply "
-  "mode and ignored in undo." },
+  "mode and ignored in undo. Optional `bounds` i32 [>=2] (kva_mask's {s, b', ...}): when "
+  "bounds[1] <= bounds[0] (the step's last sequence had no bulk row) the op writes nothing, in "
+  "either mode; otherwise it is the op without bounds." },
 { "kva_state_read", ARR(pStateRead), ARR(oStateRead),
   "Copy each sequence's GDN state slot out (KVA correction refit captures). M = n_seq "
   "(state_idx's rows; column 0 is the slot). out[s, h, i, j] = state[slot_s, h, i, j]; a slot "
@@ -161,6 +165,7 @@ static int shape_rho(const RadParam* p, int n_p, int operand, RadOpdDesc* out) {
         opd(RAD_F32, { heads }),
         opd(RAD_F32, { slots, heads, 1, 2 }, RAD_FILL_SIGMOID),
         opd_idx({ 1, 1 }, slots),
+        opd_idx({ 4 }, n),   /* kva_mask's bounds: a first row inside the chunk */
     });
 }
 
@@ -179,6 +184,7 @@ static int shape_correct(const RadParam* p, int n_p, int operand, RadOpdDesc* ou
         opd(RAD_F32, { heads, sd0, sd1 }),
         apply ? opd(RAD_F32, { slots, heads, 1, 2 }, RAD_FILL_SIGMOID) : opd_absent(),
         apply ? index : opd_absent(),
+        opd_absent(),   /* bounds: a drawn pair would write nothing half the time */
     });
 }
 

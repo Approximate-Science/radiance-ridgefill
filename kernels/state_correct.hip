@@ -19,6 +19,7 @@ enum { KVA_CORRECT_THREADS = 256 };
 __global__ void __launch_bounds__(KVA_CORRECT_THREADS) kva_correct_kernel(KvaCorrect g) {
     const int64_t h = blockIdx.x, s = blockIdx.y;
     int64_t st_slot = 0, ap_slot = 0, nd_slot = 0;
+    if (!kva_correct_has_bulk(&g)) return;   /* the bounds are device memory: read here, not at launch */
     if (!kva_correct_slots(&g, s, &st_slot, &ap_slot, &nd_slot)) return;   /* whole workgroup */
     float* applied = g.applied + ap_slot * g.ap_slot + h * g.ap_head;
     float scale = *applied;
