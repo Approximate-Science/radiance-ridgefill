@@ -38,6 +38,7 @@ inline KvaAdapter adapter_of(const qwen4exp_fp8::Model& m) {
     a.min_tail = kAdapterMinTail;
     a.default_tail = kAdapterDefaultTail;
     a.act_dtype = m.g.act_dtype;
+    a.dtype = m.g.dtype;
     a.state = {m.gcfg.n_head_v, m.gcfg.head_v, m.gcfg.head_k};
     a.buf_stream = m.b_h;
     a.buf_x = m.a_x.x;

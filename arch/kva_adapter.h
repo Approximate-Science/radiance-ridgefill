@@ -38,6 +38,7 @@ struct KvaAdapter {
     /* the measured tail facts (KVA-FACTS §5): a fit measured at 512 rows is not trusted below it */
     int64_t min_tail = 0, default_tail = 0;
     uint32_t act_dtype = RAD_BF16;  /* the stream and block-input buffers' element type */
+    const char* dtype = "bf16";     /* the same, as the op params name it (gemm, cast, add) */
     StateShape state;
     /* per layer, length n_layer: attention (not recurrent); the block takes a pre-normed input (the
      * fill hands it one, check_fill); the block runs the MoE calibration tap the core never issues;

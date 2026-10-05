@@ -162,10 +162,9 @@ static const char* decl_kernel_ops(RadBuilder* b, const qwen4exp_fp8::Model& m,
 
 /* The refusals a serving mode needs before anything is issued (R31). Each names the number or the
  * tensor that refused it. */
-static int check_mode(const Kva& k, const qwen4exp_fp8::Model& m) {
+static int check_mode(const Kva& k, int64_t max_tok) {
     const Config& c = k.cfg;
     const char* mode = kModeNames[c.mode];
-    const int64_t max_tok = m.g.max_tok;
     /* A TAIL LONGER THAN A STEP (REFUTATION §4, R100). n_ahead is capped at the step C =
      * max_tok (radiance core/sched/batch.cpp:1066-1080), so a full chunk only PROVES that row i
      * has (n_tok-1-i) + C tokens after it: rows [0, n_tok - ceil_G(T - C)) are bulk and the rest run
@@ -173,7 +172,7 @@ static int check_mode(const Kva& k, const qwen4exp_fp8::Model& m) {
      * ceil_G(T - C) < C, i.e. T <= 2C - G; above it no chunk could ever be approximated, so the
      * mode is refused rather than served as an expensive no-op. The operator route that needs no
      * plugin change: --checkpoint-interval below --max-num-batched-tokens (README, R84). */
-    const int64_t G = m.gcfg.chunk;
+    const int64_t G = k.ad.tile;
     if (c.tail > 2 * max_tok - G) {
         std::fprintf(stderr, "radiance: qwen4exp_kva: kva.tail is %lld tokens and the largest step "
                              "is %lld (--max-num-batched-tokens); the scheduler never reports more "
@@ -195,26 +194,27 @@ static int check_mode(const Kva& k, const qwen4exp_fp8::Model& m) {
     return RAD_OK;
 }
 
-/* What the late layers assume of the in-tree model, refused by name if it ever stops holding. */
-static int check_fill(const qwen4exp_fp8::Model& m, const Kva& k) {
-    if (m.ple_layer >= k.split) {
+/* What the late layers assume of the model (its adapter's facts), refused by name if it ever stops
+ * holding. */
+static int check_fill(const Kva& k) {
+    const KvaAdapter& a = k.ad;
+    if (k.split < a.split_lo) {
         std::fprintf(stderr, "radiance: qwen4exp_kva: the projector starts at layer %lld and the "
                              "n-gram embedding enters the stream at layer %lld; a split at or below "
                              "it would predict from a stream that never received it\n",
-                     (long long)k.split, (long long)m.ple_layer);
+                     (long long)k.split, (long long)(a.split_lo - 1));
         return RAD_E_UNSUPPORTED;
     }
-    for (int64_t l = k.split - 1; l < m.g.n_layer; ++l) {
-        const qwen4exp_fp8::Layer& lay = m.layers[(size_t)l];
+    for (int64_t l = k.split - 1; l < a.n_layer; ++l) {
         /* The masked path issues each late layer's MoE pass itself (kva_moe.h), and that copy has
          * no calibration tap: a calibration run serves through the in-tree path only. */
-        if (lay.mlp.op_gram_gu) {
+        if (a.calibrated[(size_t)l]) {
             std::fprintf(stderr, "radiance: qwen4exp_kva: layer %lld runs the MoE calibration tap, "
                                  "which KVA's late layers do not issue; calibrate with "
                                  "RADIANCE_KVA=off\n", (long long)l);
             return RAD_E_UNSUPPORTED;
         }
-        if (l < k.split || (lay.full ? lay.attn.ext_in : lay.gdn.ext_in)) continue;
+        if (l < k.split || a.ext_in[(size_t)l]) continue;
         std::fprintf(stderr, "radiance: qwen4exp_kva: layer %lld's block owns its input norm, and "
                              "the fill hands blocks their input already normed\n", (long long)l);
         return RAD_E_UNSUPPORTED;
@@ -233,40 +233,41 @@ static int check_fill(const qwen4exp_fp8::Model& m, const Kva& k) {
  * maps in the stored form kva_int8.h relaid them into), and the in-tree row-broadcast add for the
  * bias, which gemm_nt_q has no operand for. Cost: the codes buffer, [max_tok, hc*n] int8 + scales
  * (~21 MiB at 2,048 rows), in the activation arena. */
-static int decl_fill_i8(RadBuilder* b, const Geom& g, const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva& k) {
-    const int64_t wide = m.hccfg.hc * g.n_embd;
-    k.b_q8 = decl_b(b, k.nm.f("kva_stream_q8"), RAD_I8, {g.max_tok, wide});
-    k.b_s8 = decl_b(b, k.nm.f("kva_stream_s8"), RAD_F32, {g.max_tok, wide / kI8Group});
+static int decl_fill_i8(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
+    const KvaAdapter& a = k.ad;
+    const int64_t wide = a.wide, n = a.n_embd, max_tok = ctx->max_tok;
+    k.b_q8 = decl_b(b, k.nm.f("kva_stream_q8"), RAD_I8, {max_tok, wide});
+    k.b_s8 = decl_b(b, k.nm.f("kva_stream_s8"), RAD_F32, {max_tok, wide / kI8Group});
     if (!k.b_q8 || !k.b_s8) return RAD_E_INVAL;
     RAD_ARCH_TRY(rad_buf_concurrent(b, k.b_q8));
     RAD_ARCH_TRY(rad_buf_concurrent(b, k.b_s8));
-    k.op_quant8 = RAD_OP(b, "quant_act_i8g", RAD_PARAMS(RAD_RANGE("M", 1, g.max_tok), RAD_INT("n", wide),
-                                                       RAD_INT("group", kI8Group), RAD_STR("dtype", g.dtype)),
+    k.op_quant8 = RAD_OP(b, "quant_act_i8g", RAD_PARAMS(RAD_RANGE("M", 1, max_tok), RAD_INT("n", wide),
+                                                       RAD_INT("group", kI8Group), RAD_STR("dtype", a.dtype)),
                          RAD_NOWEIGHTS);
-    k.op_bias = RAD_OP(b, "add", RAD_PARAMS(RAD_RANGE("M", 1, g.max_tok), RAD_INT("n", g.n_embd),
-                                            RAD_STR("dtype", g.dtype)), RAD_NOWEIGHTS);
-    for (int64_t l = k.split; l < g.n_layer; ++l)
+    k.op_bias = RAD_OP(b, "add", RAD_PARAMS(RAD_RANGE("M", 1, max_tok), RAD_INT("n", n),
+                                            RAD_STR("dtype", a.dtype)), RAD_NOWEIGHTS);
+    for (int64_t l = k.split; l < a.n_layer; ++l)
         k.op_proj[(size_t)l] = rw(b, RAD_OP(b, "kva_gemm_nt_q",
-                                            RAD_PARAMS(RAD_RANGE("M", 1, g.max_tok), RAD_INT("N", g.n_embd),
+                                            RAD_PARAMS(RAD_RANGE("M", 1, max_tok), RAD_INT("N", n),
                                                        RAD_INT("K", wide), RAD_INT("group", kI8Group),
                                                        RAD_STR("dtype", "i8a8")),
                                             RAD_NOWEIGHTS),
-                                  {k.b_q8, k.b_s8}, {m.a_x.x});
+                                  {k.b_q8, k.b_s8}, {a.buf_x});
     const char* missing = !k.op_quant8 ? "quant_act_i8g" : !k.op_bias ? "add"
                         : !k.op_proj[(size_t)k.split] ? "kva_gemm_nt_q" : nullptr;
     if (!missing || ctx->shape_probe) return RAD_OK;
     std::fprintf(stderr, "radiance: qwen4exp_kva: no kernel serves the int8 projector's %s (N %lld, K %lld): "
                          "kva.so offers kva_gemm_nt_q only when libr4d is loaded\n", missing,
-                 (long long)g.n_embd, (long long)wide);
+                 (long long)n, (long long)wide);
     return RAD_E_UNSUPPORTED;
 }
 
 /* THE STAGING RING'S COPY: libr4d's strided row copy (cast bf16 -> bf16, r4d_p2p_copy2d -- bytes moved,
  * no value converted, so int8 codes ride it as rows of bf16 pairs), one row block a layer: the bf16
  * map and its bias, [n + 1, hc*n], or the int8 map's stored codes, scales and bias in fewer rows. */
-static int decl_ring(RadBuilder* b, const Geom& g, const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva& k) {
-    const int64_t wide = m.hccfg.hc * g.n_embd;
-    k.op_ring = RAD_OP(b, "cast", RAD_PARAMS(RAD_RANGE("M", 1, g.n_embd + 1), RAD_INT("n", wide),
+static int decl_ring(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
+    const int64_t wide = k.ad.wide;
+    k.op_ring = RAD_OP(b, "cast", RAD_PARAMS(RAD_RANGE("M", 1, k.ad.n_embd + 1), RAD_INT("n", wide),
                                              RAD_STR("from", "bf16"), RAD_STR("to", "bf16")), RAD_NOWEIGHTS);
     if (k.op_ring || ctx->shape_probe) return RAD_OK;
     std::fprintf(stderr, "radiance: qwen4exp_kva: no kernel serves the staging ring's copy (cast bf16, "
@@ -276,34 +277,35 @@ static int decl_ring(RadBuilder* b, const Geom& g, const qwen4exp_fp8::Model& m,
 }
 
 static int decl_fill(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva& k) {
+    const KvaAdapter& a = k.ad;
     Geom g = m.g;
     g.max_tok = ctx->max_tok;
-    for (rad_buf h : { m.b_h, m.a_x.x, m.a_x.cq(), m.a_x.cs() })
+    for (rad_buf h : { a.buf_stream, a.buf_x, a.buf_x_q, a.buf_x_s })
         if (h) RAD_ARCH_TRY(rad_buf_concurrent(b, h));
-    RAD_ARCH_TRY(k.quant.declare(b, g, m.a_x, g.n_embd));
+    RAD_ARCH_TRY(k.quant.declare(b, g, m.a_x, g.n_embd));   /* model-owned: the adapter's declare_model */
     if (k.int8) {
-        RAD_ARCH_TRY(decl_fill_i8(b, g, m, ctx, k));
-        return decl_ring(b, g, m, ctx, k);
+        RAD_ARCH_TRY(decl_fill_i8(b, ctx, k));
+        return decl_ring(b, ctx, k);
     }
-    const int64_t wide = m.hccfg.hc * g.n_embd;
-    for (int64_t l = k.split; l < g.n_layer; ++l) {
+    const int64_t wide = a.wide, n = a.n_embd, max_tok = ctx->max_tok;
+    for (int64_t l = k.split; l < a.n_layer; ++l) {
         /* kva.so's forward of the engine's gemm_nt_bias row (kernels/forward.cpp): the projector is
          * plugin memory, not a weight, so it rides as an IN operand. */
         const rad_op h = rw(b, RAD_OP(b, "kva_gemm_nt_bias",
-                                RAD_PARAMS(RAD_RANGE("M", 1, g.max_tok), RAD_INT("N", g.n_embd),
-                                           RAD_INT("K", wide), RAD_STR("dtype", g.dtype)),
+                                RAD_PARAMS(RAD_RANGE("M", 1, max_tok), RAD_INT("N", n),
+                                           RAD_INT("K", wide), RAD_STR("dtype", a.dtype)),
                                 RAD_NOWEIGHTS),
-                            {m.b_h}, {m.a_x.x});
+                            {a.buf_stream}, {a.buf_x});
         if (!h && !ctx->shape_probe) {
             std::fprintf(stderr, "radiance: qwen4exp_kva: no kernel serves the projector "
                                  "(kva_gemm_nt_bias, N %lld, K %lld, %s): kva.so offers it only "
                                  "when libr4d (device) or libref (host) is loaded\n",
-                         (long long)g.n_embd, (long long)wide, g.dtype);
+                         (long long)n, (long long)wide, a.dtype);
             return RAD_E_UNSUPPORTED;
         }
         k.op_proj[(size_t)l] = h;
     }
-    return decl_ring(b, g, m, ctx, k);
+    return decl_ring(b, ctx, k);
 }
 
 }  /* namespace qwen4exp_kva */

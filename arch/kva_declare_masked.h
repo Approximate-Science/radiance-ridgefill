@@ -225,8 +225,8 @@ static int decl_selected(RadBuilder* b, const RadModelMeta* meta, const qwen4exp
     k.want_final = ctx->max_spec > 0 && (k.cfg.mode == MODE_SPEED || k.cfg.mode == MODE_QUALITY) &&
                    g_loaded.has_final && k.cfg.final_on;
     k.ring_end = m.g.n_layer + (k.want_final ? m.hccfg.hc : 0);
-    if (!probe) RAD_ARCH_TRY(check_mode(k, m));
-    if (!probe) RAD_ARCH_TRY(check_fill(m, k));
+    if (!probe) RAD_ARCH_TRY(check_mode(k, m.g.max_tok));
+    if (!probe) RAD_ARCH_TRY(check_fill(k));
     if (!probe) RAD_ARCH_TRY(take_upload(m, ctx, k));
     if (k.cfg.mode != MODE_PLUMB) RAD_ARCH_TRY(decl_fill(b, m, ctx, k));
     const char* missing = decl_masked(b, m, ctx, k);
