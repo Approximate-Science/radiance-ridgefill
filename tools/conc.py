@@ -146,6 +146,19 @@ def log_window(since, until, path):
             "pn2_steps": sum("Pn 2," in l for l in approx), "file": os.path.basename(path)}
 
 
+def host_load():
+    """The 1-minute load and the compilers/test binaries running (by process NAME: a shell whose
+    command line merely mentions one is not one), recorded per rep so a contaminated rep shows."""
+    names = {"cc1plus", "clang", "clang++", "ninja", "ld", "kernel_test", "arch_static_test", "hipcc"}
+    busy = 0
+    for pid in os.listdir("/proc"):
+        try:
+            busy += open(f"/proc/{pid}/comm").read().strip() in names if pid.isdigit() else 0
+        except OSError:
+            pass
+    return {"load1": float(open("/proc/loadavg").read().split()[0]), "compilers": busy}
+
+
 def utc():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
 
@@ -163,6 +176,7 @@ def one_rep(length, c, n, doc_ids, logdir, tag):
     a0 = time.monotonic()
     time.sleep(2.0 if c else 0)
     ids = long_prompt(length, doc_ids, n)
+    h0 = host_load()
     m0, w0, t0 = metrics(), utc(), time.monotonic()
     r = post("/v1/completions", {"model": "m", "prompt": ids, "max_tokens": 1, "temperature": 0})
     t1, w1, m1 = time.monotonic(), utc(), metrics()
@@ -188,6 +202,7 @@ def one_rep(length, c, n, doc_ids, logdir, tag):
             f"--max-num-seqs must be at least C + 1")
     steps = delta["radiance:engine_steps_total"]
     return {"length": length, "decoders": c, "prompt_ms": timings.get("prompt_ms"),
+            "host_before": h0, "host_after": host_load(),
             "wall_ms": 1000 * (t1 - t0), "since": w0, "until": w1,
             "decoder_gap_alone_ms": summary(gaps(decoders, a0, t0)),
             "decoder_gap_prefill_ms": summary(gaps(decoders, t0, t1)),
