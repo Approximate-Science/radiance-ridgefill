@@ -6,40 +6,21 @@
 
 namespace qwen4exp_kva {
 
-/* THE ALTERNATE DOWN HANDLE (PLAN-FIX §6.1, DD-B): layer l's routed down GEMM declared a second
- * time, after the whole graph, with the SAME params as the in-tree op_dn (rad_block_moe_fp8.h:
- * 1033-1043; bf16 experts :891-898) and NO weights. The approximate pass issues it with the layer's
- * own weight tables (legal: issue.cpp:136-138 serves a table the declaration did not name, with a
- * one-time ~2 KiB allocation per table at the first approximate pass, :233-246). Because the
- * prefill stager learns a layer's span from DECLARED weight uses only (stager.cpp:21-55), this
- * handle is no layer's last op, so a staged layer's buffer is never released before the pass ends
- * and every later layer streams its routed experts instead of being staged whole (stager.cpp:93).
- * Its reads/writes are op_dn's, which keeps the MoE scratch live to here: without them the planner
- * could lay another buffer over `eff`/`edn` (HANDOVER-FIX §9). Kernel selection is by the dtype
- * string (r4d_rows.cpp:2471-2503), so the weightless declaration resolves to op_dn's row. */
-static rad_op decl_alt_down(RadBuilder* b, const MoeFP8& e, int64_t max_tok) {
-    const MoeFP8::Config& c = e.c;
-    const int64_t rows = std::min(max_tok, c.rows);   /* a sizing declare's pass, as its own block */
-    if (c.expert_bf16)
-        return rw(b, RAD_OP(b, "moe_gemm",
-                      RAD_PARAMS(RAD_RANGE("M", 1, rows), RAD_INT("N", e.g.n_embd),
-                                 RAD_INT("K", c.n_ff_exp), RAD_INT("n_expert", c.n_expert),
-                                 RAD_INT("top_k", c.top_k), RAD_STR("a_order", "sorted"),
-                                 RAD_STR("dtype", "bf16")),
-                      RAD_NOWEIGHTS),
-                  {e.w.eff.x, e.w.sorted, e.w.eoff}, {e.w.edn});
-    const bool sliced = c.ff_hi[0] > 0;   /* each parity's width on this rank, as declare's wq */
-    const int64_t k0 = sliced ? c.ff_hi[0] - c.ff_lo[0] : c.n_ff_exp;
-    const int64_t k1 = sliced ? c.ff_hi[1] - c.ff_lo[1] : c.n_ff_exp;
-    return rw(b, RAD_OP(b, "moe_gemm_q",
-                  RAD_PARAMS(RAD_RANGE("M", 1, rows), RAD_INT("N", e.g.n_embd), RAD_INT("K", k0),
-                             RAD_INT("n_expert", e.n_reg), RAD_INT("top_k", c.top_k),
-                             RAD_INT("group", RAD_FP8_BLOCK), RAD_STR("a_order", "sorted"),
-                             RAD_STR("dtype", MoeFP8::kServed[e.fmt[1]]),
-                             RAD_INT("N_odd", e.g.n_embd), RAD_INT("K_odd", k1),
-                             RAD_INT("parts", 1)),
-                  RAD_NOWEIGHTS),
-              {e.w.eff.q, e.w.eff.s, e.w.sorted, e.w.eoff}, {e.w.edn});
+/* THE STAGER PROBES' BUFFERS (notes/impl.md §2): expert offsets that are all zero -- kva_mask writes
+ * them every masked pass -- and the rows a probe's gate-up GEMM writes its zeros into, sized for the
+ * widest routed layer. Both take the whole program. */
+static int decl_probes(RadBuilder* b, const qwen4exp_fp8::Model& m, Kva& k) {
+    int64_t width = 0, top_k = 0;
+    for (const qwen4exp_fp8::Layer& l : m.layers) {
+        k.n_zeros = std::max({k.n_zeros, l.mlp.c.n_expert + 1, l.mlp.c.top_k});
+        width = std::max(width, 2 * l.mlp.c.n_ff_exp);
+        top_k = std::max(top_k, l.mlp.c.top_k);
+    }
+    k.b_zeros = decl_b(b, k.nm.f("kva_zero_offsets"), RAD_I32, {k.n_zeros});
+    k.b_probe = decl_b(b, k.nm.f("kva_probe_rows"), RAD_BF16, {top_k, width});
+    if (!k.b_zeros || !k.b_probe) return RAD_E_INVAL;
+    RAD_ARCH_TRY(rad_buf_concurrent(b, k.b_zeros));
+    return rad_buf_concurrent(b, k.b_probe);
 }
 
 /* The projected block input and its codes: the same code pair the connection read writes into `x`
@@ -71,7 +52,7 @@ static int decl_projected(RadBuilder* b, const qwen4exp_fp8::Model& m, const Rad
 
 /* THE MASKED PATH'S DECLARATIONS. Every mode but off: plumb runs the late layers exactly through
  * the same path (mask all 0, no projector), which is what makes it the oracle for the split scan
- * (R47) and the alternate handles (R94). `kva_mask`'s mode is the mode's row rule: plumb keeps every
+ * (R47) and the stager probes (R94). `kva_mask`'s mode is the mode's row rule: plumb keeps every
  * row exact, speed approximates the whole window, quality keeps its class (or random/all) rows. */
 static const char* decl_masked(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx,
                                Kva& k) {
@@ -95,11 +76,7 @@ static const char* decl_masked(RadBuilder* b, const qwen4exp_fp8::Model& m, cons
     if (!k.op_mask) return "kva_mask";
     if (project && (!k.op_select || !k.op_drop)) return !k.op_select ? "kva_select" : "kva_drop_rows";
     if (project && !k.op_cast) return "cast";
-    k.alt_dn.assign(m.layers.size(), 0);
-    for (int64_t l = std::max<int64_t>(k.split - 1, 0); l < m.g.n_layer; ++l)
-        if (!(k.alt_dn[(size_t)l] = decl_alt_down(b, m.layers[(size_t)l].mlp, ctx->max_tok)))
-            return "moe_gemm_q (the alternate down handle)";
-    return nullptr;
+    return decl_probes(b, m, k) < 0 ? "a buffer" : nullptr;
 }
 
 static void note_config(RadBuilder* b, const Kva& k) {
@@ -112,7 +89,7 @@ static void note_config(RadBuilder* b, const Kva& k) {
              kRowselNames[c.rowsel], c.share, (long long)c.seed, kStageNames[c.stage],
              (long long)c.stage_rows, kStraddleNames[c.straddle],
              k.out_rows_ok ? "" : "; KL mode serves stock (RADIANCE_KVA_SCORE_BULK unset)",
-             c.force_split || c.shift_b || c.force_alt ? "; DEBUG switches set" : "");
+             c.force_split || c.shift_b || c.force_stream ? "; DEBUG switches set" : "");
 }
 
 /* The gate-only switches, said loudly at declare so no measured run carries one unknowingly. A
@@ -127,8 +104,8 @@ static void note_debug(const Kva& k) {
     if (c.shift_b)
         std::fprintf(stderr, "radiance: qwen4exp_kva: DEBUG RADIANCE_KVA_SHIFT_B=%lld\n",
                      (long long)c.shift_b);
-    if (c.force_alt)
-        std::fprintf(stderr, "radiance: qwen4exp_kva: DEBUG RADIANCE_KVA_FORCE_ALT=1\n");
+    if (c.force_stream)
+        std::fprintf(stderr, "radiance: qwen4exp_kva: DEBUG RADIANCE_KVA_FORCE_STREAM=1\n");
 }
 
 /* The selected set, its ops and its refusals. Under a sizing declare nothing is refused: the real

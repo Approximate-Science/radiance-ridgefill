@@ -15,9 +15,9 @@
  * net's tile) -- whatever else rides in the step. Layers 0..S-1 run stock; from S on, each late
  * layer either takes the LEAN fill (speed mode, a one-sequence step whose whole chunk is bulk: only
  * the cache-writing pieces, kva_fill.h) or the MASKED layer (every other shape: the in-tree layer
- * over all rows with the device mask choosing which rows use the projection, kva_layer.h). The
- * routed down GEMMs from layer S-1 go through weightless alternate handles so the expert stager
- * streams the late layers' routed experts instead of staging each whole (§6.1). The engine release
+ * over all rows with the device mask choosing which rows use the projection, kva_layer.h). On a
+ * masked pass the expert stager is steered, with zero-row probes of the late layers' gate-up GEMMs,
+ * to stream the late layers' routed experts instead of staging each layer whole (notes/impl.md §2). The engine release
  * is checked at open and a mismatch forwards to the engine's own architecture (kva_guard.h).
  *
  * Included by tests/arch_static_test.cpp too, which defines RAD_ARCH_NO_EXPORTS itself; then
@@ -83,7 +83,7 @@ static int declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* c
     k.out_rows_ok = ctx->max_out_rows == 0 || k.cfg.score_bulk;
     for (auto* v : { &k.proj_w, &k.proj_b, &k.st })
         v->assign(m.layers.size(), 0);
-    for (auto* v : { &k.op_undo, &k.op_apply, &k.op_rho, &k.op_proj, &k.alt_dn })
+    for (auto* v : { &k.op_undo, &k.op_apply, &k.op_rho, &k.op_proj })
         v->assign(m.layers.size(), 0);
     if (k.cfg.declare_all) return decl_every_copy(b, m, k);
     if (k.cfg.mode == MODE_OFF) RAD_ARCH_TRY(capture_split(b, m, meta, k));
@@ -129,8 +129,10 @@ static Pass derive(const Kva& k, const RadBatch* batch) {
     p.s_lb = s_lb;
     p.split = b < n_tok;
     p.path = c.mode == MODE_SPEED && D == 0 && Pn == 1 && b == n_tok ? PATH_LEAN : PATH_MASKED;
-    p.alt = p.path == PATH_MASKED &&
-            (c.force_alt || (c.stage == STAGE_AUTO && n_tok - (b - s_lb) <= c.stage_rows));
+    /* The probes ride in layer S-3's MoE (approximate_step), so the lever needs three routed layers
+     * below S; the threshold is on the pass's exact-row count, a keyed number (R96). */
+    p.stream = p.path == PATH_MASKED && k.split >= 3 &&
+               (c.force_stream || (c.stage == STAGE_AUTO && n_tok - (b - s_lb) <= c.stage_rows));
     return p;
 }
 
@@ -147,8 +149,8 @@ static void prologue(RadCtx* c, qwen4exp_fp8::Model& m, const RadBatch* batch) {
         RAD_ISSUE_N(c, m.op_rope_cs, T, rope_pos1(batch, T), RAD_B(m.b_rope_cs));
 }
 
-/* qwen4exp_fp8.cpp:1407-1425 for one layer -- with the MoE on `arm` when one is given (layer S-1
- * of a pass on the alternates: stock rows, the alternate down handle). */
+/* qwen4exp_fp8.cpp:1407-1425 for one layer -- with the MoE issued through `arm` when one is given
+ * (layer S-3 of a streaming pass: stock rows, the stager probes behind its gate-up GEMM). */
 static void layer(RadCtx* c, qwen4exp_fp8::Model& m, int64_t li, const RadBatch* batch,
                   const MoeArm* arm = nullptr) {
     const qwen4exp_fp8::Layer& l = m.layers[(size_t)li];
@@ -178,19 +180,37 @@ static void epilogue(RadCtx* c, qwen4exp_fp8::Model& m, const RadBatch* batch) {
                 brows(m.b_logits, batch->n_out));
 }
 
-/* Once a masked pass, after layer S-1 (PLAN-FIX §3.1-2): the device mask and bounds, then the
- * layer-S stream of the bulk superset copied into h_S, which every projector reads from here on
- * (b_h's bulk rows become a stream nobody reads). */
-static void mask_rows(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, const RadBatch* batch,
-                      const Pass& p) {
-    const int64_t T = batch->n_tok;
+/* Once a masked pass, ahead of the layers (PLAN-FIX §3.1): the device mask, the bounds, and the zero
+ * expert offsets the stager probes read. It reads only the batch, so it may run this early. */
+static void mask_rows(RadCtx* c, const Kva& k, const RadBatch* batch, const Pass& p) {
     RAD_ISSUE_N(c, k.op_mask, p.b, praw(batch->cu_seqlens + batch->n_seq - 1, RAD_I32, 2),
                 praw(batch->token_ids, RAD_I32, p.b), praw(batch->positions, RAD_I32, p.b),
-                k.mask_scored ? RAD_W(k.score) : RAD_NONE, brows(k.b_mask, T), brows(k.b_bounds, 4));
+                k.mask_scored ? RAD_W(k.score) : RAD_NONE, brows(k.b_mask, batch->n_tok),
+                brows(k.b_bounds, 4), brows(k.b_zeros, k.n_zeros));
+}
+
+/* After layer S-1: the layer-S stream of the bulk superset copied into h_S, which every projector
+ * reads from here on (b_h's bulk rows become a stream nobody reads). */
+static void copy_stream(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, const Pass& p) {
     if (!k.op_cast) return;
     const int64_t wide = m.hccfg.hc * m.g.n_embd, rows = p.b - p.s_lb;
     RAD_ISSUE_N(c, k.op_cast, rows, brow_slice(m.b_h, p.s_lb, rows, wide),
                 brow_slice(k.b_hs, p.s_lb, rows, wide));
+}
+
+/* THE STAGER LEVER (notes/impl.md §2): behind layer S-3's gate-up GEMM, while the stager holds layers
+ * S-3 and S-2 in its two buffers and has released neither, probe the gate-up of every layer from S-1
+ * to the last. Each probe makes the stager start the layer after it, and a start that finds both
+ * buffers held STREAMS that layer: from here on no late layer is staged whole, and each reads only
+ * the experts its exact rows route to. Layer S-1 itself, which runs every row, is still staged when
+ * the real pass reaches layer S-2. Correctness never depends on any of it: a probe moves no number. */
+static MoeArm probe_arm(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m) {
+    MoeArm arm;
+    arm.after_gate_up = [c, &k, &m] {
+        for (int64_t x = k.split - 1; x < m.g.n_layer; ++x)
+            moe_probe(c, m.layers[(size_t)x].mlp, k.b_zeros, k.b_probe);
+    };
+    return arm;
 }
 
 static void approximate_step(RadCtx* c, const Kva& k, const RadBatch* batch, const Pass& p,
@@ -198,16 +218,14 @@ static void approximate_step(RadCtx* c, const Kva& k, const RadBatch* batch, con
     const int rank = rad_rank(c);
     qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
     prologue(c, m, batch);
-    const int64_t last_stock = k.split - 1;
-    for (int64_t li = 0; li < last_stock; ++li) layer(c, m, li, batch);
-    if (last_stock >= 0) {
-        const MoeArm alt{ k.alt_dn[(size_t)last_stock], 0, 0 };
-        layer(c, m, last_stock, batch, p.alt ? &alt : nullptr);
-    }
+    if (p.path == PATH_MASKED) mask_rows(c, k, batch, p);
+    const MoeArm probes = probe_arm(c, k, m);
+    for (int64_t li = 0; li < k.split; ++li)
+        layer(c, m, li, batch, p.stream && li == k.split - 3 ? &probes : nullptr);
     if (rank == 0 && !k.dump_dir.empty())
         dump_boundary(c, k.dump_dir, m.b_h, m.hccfg.hc * m.g.n_embd, batch);
     if (p.path == PATH_MASKED) {
-        mask_rows(c, k, m, batch, p);
+        copy_stream(c, k, m, p);
         if (rank == 0 && !k.dump_dir.empty())
             dump_mask(c, k.dump_dir, k.b_mask, k.b_bounds, batch, p.b, p.s_lb);
     }
@@ -228,7 +246,7 @@ static void log_pass(const Kva& k, const RadBatch* batch, const Pass& p) {
                          "b %lld, s_lb %lld, D %lld, Pn %lld, ckpt %d, %s, stage %s%s)\n",
                  kModeNames[k.cfg.mode], (long long)batch->n_tok, (long long)batch->n_ahead,
                  (long long)p.b, (long long)p.s_lb, (long long)D, (long long)(batch->n_seq - D),
-                 batch->n_checkpoints, kPathNames[p.path], p.alt ? "alt" : "stock",
+                 batch->n_checkpoints, kPathNames[p.path], p.stream ? "stream" : "stock",
                  p.split ? (k.cfg.straddle == STRADDLE_SPLIT ? ", split" : ", end") : "");
 }
 

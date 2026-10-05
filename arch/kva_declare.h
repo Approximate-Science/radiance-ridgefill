@@ -51,9 +51,10 @@ struct Kva {
     ActFP8  xp{};
     rad_op  op_mask = 0, op_cast = 0, op_select = 0, op_drop = 0;
     bool    mask_scored = false;              /* kva_mask was declared with the score table */
-    /* THE STAGER LEVER (PLAN-FIX §6.1): per routed layer from S-1 on, its down GEMM declared a
-     * second time with no weights. [n_layer]: 0 below S-1. */
-    std::vector<rad_op> alt_dn;
+    /* THE STAGER LEVER (notes/impl.md §2): the zero expert offsets and the scratch rows the late
+     * layers' gate-up probes read and write. */
+    rad_buf b_zeros = 0, b_probe = 0;
+    int64_t n_zeros = 0;
     std::string dump_dir;                     /* RADIANCE_KVA_DUMP, empty when unset */
     /* Stage 6 captures (debug; notes/arch.md "Capture"): RADIANCE_KVA_CAPTURE and
      * RADIANCE_KVA_CAPTURE_STATE, and the copy op the state capture needs. */

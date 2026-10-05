@@ -14,10 +14,10 @@
  *   meta kva.rowsel.share     share of the window's class matches kept exact
  *                                                      env RADIANCE_KVA_SHARE    default 0.25
  *   meta kva.rowsel.seed      seed of the random control                         default 0
- *   env RADIANCE_KVA_STAGE    auto | stock: the stager lever (PLAN-FIX §6.1). auto issues the
- *                             late routed down GEMMs through weightless alternate handles on an
+ *   env RADIANCE_KVA_STAGE    auto | stock: the stager lever (PLAN-FIX §6.1, notes/impl.md §2).
+ *                             auto lets the late layers STREAM their routed experts on an
  *                             approximate pass whose exact rows are at most RADIANCE_KVA_STAGE_ROWS;
- *                             stock never does (the tested fallback, R96)          default auto
+ *                             stock leaves the stager as it is (the tested fallback, R96)  default auto
  *   env RADIANCE_KVA_STAGE_ROWS  that row threshold                    default: every pass (R96)
  *   env RADIANCE_KVA_SCORE_BULK  1: approximate in KL mode too, whose logits on bulk rows are then
  *                             not the model's -- score only the exact tail (PLAN-FIX §6.2, R73)
@@ -27,7 +27,7 @@
  *                             tail in a split scan (default), or once at the chunk end (R50)
  *   RADIANCE_KVA_FORCE_SPLIT  N: the bulk ends N rows before every approximate chunk's end (R47)
  *   RADIANCE_KVA_SHIFT_B      +-N rows added to every bulk end (R51)
- *   RADIANCE_KVA_FORCE_ALT    1: the alternate down handles on every approximate pass (R94)
+ *   RADIANCE_KVA_FORCE_STREAM 1: the late layers stream on every masked pass (R94)
  *
  * WHICH COPY OF EACH FITTED TENSOR (the controls and the Stage 6 refit live in the same container
  * under suffixed names, because the disk has no room for a second 114 GiB container and
@@ -89,7 +89,7 @@ struct Config {
     int         straddle    = STRADDLE_SPLIT;
     int64_t     force_split = 0;
     int64_t     shift_b     = 0;
-    bool        force_alt   = false;
+    bool        force_stream = false;
     const char* meta_mode   = nullptr;     /* the container's kva.mode, if it has one: ignored */
 };
 
@@ -182,8 +182,8 @@ inline int read_switches(Config* c) {
                           &c->force_split));
     RAD_ARCH_TRY(read_int("RADIANCE_KVA_SHIFT_B", INT64_MIN / 2, INT64_MAX / 2, "a row count",
                           &c->shift_b));
-    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_FORCE_ALT", { "0", "1" }, "1 or unset", &v));
-    c->force_alt = v == 1;
+    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_FORCE_STREAM", { "0", "1" }, "1 or unset", &v));
+    c->force_stream = v == 1;
     return RAD_OK;
 }
 

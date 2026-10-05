@@ -23,7 +23,7 @@ struct Pass {
     int64_t b     = 0;       /* the bulk END, an absolute row of the step (PLAN-FIX §2) */
     int64_t s_lb  = 0;       /* a host LOWER bound of the last sequence's first row */
     bool    split = false;   /* b < n_tok: the last sequence's chunk straddles the bulk end */
-    bool    alt   = false;   /* the late down GEMMs go through the alternate handles (§6.1) */
+    bool    stream = false;  /* the late layers stream their routed experts (notes/impl.md §2) */
 };
 
 /* This rank's value heads of the replicated correction (kva_declare.h's decl_correction): a row
@@ -229,8 +229,8 @@ inline void project_masked(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m
 
 /* A MASKED LATE LAYER (PLAN-FIX §8): the in-tree layer (qwen4exp_fp8.cpp:1407-1425) with the
  * projection selected in after the connection read, the delta net's last sequence corrected, and
- * the MoE issued by hand (drop the bulk rows' slots; down GEMM on the alternate when the pass says
- * so). Plumb declares no projector and no drop: it is the stock layer through the same path. */
+ * the MoE issued by hand (the bulk rows' slots dropped). Plumb declares no projector and no drop: it
+ * is the stock layer through the same path. */
 inline void masked_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int64_t li,
                          const RadBatch* batch, const Pass& p, StateDump* sd) {
     const qwen4exp_fp8::Layer& l = m.layers[(size_t)li];
@@ -242,8 +242,7 @@ inline void masked_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int64_
     l.hc_mix.write(c, T, 0, T);
     dbg_resid(c, (int)li, "mix", m.g.n_embd, m.b_h, m.a_x.x);
     l.hc_ffn.read(c, T, 0, T);
-    moe_layer(c, l.mlp, MoeArm{ p.alt ? k.alt_dn[(size_t)li] : l.mlp.op_dn, k.op_drop, k.b_mask },
-              batch);
+    moe_layer(c, l.mlp, MoeArm{ k.op_drop, k.b_mask, {} }, batch);
     l.hc_ffn.write(c, T, 0, T);
     dbg_resid(c, (int)li, "ffn", m.g.n_embd, m.b_h, m.a_x.x);
 }
