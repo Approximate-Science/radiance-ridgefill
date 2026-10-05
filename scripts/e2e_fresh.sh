@@ -610,9 +610,10 @@ e2e_status 4 "RADIANCE_KVA=speed: projector 0-warning line + approximation logge
 E2E_CORRUPT=$E2E_WORK/corrupt-projector
 rm -rf "$E2E_CORRUPT"
 cp -R "$E2E_PROJECTOR" "$E2E_CORRUPT"
-set -- "$E2E_CORRUPT"/proj.*.safetensors
+# the maps are proj.L<n>.safetensors in a bf16 folder and proj8.L<n>.safetensors in an int8 one
+set -- "$E2E_CORRUPT"/proj*.L*.safetensors
 if [ ! -f "$1" ]; then
-    e2e_die "no proj.*.safetensors in $E2E_PROJECTOR (cannot build the corrupted copy)"
+    e2e_die "no proj*.L*.safetensors in $E2E_PROJECTOR (cannot build the corrupted copy)"
 fi
 E2E_CORRUPT_FILE=$(basename "$1")
 python3 - "$1" <<'PY'
