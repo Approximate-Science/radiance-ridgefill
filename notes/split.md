@@ -1,4 +1,4 @@
-# notes/split.md -- the core/adapter split: progress (account-B worker, 2026-10-05; updated ~20:49Z)
+# notes/split.md -- the core/adapter split: progress (account-B worker, 2026-10-05; session 2 from 20:54Z)
 
 Executing notes/adapter-split-spec.md on branch `split`, checked out in worktree
 `radiance-kva-wt-b` (the first worktree, `radiance-kva-wt-split`, was outside the directories this
@@ -33,32 +33,24 @@ kva_declare_masked.h (stage-c's decl_hazard, then stage-e's decl_final). After t
 | (purity) | d59b232 | kva_layer/plan/folder pure (citations reworded) | pending 8 of 15: config, declare, declare_masked, dump, final, guard, hazard, projector |
 | (purity) | 61fe0c2 | the 48 core `radiance: qwen4exp_kva:` prefixes -> `radiance: %s:` of `kva::g_log_name` (new arch/kva_log.h; set by rad_plugin_open before the guard speaks, and by declare) | a global mirror of the `log_name` fact, because the guard/read_config/upload speak with no Kva in scope. Same served text: arch_static's stderr has 283 `radiance: qwen4exp_kva:` lines, 0 `radiance: kva:` |
 | (purity) | 2491088 | kva_guard.h WHY block reworded | pending 4 of 16: kva_declare.h, kva_declare_masked.h, kva_final.h, kva_hazard.h |
+| (purity) | 2df39a2 | kva_hazard / kva_final / kva_declare / kva_declare_masked -> namespace kva; decl_selected takes no model (check_mode reads ctx->max_tok = the model's max_tok at the real declare, geom_from); final map reads facts (hc = wide / n_embd); slot_row/last_slot -> kva_layer.h | purity: 16 headers, NONE pending; the gate drops its pending list |
+| 7 | 7d5209f | arch/kva_step.h: core_declare, derive (`can_stream`: probe_depth routed layers below S), mask_rows, copy_stream, approximate_step, log_pass, single_prefill, misaligned, core_step; hooks prologue / stock_layer(probes) / epilogue / stock_step / capture_step / finish_state / capture_mixed; fact n_vocab. Bridge case deleted | hook BODIES live in qwen4exp_adapter.h (adapter_of must see them), not the .cpp; qwen4exp_kva.cpp = scaffolding + declare/step/probe thins + exports. arch_static back to 63 cases / 1,125,462 checks (the pre-split count) |
+| 8 | 97ea361 | tests/rad_fake.h (recording builder/ctx, fake device, Env, stderr_of), tests/folder_fixture.h (tiny container, in-memory folder) | case list hash identical before/after |
+| 9 | fb36645 | tests/adapter_core_test.cpp (toy 4-layer dense adapter, spec §4 cases 1-5; 115 checks) + arch/kva_core.h (umbrella, adds <arch/rad_fp8.h>) | target has NO ${RADIANCE_SRC}/arch on its include path and #errors on the qwen4exp plugin. `kva_drop_rows` declared only with top_k > 0 (qwen4exp's graph unchanged). Negative controls, each failing its case: drop always declared, min_tail 512, routed + probe_depth 1, match_name qwen4exp |
+| merge | 705bd0d | stage-e a005952 (D1's frozen home 406e746 green, ctest 3/3) | one conflict (Stage C's hazard line on both sides; kept split's). No code change from the merge; README held-cost paragraph + E/D notes |
 | 10 (part) | 86ae8ba | docs/ADDING-A-MODEL.md + README pointer | written to the interface AS BUILT (check_tensors core, declare_codes hook, int8 ships), with a status line for the step-7 hooks |
 
-## Remaining (in order)
+## Remaining
 
-1. The 4 pending headers. kva_hazard.h: needs `last_slot`/`slot_row` (generic -- move them from
-   qwen4exp_blocks.h into an early core header, since the blocks use them too) and the
-   `g_hazard_dev`/`g_hazard_logged` globals (move them out of kva_declare_masked.h with
-   decl_hazard). kva_final.h (stage-e's MTP final map: `m.hccfg.hc` -> wide / n_embd, `m.g.dtype`
-   -> dtype, the buffers -> facts) and `decl_selected` (check_mode's max_tok -> ctx->max_tok after
-   confirming they agree at the real declare). kva_declare.h / kva_declare_masked.h: the remaining
-   qwen4exp_kva-namespace functions move to kva once they take no model.
-2. Step 7: kva_step.h (derive with `stream_ok` from `routed[]` + `probe_depth`, mask_rows,
-   copy_stream, log_pass, single_prefill, misaligned, approximate_step over prologue / stock_layer /
-   epilogue hooks, step + stock_step / capture hooks); delete the bridge case.
-3. Step 8: rad_fake.h, folder_fixture.h out of arch_static_test.cpp.
-4. Step 9 rest: tests/adapter_core_test.cpp (toy 4-layer dense adapter, spec §4 cases 1-5) --
-   needs steps 7-8 first (the toy must compile the core with no in-tree source on its path).
-5. Comment pass: done in every block touched so far; the untouched bodies of qwen4exp_kva.cpp and
-   the pending headers still to do.
-6. GPU gate (trimmed, ONE gpuq session, ~25-30 min) at the end: off ident once + KL `.rows`
-   byte-identity on the **int8** folder for quality and speed vs main's rows. Not queued -- the split
-   is not finished, and the build changes with every remaining step.
+1. GPU gate G1 (evidence/split/scripts/g1.sh; queued 21:14Z on gpuq as `split-g1`, behind staged-d2):
+   frozen home of `split` HEAD at session start (its build runs the host suite), off ident x1 vs R3, int8
+   speed + quality KL `.rows` cmp'd to Stage E S4's i8 rows (home 5a3115b, same boot 75e3e39b),
+   RADIANCE_KVA_FINAL=off. Predictions labbook seq 446 (HS-split-off-ident), 447 (HS-split-i8-rows).
+2. Stage E's final-map default flip (Dylan: MTP final map out of the release, default off): merge
+   stage-e again when it lands.
 
-Every commit above: build (plugin .so + tests) + ctest -LE gpu green (3/3, then 4/4 with the gate)
-+ arch_static 64 cases / 1,125,654 checks green. No GPU used for the split so far. Final commit of
-this session: 2491088 (+ this note).
+Host suite at 705bd0d: ctest -LE gpu 5/5 (kernel_test, arch_static 63 / 1,125,462, adapter_core
+5 / 115, core_headers_name_no_arch, python), pytest tests 209 passed / 33 skipped.
 
 ## Also done this session
 
