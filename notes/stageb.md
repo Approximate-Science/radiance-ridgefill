@@ -413,8 +413,8 @@ here), acceptance within the round-to-round spread of each arm.
 | 2 | 0.316 / 16.3 / 0.981 (52) | **0.0016 / 0.035 / 0.990 (105)** | byte-identical (129) |
 | 3 | 0.023 / 0.044 / 0.75 (4) | **0.0005 / 0.002 / 0.929 (14)** | byte-identical (129) |
 
-  **Gate 1 GREEN**: every decoder's mean KL vs off in the same arrangement is 25-560x below stock's own
-  solo-vs-batched difference for that decoder, its max KL below the floor's, its top-1 disagreement
+  **Gate 1 GREEN**: every decoder's mean KL vs off in the same arrangement is below stock's own
+  solo-vs-batched difference for that decoder (33-567x), its max KL below the floor's, its top-1 disagreement
   (one flip, at the position where its text then diverges: after 26 / 75 / 104 / 10 generated tokens)
   at or below the floor's. Quality (unchanged path) stays byte-identical to off. Reading the floor: the
   stock engine's logits for the SAME prompt differ by 1-2 logit units between "prefilled beside a 32K
