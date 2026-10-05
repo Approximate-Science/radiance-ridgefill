@@ -73,6 +73,7 @@ static int declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* c
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[ctx->rank];
     if (m.layers.empty()) return RAD_E_STATE;
     k.ad = adapter_of(m);
+    g_log_name = k.ad.log_name;   /* a test's declare runs without rad_plugin_open */
     RAD_ARCH_TRY(read_config(meta, &k.cfg, k.ad.min_tail, k.ad.default_tail));
     note_meta_mode(k.cfg, ctx);
     for (auto [name, dir] : { std::pair<const char*, std::string*>{"RADIANCE_KVA_DUMP", &k.dump_dir},
@@ -379,7 +380,10 @@ static int probe(const RadModelMeta* meta, RadArchProbe* out) {
 }  /* namespace qwen4exp_kva */
 
 #ifdef QWEN4EXP_KVA_EXPORTS
-extern "C" int rad_plugin_open(void) { return qwen4exp_kva::open_guard(qwen4exp_kva::kShadowSo); }
+extern "C" int rad_plugin_open(void) {
+    kva::g_log_name = "qwen4exp_kva";   /* before the guard's first line */
+    return qwen4exp_kva::open_guard(qwen4exp_kva::kShadowSo);
+}
 extern "C" void rad_plugin_close(void) { qwen4exp_kva::free_uploads(); }
 RAD_ARCH_PROBE(qwen4exp_kva)
 RAD_ARCH_PLUGIN(qwen4exp_kva, "qwen4exp", "", "0.2.0",

@@ -87,8 +87,8 @@ static const char* decl_masked(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
     k.straddle_layers = straddle && lacking < 0;
     /* Otherwise the downgrade shows only in each step log's path field: say it once, at startup. */
     if (straddle && lacking >= 0)
-        std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: late attention layer %lld lacks %s, so speed mode "
-                             "takes the masked path for straddle chunks: slower, same output class\n",
+        std::fprintf(stderr, "radiance: %s: KVA: late attention layer %lld lacks %s, so speed mode "
+                             "takes the masked path for straddle chunks: slower, same output class\n", g_log_name,
                      (long long)lacking, what);
     return decl_probes(b, k) < 0 ? "a buffer" : nullptr;
 }
@@ -114,19 +114,19 @@ static void note_config(RadBuilder* b, const Kva& k) {
 static void note_debug(const Kva& k) {
     const Config& c = k.cfg;
     if (c.force_split)
-        std::fprintf(stderr, "radiance: qwen4exp_kva: DEBUG RADIANCE_KVA_FORCE_SPLIT=%lld: every "
-                             "approximate chunk's bulk ends %lld rows before its end%s\n",
+        std::fprintf(stderr, "radiance: %s: DEBUG RADIANCE_KVA_FORCE_SPLIT=%lld: every "
+                             "approximate chunk's bulk ends %lld rows before its end%s\n", g_log_name,
                      (long long)c.force_split, (long long)c.force_split,
                      c.force_split % k.tile ? " -- OFF the delta net's tile, a negative control" : "");
     if (c.shift_b)
-        std::fprintf(stderr, "radiance: qwen4exp_kva: DEBUG RADIANCE_KVA_SHIFT_B=%lld\n",
+        std::fprintf(stderr, "radiance: %s: DEBUG RADIANCE_KVA_SHIFT_B=%lld\n", g_log_name,
                      (long long)c.shift_b);
     if (c.force_stream)
-        std::fprintf(stderr, "radiance: qwen4exp_kva: DEBUG RADIANCE_KVA_FORCE_STREAM=1\n");
+        std::fprintf(stderr, "radiance: %s: DEBUG RADIANCE_KVA_FORCE_STREAM=1\n", g_log_name);
     if (c.mask_step)
-        std::fprintf(stderr, "radiance: qwen4exp_kva: DEBUG RADIANCE_KVA_MASK=all: every row of a "
+        std::fprintf(stderr, "radiance: %s: DEBUG RADIANCE_KVA_MASK=all: every row of a "
                              "masked pass before its bulk end is approximated, decoders included -- "
-                             "a negative control, never a served configuration\n");
+                             "a negative control, never a served configuration\n", g_log_name);
 }
 
 /* What the folder lets this mode run (kva_projector.h): false = serve stock, already said. Plumb
@@ -136,8 +136,8 @@ static bool take_folder(RadBuilder* b, const RadModelMeta* meta, Kva& k) {
     const Config& c = k.cfg;
     if (!l.usable) return false;
     if (c.mode == MODE_QUALITY && !tensor(l.folder, kScoreNames[c.rowsel_table])) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: mode quality selects exact rows from the "
-                             "table '%s', and the projector %s holds none; serving stock\n",
+        std::fprintf(stderr, "radiance: %s: KVA: mode quality selects exact rows from the "
+                             "table '%s', and the projector %s holds none; serving stock\n", g_log_name,
                      kScoreNames[c.rowsel_table], l.folder.place.dir.c_str());
         return false;
     }
@@ -217,9 +217,9 @@ static int decl_selected(RadBuilder* b, const RadModelMeta* meta, const qwen4exp
     if (!missing && decl_hazard(b, ctx, k) != RAD_OK) missing = "kva_hazard";
     if (!missing && k.want_final) missing = decl_final(b, m, ctx, k);
     if (missing && !probe) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: mode %s issues '%s' and no kernel library "
+        std::fprintf(stderr, "radiance: %s: mode %s issues '%s' and no kernel library "
                              "serves it -- kva.so is missing from $RADIANCE_HOME or declines this "
-                             "machine. Refusing rather than serving without it.\n",
+                             "machine. Refusing rather than serving without it.\n", g_log_name,
                      kModeNames[k.cfg.mode], missing);
         return RAD_E_UNSUPPORTED;
     }
@@ -238,8 +238,8 @@ static int capture_split(RadBuilder* b, const RadModelMeta* meta, Kva& k) {
     const char* v = env("RADIANCE_KVA_CAPTURE_SPLIT");
     if (!l.usable && v && !parse_int(v, &k.split)) k.split = -1;
     if (k.split < k.ad.split_lo || k.split >= k.ad.n_layer) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: a capture needs the split layer S: there is no "
-                             "usable projector folder and RADIANCE_KVA_CAPTURE_SPLIT is %s\n",
+        std::fprintf(stderr, "radiance: %s: a capture needs the split layer S: there is no "
+                             "usable projector folder and RADIANCE_KVA_CAPTURE_SPLIT is %s\n", g_log_name,
                      v ? v : "unset");
         return RAD_E_UNSUPPORTED;
     }
@@ -259,9 +259,9 @@ static int decl_state_read(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
                                            RAD_INT("sd0", g.sd0), RAD_INT("sd1", g.sd1)),
                                 RAD_NOWEIGHTS), {}, {k.b_state});
     if (!k.op_state_read && !ctx->shape_probe) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE_STATE copies the delta-net "
+        std::fprintf(stderr, "radiance: %s: RADIANCE_KVA_CAPTURE_STATE copies the delta-net "
                              "state with kva_state_read, and no kernel library serves it -- kva.so is "
-                             "missing or too old\n");
+                             "missing or too old\n", g_log_name);
         return RAD_E_UNSUPPORTED;
     }
     return RAD_OK;

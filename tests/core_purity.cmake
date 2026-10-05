@@ -8,8 +8,7 @@
 # that no longer does (it is done -- take it off, so the list only shrinks). At the split's end the list
 # is empty.
 set(KVA_PENDING
-  kva_config.h kva_declare.h kva_declare_masked.h kva_dump.h kva_final.h kva_guard.h kva_hazard.h
-  kva_projector.h)
+  kva_declare.h kva_declare_masked.h kva_final.h kva_guard.h kva_hazard.h)
 set(FORBIDDEN "qwen4exp|GdnFP8|MoeFP8|AttnGatedFP8|QsaIndexer|HyperConn|gcfg|hccfg|moecfg|ple_layer")
 
 file(GLOB headers RELATIVE "${SRC}/arch" "${SRC}/arch/kva_*.h")

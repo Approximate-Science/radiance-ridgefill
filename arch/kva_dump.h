@@ -39,6 +39,8 @@
 #ifndef KVA_DUMP_H
 #define KVA_DUMP_H
 
+#include "kva_log.h"
+
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
@@ -75,7 +77,7 @@ inline void dump_line(const std::string& path, const std::string& line) {
         std::fprintf(f, "%s\n", line.c_str());
         std::fclose(f);
     } else {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_DUMP: cannot append to %s\n",
+        std::fprintf(stderr, "radiance: %s: RADIANCE_KVA_DUMP: cannot append to %s\n", g_log_name,
                      path.c_str());
     }
 }
@@ -118,12 +120,12 @@ inline void dump_boundary(RadCtx* c, const std::string& dir, rad_buf b_h, int64_
     std::vector<uint16_t> h((size_t)(b->n_tok * wide));
     if (!dump_chunk(c, b, &start, &ids) ||
         !dump_read(c, h.data(), rad_buf_ptr(c, b_h), (int64_t)h.size() * 2)) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_DUMP: device read failed\n");
+        std::fprintf(stderr, "radiance: %s: RADIANCE_KVA_DUMP: device read failed\n", g_log_name);
         return;
     }
     const std::string file = "boundary.p" + std::to_string(start) + ".npy";
     if (!dump_npy_f32(dir + "/" + file, h, b->n_tok, wide))
-        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_DUMP: cannot write %s/%s\n",
+        std::fprintf(stderr, "radiance: %s: RADIANCE_KVA_DUMP: cannot write %s/%s\n", g_log_name,
                      dir.c_str(), file.c_str());
     dump_line(dir + "/boundary.jsonl",
               "{\"chunk_start\": " + std::to_string(start) + ", \"n_tok\": " +
@@ -141,7 +143,7 @@ inline void dump_mask(RadCtx* c, const std::string& dir, rad_buf mask, rad_buf b
     std::vector<int32_t> ids, m((size_t)b->n_tok), exact;
     if (!dump_chunk(c, b, &start, &ids) || !dump_read(c, m.data(), rad_buf_ptr(c, mask), b->n_tok * 4) ||
         !dump_read(c, bnd, rad_buf_ptr(c, bounds), 16)) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_DUMP: device read failed\n");
+        std::fprintf(stderr, "radiance: %s: RADIANCE_KVA_DUMP: device read failed\n", g_log_name);
         return;
     }
     std::string bits((size_t)b->n_tok, '0');
@@ -221,7 +223,7 @@ inline void capture_end(const Capture& cap, int64_t split, int64_t hidden, int64
     const bool ok = dump_npy(base + ".rows.npy", "<i4", {r}, cap.rows.data(), r * 4) &&
                     dump_npy(base + ".ids.npy", "<i4", {n}, cap.ids.data(), n * 4) &&
                     dump_npy(base + ".pos.npy", "<i4", {n}, cap.pos.data(), n * 4);
-    if (!ok) std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE: cannot write %s.*\n",
+    if (!ok) std::fprintf(stderr, "radiance: %s: RADIANCE_KVA_CAPTURE: cannot write %s.*\n", g_log_name,
                           base.c_str());
     dump_line(cap.dir + "/capture.jsonl",
               "{\"prefix\": \"" + cap.prefix + "\", \"chunk_start\": " + std::to_string(cap.start) +
@@ -243,7 +245,7 @@ inline void state_end(RadCtx* c, const std::string& dir, const RadBatch* b, cons
     int32_t start = -1;
     std::vector<int32_t> ids;
     if (!dump_chunk(c, b, &start, &ids)) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE_STATE: device read failed\n");
+        std::fprintf(stderr, "radiance: %s: RADIANCE_KVA_CAPTURE_STATE: device read failed\n", g_log_name);
         return;
     }
     /* Ascending layer order whatever order the reads came in. */
@@ -260,7 +262,7 @@ inline void state_end(RadCtx* c, const std::string& dir, const RadBatch* b, cons
     const std::string file = "state." + chunk_key(start, ids) + ".r" + std::to_string(rank) + ".npy";
     if (!dump_npy(dir + "/" + file, "<f4", {(int64_t)layers.size(), heads, v, k}, out.data(),
                   (int64_t)out.size() * 4))
-        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE_STATE: cannot write %s/%s\n",
+        std::fprintf(stderr, "radiance: %s: RADIANCE_KVA_CAPTURE_STATE: cannot write %s/%s\n", g_log_name,
                      dir.c_str(), file.c_str());
     dump_line(dir + "/state.jsonl",
               "{\"file\": \"" + file + "\", \"chunk_start\": " + std::to_string(start) +
@@ -283,12 +285,12 @@ inline void dump_logits(RadCtx* c, const std::string& dir, const RadBatch* b, ra
         !dump_read(c, pos.data(), b->positions, b->n_tok * 4) ||
         !dump_read(c, out.data(), b->out_ids, b->n_out * 4) ||
         !dump_read(c, rows.data(), rad_buf_ptr(c, logits), (int64_t)rows.size() * 4)) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_DUMP_LOGITS: device read failed\n");
+        std::fprintf(stderr, "radiance: %s: RADIANCE_KVA_DUMP_LOGITS: device read failed\n", g_log_name);
         return;
     }
     const std::string file = "logits." + chunk_key(start, ids) + ".r" + std::to_string(rank) + ".npy";
     if (!dump_npy(dir + "/" + file, "<f4", {b->n_out, width}, rows.data(), (int64_t)rows.size() * 4))
-        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_DUMP_LOGITS: cannot write %s\n", file.c_str());
+        std::fprintf(stderr, "radiance: %s: RADIANCE_KVA_DUMP_LOGITS: cannot write %s\n", g_log_name, file.c_str());
     std::string list = "[";
     for (int64_t j = 0; j < b->n_out; ++j) {
         const int32_t row = out[(size_t)j];
@@ -310,7 +312,7 @@ inline void mixed_state_end(RadCtx* c, const std::string& dir, const RadBatch* b
     std::vector<int32_t> ids, cu((size_t)b->n_seq + 1), pos((size_t)b->n_tok);
     if (!dump_chunk(c, b, &start, &ids) || !dump_read(c, cu.data(), b->cu_seqlens, (int64_t)cu.size() * 4) ||
         !dump_read(c, pos.data(), b->positions, b->n_tok * 4)) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE_STATE: device read failed\n");
+        std::fprintf(stderr, "radiance: %s: RADIANCE_KVA_CAPTURE_STATE: device read failed\n", g_log_name);
         return;
     }
     std::vector<int> starts, cus(cu.begin(), cu.end());
@@ -319,7 +321,7 @@ inline void mixed_state_end(RadCtx* c, const std::string& dir, const RadBatch* b
     const std::string key = chunk_key(start, ids), file = "mixed." + key + ".r" + std::to_string(rank) + ".npy";
     if (!dump_npy(dir + "/" + file, "<f4", {b->n_seq, (int64_t)layers.size(), d[0], d[1], d[2]}, data.data(),
                   (int64_t)data.size() * 4))
-        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE_STATE: cannot write %s/%s\n",
+        std::fprintf(stderr, "radiance: %s: RADIANCE_KVA_CAPTURE_STATE: cannot write %s/%s\n", g_log_name,
                      dir.c_str(), file.c_str());
     dump_line(dir + "/mixed.jsonl",
               "{\"file\": \"" + file + "\", \"key\": \"" + key + "\", \"rank\": " + std::to_string(rank) +

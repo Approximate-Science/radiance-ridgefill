@@ -122,20 +122,20 @@ static int check_mode(const Kva& k, int64_t max_tok) {
      * plugin change: --checkpoint-interval below --max-num-batched-tokens (README, R84). */
     const int64_t G = k.ad.tile;
     if (c.tail > 2 * max_tok - G) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: kva.tail is %lld tokens and the largest step "
+        std::fprintf(stderr, "radiance: %s: kva.tail is %lld tokens and the largest step "
                              "is %lld (--max-num-batched-tokens); the scheduler never reports more "
                              "than %lld prompt tokens ahead, so only rows followed by %lld - %lld "
                              "more tokens inside the chunk are provably bulk, and with the delta "
                              "net's %lld-row tile none is once the tail exceeds %lld (2 x %lld - %lld). "
-                             "Lower the tail or raise the step.\n",
+                             "Lower the tail or raise the step.\n", g_log_name,
                      (long long)c.tail, (long long)max_tok, (long long)max_tok, (long long)c.tail,
                      (long long)max_tok, (long long)G, (long long)(2 * max_tok - G),
                      (long long)max_tok, (long long)G);
         return RAD_E_UNSUPPORTED;
     }
     if (c.tail < c.min_tail) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: kva.tail is %lld tokens; the shortest exact "
-                             "tail this method was measured at is %lld\n",
+        std::fprintf(stderr, "radiance: %s: kva.tail is %lld tokens; the shortest exact "
+                             "tail this method was measured at is %lld\n", g_log_name,
                      (long long)c.tail, (long long)c.min_tail);
         return RAD_E_INVAL;
     }
@@ -147,9 +147,9 @@ static int check_mode(const Kva& k, int64_t max_tok) {
 static int check_fill(const Kva& k) {
     const KvaAdapter& a = k.ad;
     if (k.split < a.split_lo) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: the projector starts at layer %lld and the "
+        std::fprintf(stderr, "radiance: %s: the projector starts at layer %lld and the "
                              "n-gram embedding enters the stream at layer %lld; a split at or below "
-                             "it would predict from a stream that never received it\n",
+                             "it would predict from a stream that never received it\n", g_log_name,
                      (long long)k.split, (long long)(a.split_lo - 1));
         return RAD_E_UNSUPPORTED;
     }
@@ -157,14 +157,14 @@ static int check_fill(const Kva& k) {
         /* The masked path issues each late layer's MoE pass itself (qwen4exp_moe.h), and that copy has
          * no calibration tap: a calibration run serves through the in-tree path only. */
         if (a.calibrated[(size_t)l]) {
-            std::fprintf(stderr, "radiance: qwen4exp_kva: layer %lld runs the MoE calibration tap, "
+            std::fprintf(stderr, "radiance: %s: layer %lld runs the MoE calibration tap, "
                                  "which KVA's late layers do not issue; calibrate with "
-                                 "RADIANCE_KVA=off\n", (long long)l);
+                                 "RADIANCE_KVA=off\n", g_log_name, (long long)l);
             return RAD_E_UNSUPPORTED;
         }
         if (l < k.split || a.ext_in[(size_t)l]) continue;
-        std::fprintf(stderr, "radiance: qwen4exp_kva: layer %lld's block owns its input norm, and "
-                             "the fill hands blocks their input already normed\n", (long long)l);
+        std::fprintf(stderr, "radiance: %s: layer %lld's block owns its input norm, and "
+                             "the fill hands blocks their input already normed\n", g_log_name, (long long)l);
         return RAD_E_UNSUPPORTED;
     }
     return RAD_OK;
@@ -204,8 +204,8 @@ static int decl_fill_i8(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
     const char* missing = !k.op_quant8 ? "quant_act_i8g" : !k.op_bias ? "add"
                         : !k.op_proj[(size_t)k.split] ? "kva_gemm_nt_q" : nullptr;
     if (!missing || ctx->shape_probe) return RAD_OK;
-    std::fprintf(stderr, "radiance: qwen4exp_kva: no kernel serves the int8 projector's %s (N %lld, K %lld): "
-                         "kva.so offers kva_gemm_nt_q only when libr4d is loaded\n", missing,
+    std::fprintf(stderr, "radiance: %s: no kernel serves the int8 projector's %s (N %lld, K %lld): "
+                         "kva.so offers kva_gemm_nt_q only when libr4d is loaded\n", g_log_name, missing,
                  (long long)n, (long long)wide);
     return RAD_E_UNSUPPORTED;
 }
@@ -218,8 +218,8 @@ static int decl_ring(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
     k.op_ring = RAD_OP(b, "cast", RAD_PARAMS(RAD_RANGE("M", 1, k.ad.n_embd + 1), RAD_INT("n", wide),
                                              RAD_STR("from", "bf16"), RAD_STR("to", "bf16")), RAD_NOWEIGHTS);
     if (k.op_ring || ctx->shape_probe) return RAD_OK;
-    std::fprintf(stderr, "radiance: qwen4exp_kva: no kernel serves the staging ring's copy (cast bf16, "
-                         "n %lld): the projector is streamed from host memory and cannot run without it\n",
+    std::fprintf(stderr, "radiance: %s: no kernel serves the staging ring's copy (cast bf16, "
+                         "n %lld): the projector is streamed from host memory and cannot run without it\n", g_log_name,
                  (long long)wide);
     return RAD_E_UNSUPPORTED;
 }
@@ -243,9 +243,9 @@ static int decl_fill(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
                                 RAD_NOWEIGHTS),
                             {a.buf_stream}, {a.buf_x});
         if (!h && !ctx->shape_probe) {
-            std::fprintf(stderr, "radiance: qwen4exp_kva: no kernel serves the projector "
+            std::fprintf(stderr, "radiance: %s: no kernel serves the projector "
                                  "(kva_gemm_nt_bias, N %lld, K %lld, %s): kva.so offers it only "
-                                 "when libr4d (device) or libref (host) is loaded\n",
+                                 "when libr4d (device) or libref (host) is loaded\n", g_log_name,
                          (long long)n, (long long)wide, a.dtype);
             return RAD_E_UNSUPPORTED;
         }

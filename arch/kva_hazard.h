@@ -41,7 +41,7 @@ static void hazard_log(RadCtx* c) {
     if (r != 0 || !g_hazard_dev[r]) return;
     const float* h = (const float*)rad_dev_host_ptr(g_hazard_dev[r]);
     if (!h || *h == g_hazard_logged[r]) return;
-    std::fprintf(stderr, "radiance: qwen4exp_kva: kva: hazard %lld positions (total %lld)\n",   /* tools/hazard_rate.py HAZARD_LOG_RE */
+    std::fprintf(stderr, "radiance: %s: kva: hazard %lld positions (total %lld)\n", g_log_name,   /* tools/hazard_rate.py HAZARD_LOG_RE */
                  (long long)(*h - g_hazard_logged[r]), (long long)*h);
     g_hazard_logged[r] = *h;
 }

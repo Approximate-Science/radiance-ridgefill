@@ -17,6 +17,8 @@
 #ifndef KVA_GUARD_H
 #define KVA_GUARD_H
 
+#include "kva_log.h"
+
 #include <dlfcn.h>
 #include <limits.h>
 #include <stdlib.h>
@@ -185,7 +187,7 @@ static Forward g_forward;   /* set once at open on a mismatch; null = this plugi
 inline bool take_forward(const std::string& path) {
     void* h = dlopen(path.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!h) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: cannot load %s: %s\n", path.c_str(), dlerror());
+        std::fprintf(stderr, "radiance: %s: cannot load %s: %s\n", g_log_name, path.c_str(), dlerror());
         return false;
     }
     Forward f;
@@ -193,7 +195,7 @@ inline bool take_forward(const std::string& path) {
     f.declare = (decltype(f.declare))dlsym(h, "rad_arch_declare");
     f.step    = (decltype(f.step))dlsym(h, "rad_arch_step");
     if (!f.declare || !f.step) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: %s exports no rad_arch_declare/step\n", path.c_str());
+        std::fprintf(stderr, "radiance: %s: %s exports no rad_arch_declare/step\n", g_log_name, path.c_str());
         return false;
     }
     g_forward = f;
@@ -212,18 +214,18 @@ inline int open_guard(const char* so) {
     const std::string sha = sha256_file(engine.c_str()), found = releases_in(engine.c_str());
     const std::string shadow = find_shadowed(self, so);
     if (!shadow.empty() && take_forward(shadow)) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: WARNING: built against radiance %s, and the "
+        std::fprintf(stderr, "radiance: %s: WARNING: built against radiance %s, and the "
                              "engine %s (sha256 %s) carries release string(s) '%s' (%s %d times); "
-                             "forwarding to the engine's own architecture %s, KVA off\n",
+                             "forwarding to the engine's own architecture %s, KVA off\n", g_log_name,
                      KVA_RADIANCE_VERSION, engine.c_str(), sha.c_str(), found.c_str(),
                      KVA_RADIANCE_VERSION, hits, shadow.c_str());
         return RAD_OK;
     }
-    std::fprintf(stderr, "radiance: qwen4exp_kva: built against radiance %s, and the engine %s "
+    std::fprintf(stderr, "radiance: %s: built against radiance %s, and the engine %s "
                          "(sha256 %s) carries release string(s) '%s' (%s %d times); no in-tree "
                          "architectures/%s on $RADIANCE_HOME to forward to, so this "
                          "plugin declines (a home given only as --radiance-home is not visible to "
-                         "it)\n", KVA_RADIANCE_VERSION, engine.c_str(), sha.c_str(), found.c_str(),
+                         "it)\n", g_log_name, KVA_RADIANCE_VERSION, engine.c_str(), sha.c_str(), found.c_str(),
                  KVA_RADIANCE_VERSION, hits, so);
     return RAD_E_UNSUPPORTED;
 }

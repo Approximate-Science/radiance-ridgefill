@@ -135,28 +135,28 @@ inline const Loaded& load_folder(const RadModelMeta* meta, RadBuilder* b, const 
     else l.folder.place = find_folder();
     const FolderPlace& at = l.folder.place;
     if (at.dir.empty()) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: no projector folder (looked at %s); "
-                             "serving stock\n", at.how.c_str());
+        std::fprintf(stderr, "radiance: %s: KVA: no projector folder (looked at %s); "
+                             "serving stock\n", g_log_name, at.how.c_str());
         return l;
     }
     if (!g_folder_for_test && !read_folder(&l.folder, &why)) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: projector %s REFUSED: %s; serving stock\n",
+        std::fprintf(stderr, "radiance: %s: KVA: projector %s REFUSED: %s; serving stock\n", g_log_name,
                      at.dir.c_str(), why.c_str());
         return l;
     }
     const Match mt = match_model(l.folder, meta, b, a.match_name);
     why = mt.refused.empty() ? check_tensors(l.folder, a, &l) : mt.refused;
     if (!why.empty()) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: projector %s (found %s) REFUSED, it cannot run "
-                             "on this model: %s [%s]; serving stock\n", at.dir.c_str(), at.how.c_str(),
+        std::fprintf(stderr, "radiance: %s: KVA: projector %s (found %s) REFUSED, it cannot run "
+                             "on this model: %s [%s]; serving stock\n", g_log_name, at.dir.c_str(), at.how.c_str(),
                      why.c_str(), mt.summary.c_str());
         return l;
     }
     for (const std::string& w : mt.warnings)
-        std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: WARNING: projector %s: %s -- it runs, but "
-                             "was fitted on another variant\n", at.dir.c_str(), w.c_str());
-    std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: projector %s (found %s) matches %s: %s, "
-                         "%zu warning(s); split %lld, %s, %.1f MiB in %zu files\n",
+        std::fprintf(stderr, "radiance: %s: KVA: WARNING: projector %s: %s -- it runs, but "
+                             "was fitted on another variant\n", g_log_name, at.dir.c_str(), w.c_str());
+    std::fprintf(stderr, "radiance: %s: KVA: projector %s (found %s) matches %s: %s, "
+                         "%zu warning(s); split %lld, %s, %.1f MiB in %zu files\n", g_log_name,
                  at.dir.c_str(), at.how.c_str(), meta->name ? meta->name : "(unnamed)", mt.summary.c_str(),
                  mt.warnings.size(), (long long)l.split, l.has_st ? "correction held" : "no correction",
                  (double)l.folder.file_bytes / (1 << 20), l.folder.manifest.get("files")->obj.size());
@@ -185,8 +185,8 @@ inline void* fill_block(const std::vector<Piece>& plan, bool host, int64_t bytes
     if (bytes == 0) return nullptr;
     void* p = rad_dev_alloc(bytes, host ? RAD_MEM_HOST_MAPPED : RAD_MEM_DEVICE);
     if (!p) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: rank %d could not allocate %.1f MiB of %s "
-                             "for the projector: %s\n", rank, (double)bytes / (1 << 20),
+        std::fprintf(stderr, "radiance: %s: KVA: rank %d could not allocate %.1f MiB of %s "
+                             "for the projector: %s\n", g_log_name, rank, (double)bytes / (1 << 20),
                      host ? "host-mapped memory" : "VRAM", rad_dev_last_error());
         return nullptr;
     }
@@ -202,7 +202,7 @@ inline void* fill_block(const std::vector<Piece>& plan, bool host, int64_t bytes
     ok = ok && rad_stream_sync(s) == RAD_OK;
     if (s) rad_stream_destroy(s);
     if (ok) return p;
-    std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: rank %d: the projector upload failed: %s\n",
+    std::fprintf(stderr, "radiance: %s: KVA: rank %d: the projector upload failed: %s\n", g_log_name,
                  rank, rad_dev_last_error());
     rad_dev_free(p, RAD_MEM_DEVICE);
     return nullptr;
@@ -372,7 +372,7 @@ inline bool upload_rank(const Loaded& l, const KvaAdapter& a, const Config& c, i
     std::string why;
     const Layout x = plan_rank(l, a, c, rank, final, plan, &stored, &why);
     if (!why.empty()) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: rank %d cannot load the int8 projector %s: %s\n",
+        std::fprintf(stderr, "radiance: %s: KVA: rank %d cannot load the int8 projector %s: %s\n", g_log_name,
                      rank, l.folder.place.dir.c_str(), why.c_str());
         return false;
     }
@@ -384,9 +384,9 @@ inline bool upload_rank(const Loaded& l, const KvaAdapter& a, const Config& c, i
     take_operands(u, x, a, l.int8);
     if (x.score >= 0) u.score = RAD_P_T2(dev_at(u, true, x.score), RAD_F32, a.n_vocab_all, 0);
     if (c.mode == MODE_PLUMB)   /* plumb reads no fitted tensor: say so rather than print a row of zeros */
-        std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: rank %d holds nothing (plumb reads no fitted tensor)\n", rank);
-    else std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: rank %d holds the projector: %.1f MiB host-mapped "
-                         "(%s maps, correction, row table), %.1f MiB VRAM (the staging ring's one slot)\n",
+        std::fprintf(stderr, "radiance: %s: KVA: rank %d holds nothing (plumb reads no fitted tensor)\n", g_log_name, rank);
+    else std::fprintf(stderr, "radiance: %s: KVA: rank %d holds the projector: %.1f MiB host-mapped "
+                         "(%s maps, correction, row table), %.1f MiB VRAM (the staging ring's one slot)\n", g_log_name,
                  rank, (double)x.hend / (1 << 20), l.int8 ? "int8" : "bf16", (double)x.vend / (1 << 20));
     u.ok = true;
     return true;

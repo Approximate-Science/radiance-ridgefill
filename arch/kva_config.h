@@ -88,6 +88,8 @@
 #ifndef KVA_CONFIG_H
 #define KVA_CONFIG_H
 
+#include "kva_log.h"
+
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
@@ -174,7 +176,7 @@ inline bool parse_real(const char* s, double* out) {
 }
 
 inline int bad_value(const char* what, const char* value, const char* allowed) {
-    std::fprintf(stderr, "radiance: qwen4exp_kva: %s is '%s'; it takes %s\n", what, value, allowed);
+    std::fprintf(stderr, "radiance: %s: %s is '%s'; it takes %s\n", g_log_name, what, value, allowed);
     return RAD_E_INVAL;
 }
 
@@ -207,17 +209,17 @@ inline int read_int(const char* name, int64_t lo, int64_t hi, const char* allowe
 inline int read_variants(Config* c) {
     for (const char* retired : { "RADIANCE_KVA_PROJ", "RADIANCE_KVA_ST", "RADIANCE_KVA_DECLARE" })
         if (const char* v = env(retired)) {
-            std::fprintf(stderr, "radiance: qwen4exp_kva: %s=%s is retired with the container append: "
+            std::fprintf(stderr, "radiance: %s: %s=%s is retired with the container append: "
                                  "the fitted tensors come from the projector folder (a variant is a "
-                                 "folder of its own, named by RADIANCE_KVA_PROJECTOR); unset it\n",
+                                 "folder of its own, named by RADIANCE_KVA_PROJECTOR); unset it\n", g_log_name,
                          retired, v);
             return RAD_E_INVAL;
         }
     for (const char* retired : { "RADIANCE_KVA_PROJ_PLACE", "RADIANCE_KVA_PROJ_RING" })
         if (const char* v = env(retired)) {
-            std::fprintf(stderr, "radiance: qwen4exp_kva: %s=%s is retired: the projector is always "
+            std::fprintf(stderr, "radiance: %s: %s=%s is retired: the projector is always "
                                  "streamed from host memory through the staging ring (maps kept in VRAM "
-                                 "could make a configuration stock serves refuse to start); unset it\n",
+                                 "could make a configuration stock serves refuse to start); unset it\n", g_log_name,
                          retired, v);
             return RAD_E_INVAL;
         }
@@ -249,8 +251,8 @@ inline int read_switches(Config* c) {
     RAD_ARCH_TRY(read_choice("RADIANCE_KVA_MASK", { "rule", "all" }, "all or unset", &v));
     c->mask_step = v == 1;
     if (c->mask_step && c->mode == MODE_PLUMB) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_MASK=all approximates rows and mode "
-                             "plumb projects none; it takes speed or quality\n");
+        std::fprintf(stderr, "radiance: %s: RADIANCE_KVA_MASK=all approximates rows and mode "
+                             "plumb projects none; it takes speed or quality\n", g_log_name);
         return RAD_E_INVAL;
     }
     return RAD_OK;
@@ -274,7 +276,7 @@ inline int read_config(const RadModelMeta* meta, Config* c, int64_t min_tail = k
     if (const char* s = env("RADIANCE_KVA_SHARE"); s && !parse_real(s, &c->share))
         return bad_value("RADIANCE_KVA_SHARE", s, "(0, 1]");
     if (!(c->share > 0.0 && c->share <= 1.0)) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: the row share is %g; it takes (0, 1]\n",
+        std::fprintf(stderr, "radiance: %s: the row share is %g; it takes (0, 1]\n", g_log_name,
                      c->share);
         return RAD_E_INVAL;
     }
