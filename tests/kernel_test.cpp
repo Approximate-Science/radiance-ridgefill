@@ -125,8 +125,14 @@ static Buf make(uint32_t dtype, std::vector<int64_t> shape, std::vector<int64_t>
     if (stride.empty()) rad_tensor_pack(&b.t);
     else for (size_t i = 0; i < stride.size(); ++i) b.t.stride[i] = stride[i];
     int64_t last = 0;
-    for (uint32_t i = 0; i < b.t.rank; ++i) last += (b.t.shape[i] - 1) * b.t.stride[i];
-    b.bytes.assign((size_t)rad_dtype_bytes(dtype, b.t.rank ? last + 1 : 0), 0);
+    bool empty = false;
+    for (uint32_t i = 0; i < b.t.rank; ++i) {
+        last += (b.t.shape[i] - 1) * b.t.stride[i];
+        empty = empty || b.t.shape[i] == 0;
+    }
+    /* A zero-extent operand is PRESENT and empty (one spare byte keeps its data non-null), as an
+     * engine operand of zero rows is; a null data pointer would read as absent. */
+    b.bytes.assign(empty ? 1 : (size_t)rad_dtype_bytes(dtype, b.t.rank ? last + 1 : 0), 0);
     b.t.data = b.bytes.data();
     return b;
 }
@@ -684,6 +690,8 @@ TEST(mask_window_clamping, "host") {
         { 6, 6, 6, 6, 6 },      /* s == e == n: the last sequence has no row */
         { 10, 10, 0, 10, 10 },  /* one sequence, every row bulk */
         { 7, 12, 3, 12, 7 },    /* bulk then a tail [7, 12) */
+        { 0, 9, 0, 9, 0 },      /* b = 0: token_ids of zero rows, an empty window */
+        { 0, 9, 3, 9, 3 },
     };
     for (const Win& w : wins) {
         MaskCall c;
