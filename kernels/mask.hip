@@ -40,9 +40,9 @@ __global__ void __launch_bounds__(KVA_MASK_THREADS) kva_mask_kernel(KvaMask g) {
     const int t = threadIdx.x;
     int64_t win[3];
     kva_mask_window(g.cu_last[0], g.cu_last[1], g.b, g.n, win);   /* false: empty, all exact */
-    const int64_t s = win[0], end = win[1];
+    const int64_t s = kva_mask_from(g.mode, win), end = win[1];
     if (t == 0) {
-        g.bounds[0] = (int32_t)s; g.bounds[1] = (int32_t)end;
+        g.bounds[0] = (int32_t)win[0]; g.bounds[1] = (int32_t)end;
         g.bounds[2] = (int32_t)end; g.bounds[3] = (int32_t)win[2];
     }
     for (int64_t i = t; i < g.n; i += KVA_MASK_THREADS)

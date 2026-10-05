@@ -730,6 +730,12 @@ TEST(mask_window_clamping, "host") {
         c.mode = "all";
         const MaskOut all = run_mask(row, c);
         CHECK(mask_shaped(all, w.s, w.end, w.e) && ones(all) == 0);
+        c.mode = "step";   /* R54's negative control: from row 0 when the window is not empty */
+        const MaskOut step = run_mask(row, c);
+        std::vector<int32_t> want((size_t)w.n, 0);
+        for (int64_t i = w.end > w.s ? 0 : w.s; i < w.end; ++i) want[(size_t)i] = 1;
+        CHECK_EQ(step.rc, RAD_OK);
+        CHECK(step.mask == want && step.bounds == none.bounds);
     }
 }
 
@@ -1474,7 +1480,7 @@ TEST(mask_device_matches_host, "gpu") {
         for (int layout = 0; layout < 4; ++layout) {
             MaskCall c = random_window(r, n, layout);
             c.table = &table; c.seed = 12345; c.first_pos = 4096;
-            for (const char* mode : { "none", "class", "random", "all" })
+            for (const char* mode : { "none", "class", "random", "all", "step" })
                 for (double share : { 0.25, 1.0 }) {
                     c.mode = mode; c.share = share; c.components = runs % 2 ? 3 : 1;
                     c.n_zeros = runs % 3 ? 0 : 513;
