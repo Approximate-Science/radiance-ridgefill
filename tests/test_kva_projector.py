@@ -228,3 +228,37 @@ def test_int8_folder_keeps_every_other_file_and_names_its_source(tmp_path):
         assert f.get_tensor("proj.5.codes").dtype == torch.int8 and f.get_tensor("proj.5.scale").shape == (16, 2)
     with pytest.raises(SystemExit):   # an int8 folder is not a source
         P.main(["int8", "--from", str(out), "--out", str(tmp_path / "again")])
+
+
+def test_final_adds_the_mtp_map_from_the_fitted_source_only(tmp_path):
+    """`final`: the folder copied byte for byte plus final.safetensors (weight [w, w] and bias [w] split from the
+    source's `final` [w, w + 1]); refused when the source is not the file the folder was fitted from, or holds no
+    `final`."""
+    from safetensors.torch import save_file
+    src, out = tmp_path / "folder", tmp_path / "with-final"
+    src.mkdir()
+    (src / "README.md").write_text("hello")
+    proj = tmp_path / "proj.safetensors"
+    fmap = torch.randn(32, 33).to(torch.bfloat16)
+    save_file({"layer.4": torch.randn(8, 33).to(torch.bfloat16), "final": fmap}, str(proj))
+    manifest = {"format": 1, "stream_width": 32, "fit": {"proj_sha256": P.S.sha256_file(proj)},
+                "files": {"README.md": P.S.sha256_file(src / "README.md")}}
+    (src / "kva.json").write_text(json.dumps(manifest))
+    assert P.main(["final", "--from", str(src), "--proj", str(proj), "--out", str(out)]) == 0
+    m = json.loads((out / "kva.json").read_text())
+    assert m["final"] == {"file": "final.safetensors", "dtype": "bf16", "source_sha256": P.S.sha256_file(proj)}
+    assert m["files"]["final.safetensors"] == P.S.sha256_file(out / "final.safetensors")
+    assert (out / "README.md").read_text() == "hello"
+    with safe_open(str(out / "final.safetensors"), "pt") as f:
+        assert torch.equal(f.get_tensor("final.weight"), fmap[:, :-1])
+        assert torch.equal(f.get_tensor("final.bias"), fmap[:, -1])
+    other = tmp_path / "other.safetensors"
+    save_file({"final": fmap}, str(other))
+    with pytest.raises(SystemExit):   # not the folder's source
+        P.main(["final", "--from", str(src), "--proj", str(other), "--out", str(tmp_path / "x")])
+    nofinal = tmp_path / "nofinal.safetensors"
+    save_file({"layer.4": torch.randn(8, 33).to(torch.bfloat16)}, str(nofinal))
+    manifest["fit"]["proj_sha256"] = P.S.sha256_file(nofinal)
+    (src / "kva.json").write_text(json.dumps(manifest))
+    with pytest.raises(SystemExit):   # no final map in it
+        P.main(["final", "--from", str(src), "--proj", str(nofinal), "--out", str(tmp_path / "y")])

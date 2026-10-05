@@ -4,6 +4,7 @@
   kva_projector.py build --proj P --st RANK0.pt RANK1.pt --freq F --tokenizer DIR --container MODEL.rad \\
                          --rad-info-v FILE --spec kva-marker-spec.json --out DIR
   kva_projector.py int8 --from BF16_FOLDER --out DIR
+  kva_projector.py final --from FOLDER --proj P --out DIR
 
 The model file is only READ (its metadata, tokenizer, chat template and a few KiB of base tensors); nothing is
 written to it. Files written (L = the projector's layers, S the lowest):
@@ -40,6 +41,7 @@ import sys
 from pathlib import Path
 
 import torch
+from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 
 HERE = Path(__file__).resolve().parent
@@ -282,6 +284,33 @@ def int8(args):
           f"worst |w - dequant| {worst:.4g} of a map's max |w|")
 
 
+def final(args):
+    """FOLDER + the MTP `final` map (Stage D, DD-D): final.safetensors with final.weight [w, w] and final.bias [w] bf16,
+    w the stream width, from the source projector's `final` [w, w + 1] (bias last). The source must be the file the
+    folder was fitted from (its sha256 against the manifest's fit.proj_sha256). Every other file is copied byte for byte."""
+    src, out = Path(getattr(args, "from")), Path(args.out)
+    manifest = json.loads((src / "kva.json").read_text(encoding="utf-8"))
+    want = (manifest.get("fit") or {}).get("proj_sha256")
+    got = S.sha256_file(args.proj)
+    if want != got:
+        raise SystemExit(f"{args.proj} hashes {got[:12]}..., and {src} was fitted from {str(want)[:12]}...: not its final map")
+    with safe_open(str(args.proj), "pt") as f:
+        if "final" not in f.keys():
+            raise SystemExit(f"{args.proj} holds no `final` map")
+        t = f.get_tensor("final")
+    wide = manifest["stream_width"]
+    if t.dtype != torch.bfloat16 or list(t.shape) != [wide, wide + 1]:
+        raise SystemExit(f"final is {t.dtype} {list(t.shape)}; expected bf16 [{wide}, {wide + 1}]")
+    out.mkdir(parents=True, exist_ok=True)
+    for name in manifest["files"]:
+        shutil.copyfile(src / name, out / name)
+    save({"final.weight": t[:, :-1], "final.bias": t[:, -1]}, out / "final.safetensors")
+    manifest["final"] = {"file": "final.safetensors", "dtype": "bf16", "source_sha256": got}
+    manifest["files"]["final.safetensors"] = S.sha256_file(out / "final.safetensors")
+    (out / "kva.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
+    print(f"wrote {out}: {src.name} + final.safetensors ({(out / 'final.safetensors').stat().st_size} bytes)")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="command", required=True)
@@ -297,8 +326,14 @@ def main(argv=None):
     q = sub.add_parser("int8", help="the int8 variant of a bf16 folder (its own folder)")
     q.add_argument("--from", required=True, help="a bf16 projector folder")
     q.add_argument("--out", required=True, help="the folder to write (created)")
+    fm = sub.add_parser("final", help="a folder plus the MTP final map (its own folder)")
+    fm.add_argument("--from", required=True, help="a projector folder")
+    fm.add_argument("--proj", required=True, help="the projector safetensors the folder was fitted from (holds `final`)")
+    fm.add_argument("--out", required=True, help="the folder to write (created)")
     args = ap.parse_args(argv)
-    if args.command == "int8":
+    if args.command == "final":
+        final(args)
+    elif args.command == "int8":
         int8(args)
     else:
         build(args)
