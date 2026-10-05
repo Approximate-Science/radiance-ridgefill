@@ -50,7 +50,7 @@ struct PlanConfig {
     int64_t tail = 2048;             /* T */
     int64_t tile = 64;               /* G: the delta net's chunk */
     int64_t force_split = 0, shift_b = 0;
-    int64_t stage_rows = 64;         /* exact rows a masked pass may carry and still stream */
+    int64_t stage_rows = INT64_MAX;  /* exact rows a masked pass may carry and still stream: any */
     bool    force_stream = false;
 };
 

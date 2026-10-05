@@ -19,8 +19,13 @@
  *                             approximate pass whose exact rows are at most RADIANCE_KVA_STAGE_ROWS;
  *                             stock leaves the stager as it is (the tested fallback, R96)  default auto
  *   env RADIANCE_KVA_STAGE_ROWS  the exact rows a masked pass may carry and still stream; past it
- *                             the pass runs exact (speed straddles take the tail-only path) --
- *                             streaming many rows reads every expert over the link (A.1)  default 64
+ *                             the pass runs the stock step (speed straddles take the tail-only path).
+ *                             Default: no limit, every masked pass streams. Measured on warmed servers
+ *                             (notes/impl.md "Stage A.1 -- engine results", R96): streaming beats the
+ *                             stock step by 220-240 ms a straddling chunk at 512 / 1,024 / 1,984 exact
+ *                             rows inside an ON server, and A.1's 64-row guard cost 331 ms at 9,216
+ *                             and ran every T 2560 chunk exact. A threshold stays available for a
+ *                             machine where the link makes streaming many rows lose    default unlimited
  *   env RADIANCE_KVA_SCORE_BULK  1: approximate in KL mode too, whose logits on bulk rows are then
  *                             not the model's -- score only the exact tail (PLAN-FIX §6.2, R73)
  *
@@ -97,7 +102,7 @@ struct Config {
     int         place       = PLACE_VRAM;
     bool        ring        = true;        /* host placement: stage each layer's map through VRAM */
     int         stage       = STAGE_AUTO;
-    int64_t     stage_rows  = 64;          /* one tile: A.1's profile, notes/impl.md §6 */
+    int64_t     stage_rows  = INT64_MAX;   /* always stream: notes/impl.md A.1 R96, the guard's trade */
     bool        score_bulk  = false;
     int         straddle    = STRADDLE_SPLIT;
     int64_t     force_split = 0;

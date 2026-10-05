@@ -949,7 +949,7 @@ TEST(the_approximate_decision_truth_table) {
         {"T-1 ahead, speed: tail-only straddle", "speed", {{2048}, 0, 2047}, none, PATH_STRADDLE, 1984, 0, false},
         {"half ahead, speed: tail-only straddle", "speed", {{2048}, 0, 1024}, none, PATH_STRADDLE, 1024, 0, false},
         {"T-1 ahead, quality: one tile exact streams", "quality", {{2048}, 0, 2047}, none, PATH_MASKED, 1984, 0, true},
-        {"half ahead, quality: 1024 exact rows run exact", "quality", {{2048}, 0, 1024}, none, PATH_STOCK, 0, 0, false},
+        {"half ahead, quality, rows <= 64: 1024 exact rows run exact", "quality", {{2048}, 0, 1024}, none, PATH_STOCK, 0, 0, false},
         {"64 ahead, quality", "quality", {{2048}, 0, 64}, none, PATH_STOCK, 0, 0, false},
         {"straddle at short context, speed: dense attention", "speed", {{2048}, 0, 1024, 0}, none, PATH_STOCK, 0, 0, false},
         {"straddle at short context, one tile", "speed", {{2048}, 0, 2047, 0}, none, PATH_MASKED, 1984, 0, true},
@@ -970,6 +970,7 @@ TEST(the_approximate_decision_truth_table) {
         {"three prefills and a decoder: 961 exact rows", "quality", {{1, 1024, 512, 448}, 1, 2048}, none, PATH_STOCK, 0, 0, false},
         {"pure decode", "speed", {{1, 1}, 2, 0}, none, PATH_STOCK, 0, 0, false},
     };
+    Env guard({{"RADIANCE_KVA_STAGE_ROWS", "64"}});   /* the threshold's rows; the default is the next case */
     for (const Row& r : rows) {
         Pair p;
         declare_pair(p, r.mode);
@@ -998,7 +999,7 @@ TEST(the_planner_straddles_only_in_speed) {
     const PlanConfig pc;
     for (int mode : {PLAN_PLUMB, PLAN_QUALITY}) {
         in.mode = mode;
-        CHECK_EQ(plan_pass(in, pc).path, mode == PLAN_PLUMB ? PATH_MASKED : PATH_STOCK);
+        CHECK_EQ(plan_pass(in, pc).path, PATH_MASKED);   /* masked (streamed by default), never the straddle */
     }
     in.mode = PLAN_SPEED;
     CHECK_EQ(plan_pass(in, pc).path, PATH_STRADDLE);
@@ -1021,13 +1022,43 @@ TEST(kl_mode_serves_stock_unless_score_bulk) {
     }
 }
 
+/* THE DEFAULT STREAMS EVERY MASKED PASS (Stage A.1's R96 and guard trade, notes/impl.md): the rows the
+ * truth table above sends to the stock step under a 64-row threshold take the masked path, streaming. */
+TEST(the_default_streams_every_masked_pass) {
+    using qwen4exp_kva::PATH_MASKED;
+    const auto none = [](RadBatch&) {};
+    const std::vector<Row> rows = {
+        {"half ahead, quality: 1024 exact rows stream", "quality", {{2048}, 0, 1024}, none, PATH_MASKED, 1024, 0, true},
+        {"64 ahead, quality", "quality", {{2048}, 0, 64}, none, PATH_MASKED, 64, 0, true},
+        {"straddle at short context, speed: dense attention", "speed", {{2048}, 0, 1024, 0}, none, PATH_MASKED, 1024, 0, true},
+        {"eight decoders, straddle", "quality", {{1, 1, 1, 1, 1, 1, 1, 1, 1984}, 8, 1000}, none, PATH_MASKED, 904, 8, true},
+        {"three prefills and a decoder: 961 exact rows", "quality", {{1, 1024, 512, 448}, 1, 2048}, none, PATH_MASKED, 1985, 961, true},
+    };
+    for (const Row& r : rows) {
+        Pair p;
+        declare_pair(p, r.mode);
+        REQUIRE_EQ(p.st, RAD_OK);
+        CHECK_EQ(qwen4exp_kva::g_kva[0].cfg.stage_rows, INT64_MAX);
+        Batch x = make_step(p.kva, r.shape);
+        const qwen4exp_kva::Pass got = qwen4exp_kva::derive(qwen4exp_kva::g_kva[0], &x.b);
+        if (got.path != r.path || got.b != r.b || got.s_lb != r.s_lb || got.stream != r.stream)
+            std::fprintf(stderr, "    row '%s': path %d b %lld s_lb %lld stream %d\n", r.why, got.path,
+                         (long long)got.b, (long long)got.s_lb, (int)got.stream);
+        CHECK_EQ(got.path, r.path);
+        CHECK_EQ(got.b, r.b);
+        CHECK_EQ(got.s_lb, r.s_lb);
+        CHECK_EQ(got.stream, r.stream);
+    }
+}
+
 /* The stager lever's switch: stock never streams, and the row threshold gates auto. */
 TEST(the_stage_switch_and_threshold_gate_the_lever) {
     struct Case { const char* stage; const char* rows; Shape s; bool stream; };
     for (const Case& c : {Case{"stock", nullptr, {{2048}, 0, 2047}, false},
                           Case{"auto", "63", {{2048}, 0, 2047}, false},    /* 64 exact rows */
                           Case{"auto", "64", {{2048}, 0, 2047}, true},
-                          Case{"auto", "8", {{1, 1, 1, 1, 1, 1, 1, 1, 1984}, 8, 2048}, true}}) {
+                          Case{"auto", "8", {{1, 1, 1, 1, 1, 1, 1, 1, 1984}, 8, 2048}, true},
+                          Case{"auto", "", {{2048}, 0, 1024}, true}}) {   /* default: 1024 exact rows stream */
         Env e(c.rows ? std::initializer_list<std::pair<const char*, const char*>>{{"RADIANCE_KVA_STAGE", c.stage}, {"RADIANCE_KVA_STAGE_ROWS", c.rows}}
                      : std::initializer_list<std::pair<const char*, const char*>>{{"RADIANCE_KVA_STAGE", c.stage}});
         Pair p;
@@ -1995,6 +2026,7 @@ TEST(a_tail_past_the_step_approximates_the_provable_rows) {
                           Case{"speed", "64", {{2048}, 0, 575}, PATH_STOCK, 0, 0},
                           Case{"quality", "64", {{2048}, 0, 2048}, PATH_STOCK, 0, 0},
                           Case{"quality", "4096", {{2048}, 0, 2048}, PATH_MASKED, 1536, 0},
+                          Case{"quality", "", {{2048}, 0, 2048}, PATH_MASKED, 1536, 0},   /* the default */
                           Case{"speed", "4096", {{1, 1, 1, 1, 1, 1, 1, 1, 1984}, 8, 2048}, PATH_MASKED, 1480, 8}}) {
         Env e({{"RADIANCE_KVA_TAIL", "2560"}, {"RADIANCE_KVA_STAGE_ROWS", c.rows}});
         Pair p;

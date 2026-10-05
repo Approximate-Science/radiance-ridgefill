@@ -87,14 +87,16 @@ static const char* decl_masked(RadBuilder* b, const qwen4exp_fp8::Model& m, cons
 
 static void note_config(RadBuilder* b, const Kva& k) {
     const Config& c = k.cfg;
+    char rows[24] = "any";
+    if (c.stage_rows != INT64_MAX) std::snprintf(rows, sizeof rows, "<= %lld", (long long)c.stage_rows);
     rad_note(b, "KVA: mode %s from layer %lld, tail %lld, tile %lld; projector %s (%s), correction %s "
-                "(alpha %g), row table %s, rows %s share %g seed %lld; stage %s (exact rows <= %lld), "
+                "(alpha %g), row table %s, rows %s share %g seed %lld; stage %s (exact rows %s), "
                 "straddle %s%s%s",
              kModeNames[c.mode], (long long)k.split, (long long)c.tail, (long long)k.tile,
              g_loaded.folder.place.dir.c_str(), kPlaceNames[c.place], k.have_st ? "held" : "absent",
              c.alpha, k.have_rowsel ? kScoreNames[c.rowsel_table] : "absent",
              kRowselNames[c.rowsel], c.share, (long long)c.seed, kStageNames[c.stage],
-             (long long)c.stage_rows, kStraddleNames[c.straddle],
+             rows, kStraddleNames[c.straddle],
              k.out_rows_ok ? "" : "; KL mode serves stock (RADIANCE_KVA_SCORE_BULK unset)",
              c.force_split || c.shift_b || c.force_stream ? "; DEBUG switches set" : "");
 }
