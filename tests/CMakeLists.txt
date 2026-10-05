@@ -8,3 +8,8 @@ target_include_directories(arch_static_test PRIVATE
   ${CMAKE_SOURCE_DIR}/arch ${RADIANCE_SRC}/arch ${RADIANCE_SRC}/tests)
 add_test(NAME arch_static COMMAND arch_static_test)
 set_tests_properties(arch_static PROPERTIES SKIP_RETURN_CODE 77 LABELS "host")
+
+# The core names no model (tests/core_purity.cmake): a grep, so it runs in milliseconds and needs no build.
+add_test(NAME core_headers_name_no_arch
+         COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/core_purity.cmake)
+set_tests_properties(core_headers_name_no_arch PROPERTIES LABELS "host")
