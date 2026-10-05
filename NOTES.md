@@ -107,3 +107,24 @@ Verdicts: H4-st-paired confirmed (−0.0185 [−0.0218, −0.0147], 9/9 docs imp
 ≤0.3%); H5-quality-vs-speed confirmed (−0.0197 [−0.0250, −0.0141]); H5-quality-nll refuted (+2.38% > +1.5%);
 H5-class-vs-random refuted on size (−0.0047 [−0.0094, −0.0005], CI excludes 0 so R37 passes); H5-rows-share confirmed
 (5.61%); H5-jaccard refuted high (0.917 > 0.9); H5-quality-ttft refuted (0.91x).
+
+## Stage 6 — retune on radiance (REFIT lane; details notes/refit.md; evidence evidence/stage6/)
+- **R42 GREEN**: projector refit from radiance captures (151 docs raw+chat, 248,892 + 249,312 rows, chat share 0.5,
+  lambda 0.03 = shipped's), captures read by fit.py's Sums unchanged; HC identity check 0.99996. Held-out block-input
+  cosine on radiance captures: refit 0.7536 vs shipped 0.7501, paired over 24 layers +0.0035 [0.0029, 0.0041]
+  (H6-refit-cos refuted on size: band +0.005…+0.04). Appended as `kva.projr.*` (append #1, 20:37, kva.mode=off).
+- **R43 GREEN (counts)**: correction refit with the refit projector, 14 prompts (13 shipped minus sterm4 + 2 clean b2),
+  55 chunk ends per layer per rank, tail 512; refit vs shipped C cosine 0.92 (0.001 with halves swapped — head order
+  verified); appended as `kva.str.*` (append #2, 20:43).
+- **R44 — shipped weights KEPT.** Paired per-doc tail NLL, refit − shipped, same boot, plugin home-f60f893:
+  fill −0.0028 [−0.0060, +0.0005]; fill+st +0.0007 [−0.0018, +0.0030]; quality (25%) +0.00005 [−0.0030, +0.0030].
+  No CI excludes 0 → a refit kept on cosine alone would fail R44; shipped stays the default (`RADIANCE_KVA_PROJ/ST=shipped`).
+  Reading: the radiance-vs-tcc gap (+6.4% vs +4.3% fill) is not the projector's fit; radiance's own late-layer inputs
+  differ from tcc's by 0.06–0.09 cosine and the shipped map already predicts them almost as well as a radiance fit.
+- **Share sweep** (quality, refit weights; speed cost not measurable until the Stage A rework lands):
+  | share | ppl ratio | top-1 | KL mean |
+  |---|---|---|---|
+  | 0.10 | 1.0334 | 87.86% | 0.0719 |
+  | 0.25 | 1.0239 | 88.35% | 0.0672 |
+  | 0.50 | 1.0164 | 88.54% | 0.0626 |
+  0.10→0.25 −0.0093 [−0.0132, −0.0056]; 0.25→0.50 −0.0073 [−0.0109, −0.0040]. Default stays 0.25 (Dylan's call).
