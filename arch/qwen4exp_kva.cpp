@@ -29,15 +29,20 @@
 #endif
 #include <qwen4exp_fp8/qwen4exp_fp8.cpp>
 
+/* The core (namespace kva, names no model) ... */
 #include "kva_plan.h"
 #include "kva_declare.h"
 #include "kva_dump.h"
-#include "qwen4exp_fill.h"
-#include "qwen4exp_moe.h"
-#include "qwen4exp_blocks.h"
 #include "kva_layer.h"
 #include "kva_hazard.h"
 #include "kva_guard.h"
+
+/* ... then this model's adapter, which sees the core's names as its own: the static test and the hooks
+ * keep spelling them qwen4exp_kva::. */
+namespace qwen4exp_kva { using namespace kva; }
+#include "qwen4exp_fill.h"
+#include "qwen4exp_moe.h"
+#include "qwen4exp_blocks.h"
 #include "qwen4exp_adapter.h"
 
 namespace qwen4exp_kva {
@@ -93,14 +98,14 @@ static int declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* c
     if (k.cfg.mode == MODE_OFF && !capturing) return RAD_OK;
 
     k.nm = Names(ctx->scope ? ctx->scope : "");
-    k.tile = m.gcfg.chunk;
+    k.tile = k.ad.tile;
     k.out_rows_ok = ctx->max_out_rows == 0 || k.cfg.score_bulk;
     for (auto* v : { &k.proj_w, &k.proj_b, &k.proj_s, &k.st })
         v->assign(m.layers.size(), RAD_NONE);
     for (auto* v : { &k.op_undo, &k.op_apply, &k.op_rho, &k.op_proj })
         v->assign(m.layers.size(), 0);
     if (k.cfg.mode == MODE_OFF) RAD_ARCH_TRY(capture_split(b, meta, k));
-    else                        RAD_ARCH_TRY(decl_selected(b, meta, m, ctx, k));
+    else                        RAD_ARCH_TRY(decl_selected(b, meta, ctx, k));
     if (!k.state_dir.empty()) RAD_ARCH_TRY(decl_state_read(b, ctx, k));
     return RAD_OK;
 }
@@ -244,7 +249,7 @@ static void approximate_step(RadCtx* c, const Kva& k, const RadBatch* batch, con
         else if (p.path == PATH_DECODERS) decoders_layer(c, k, li, batch, p, sd);
         else                              masked_layer(c, k, li, batch, p, sd);
     }
-    final_stream(c, k, m, batch, p);   /* MTP: the bulk rows' predicted final stream, before the epilogue reads b_h */
+    final_stream(c, k, batch, p);   /* MTP: the bulk rows' predicted final stream, before the epilogue reads b_h */
     epilogue(c, m, batch);
 }
 

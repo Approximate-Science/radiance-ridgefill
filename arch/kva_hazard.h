@@ -10,10 +10,10 @@
  * the counter when it moves, on a LATER step: it is read for the log only, never for an issue (R99).
  * Speed and quality only; plumb, which approximates nothing, and off declare none of it.
  */
-#ifndef QWEN4EXP_KVA_HAZARD_H
-#define QWEN4EXP_KVA_HAZARD_H
+#ifndef KVA_HAZARD_H
+#define KVA_HAZARD_H
 
-namespace qwen4exp_kva {
+namespace kva {
 
 using namespace rad::arch;
 
@@ -46,6 +46,6 @@ static void hazard_log(RadCtx* c) {
     g_hazard_logged[r] = *h;
 }
 
-}  /* namespace qwen4exp_kva */
+}  /* namespace kva */
 
-#endif /* QWEN4EXP_KVA_HAZARD_H */
+#endif /* KVA_HAZARD_H */

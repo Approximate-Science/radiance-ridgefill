@@ -1,10 +1,10 @@
 /* kva_declare_masked.h -- the masked path's declarations (PLAN-FIX §3, §6.1), the selected set's
  * declare, and the debug captures' declarations. Included by kva_declare.h only.
  */
-#ifndef QWEN4EXP_KVA_DECLARE_MASKED_H
-#define QWEN4EXP_KVA_DECLARE_MASKED_H
+#ifndef KVA_DECLARE_MASKED_H
+#define KVA_DECLARE_MASKED_H
 
-namespace qwen4exp_kva {
+namespace kva {
 
 /* THE STAGER PROBES' BUFFERS (notes/impl.md §2): expert offsets that are all zero -- kva_mask writes
  * them every masked pass -- and the rows a probe's gate-up GEMM writes its zeros into, sized for the
@@ -199,8 +199,7 @@ static int decl_hazard(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
 /* The selected set, its ops and its refusals. Under a sizing declare nothing is refused or copied:
  * the real declare already decided, and its handles are the ones issued. With no usable projector
  * nothing at all is declared: the engine serves the in-tree graph. */
-static int decl_selected(RadBuilder* b, const RadModelMeta* meta, const qwen4exp_fp8::Model& m,
-                         const RadBuildCtx* ctx, Kva& k) {
+static int decl_selected(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* ctx, Kva& k) {
     const bool probe = ctx->shape_probe != 0;
     if (!take_folder(b, meta, k)) return RAD_OK;
     /* THE MTP final map (kva_final.h): only when this deployment drafts, the mode projects, the folder holds
@@ -208,14 +207,14 @@ static int decl_selected(RadBuilder* b, const RadModelMeta* meta, const qwen4exp
     k.want_final = ctx->max_spec > 0 && (k.cfg.mode == MODE_SPEED || k.cfg.mode == MODE_QUALITY) &&
                    g_loaded.has_final && k.cfg.final_on;
     k.ring_end = k.ad.n_layer + (k.want_final ? k.ad.wide / k.ad.n_embd : 0);   /* + hc final blocks */
-    if (!probe) RAD_ARCH_TRY(check_mode(k, m.g.max_tok));
+    if (!probe) RAD_ARCH_TRY(check_mode(k, ctx->max_tok));   /* the real declare's: the model's own max_tok */
     if (!probe) RAD_ARCH_TRY(check_fill(k));
     if (!probe) RAD_ARCH_TRY(take_upload(ctx, k));
     if (k.cfg.mode != MODE_PLUMB) RAD_ARCH_TRY(decl_fill(b, ctx, k));
     const char* missing = decl_masked(b, ctx, k);
     if (!missing && k.ad.decl_state_ops) missing = k.ad.decl_state_ops(b, ctx, k);
     if (!missing && decl_hazard(b, ctx, k) != RAD_OK) missing = "kva_hazard";
-    if (!missing && k.want_final) missing = decl_final(b, m, ctx, k);
+    if (!missing && k.want_final) missing = decl_final(b, ctx, k);
     if (missing && !probe) {
         std::fprintf(stderr, "radiance: %s: mode %s issues '%s' and no kernel library "
                              "serves it -- kva.so is missing from $RADIANCE_HOME or declines this "
@@ -267,6 +266,6 @@ static int decl_state_read(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
     return RAD_OK;
 }
 
-}  /* namespace qwen4exp_kva */
+}  /* namespace kva */
 
-#endif /* QWEN4EXP_KVA_DECLARE_MASKED_H */
+#endif /* KVA_DECLARE_MASKED_H */

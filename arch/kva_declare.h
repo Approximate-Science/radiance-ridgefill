@@ -5,8 +5,8 @@
  * Everything here runs at declare only. step() reads the Kva a rank's real declare filled and
  * nothing else that can change (R15/R99).
  */
-#ifndef QWEN4EXP_KVA_DECLARE_H
-#define QWEN4EXP_KVA_DECLARE_H
+#ifndef KVA_DECLARE_H
+#define KVA_DECLARE_H
 
 #include "kva_adapter.h"
 #include "kva_config.h"
@@ -29,7 +29,7 @@ struct Kva {
      * declare runs on its own thread, so it must not append to the real model's pool. */
     Names   nm{""};
     int64_t split = -1;          /* S: the lowest projected layer, -1 when no projector is held */
-    /* G: the delta net's chunk (GdnFP8::Config::chunk). Every bulk end lands on it, so a split
+    /* G: the recurrent block's chunk (the adapter's tile fact). Every bulk end lands on it, so a split
      * scan's two halves keep the single conv-prep/kkt pass's tiles (PLAN-FIX §4). */
     int64_t tile = 0;
     bool    have_proj = false, have_st = false, have_rowsel = false;
@@ -101,13 +101,6 @@ struct Kva {
 
 static Kva g_kva[MAX_RANKS];
 
-}  /* namespace kva */
-
-namespace qwen4exp_kva {
-
-using namespace rad::arch;
-using namespace kva;
-
 /* The refusals a serving mode needs before anything is issued (R31). Each names the number or the
  * tensor that refused it. */
 static int check_mode(const Kva& k, int64_t max_tok) {
@@ -154,7 +147,7 @@ static int check_fill(const Kva& k) {
         return RAD_E_UNSUPPORTED;
     }
     for (int64_t l = k.split - 1; l < a.n_layer; ++l) {
-        /* The masked path issues each late layer's MoE pass itself (qwen4exp_moe.h), and that copy has
+        /* The masked path issues each late layer's FFN itself (the adapter's ffn hook), and that copy has
          * no calibration tap: a calibration run serves through the in-tree path only. */
         if (a.calibrated[(size_t)l]) {
             std::fprintf(stderr, "radiance: %s: layer %lld runs the MoE calibration tap, "
@@ -254,10 +247,10 @@ static int decl_fill(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
     return decl_ring(b, ctx, k);
 }
 
-}  /* namespace qwen4exp_kva */
+}  /* namespace kva */
 
 #include "kva_projector.h"
 #include "kva_final.h"
 #include "kva_declare_masked.h"
 
-#endif /* QWEN4EXP_KVA_DECLARE_H */
+#endif /* KVA_DECLARE_H */

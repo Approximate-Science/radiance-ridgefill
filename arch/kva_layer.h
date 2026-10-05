@@ -16,6 +16,21 @@ namespace kva {
 
 using namespace rad::arch;
 
+/* A group's slot row for sequence `seq` of the step (one index row): its own state_index at its own
+ * pitch. */
+inline RadOperand slot_row(const RadBatch* batch, rad_kvgroup g, int64_t seq) {
+    const RadKVGroupBatch* kb = kv_batch(batch, g);
+    const int64_t pitch = kb && kb->state_index_pitch > 0 ? kb->state_index_pitch : 1;
+    return praw2(kb ? kb->state_index + seq * pitch : nullptr, RAD_I32, 1, pitch);
+}
+
+/* The slot row of the step's LAST sequence (index row n_seq-1). The approximated sequence is always
+ * the last entry (n_ahead > 0 means it is a non-final prefill chunk, radiance
+ * core/sched/batch.cpp:1066-1080). */
+inline RadOperand last_slot(const RadBatch* batch, rad_kvgroup g) {
+    return slot_row(batch, g, batch->n_seq - 1);
+}
+
 /* ---------------------------------------------------------------- the staging ring (DD-L) */
 
 /* ONE SLOT (Stage E): block li's map, host block -> the VRAM slot, on the second lane, issued right after
