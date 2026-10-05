@@ -395,3 +395,28 @@ here), acceptance within the round-to-round spread of each arm.
 - **R56 host guard: GO** -- 185e31b (planner rule, keyed `b - s_lb`, vram no threshold).
 - **VRAM placement refusing to start at 8192 / 10 seqs** -> Stage E (no placement code touched here).
 - Prediction HB-R55-speedA registered before any run (labbook seq 418).
+
+### Session 7a / 8a -- R6/R7 and gate 1 for the decoders path (15:39-16:05Z; home `data/home-fd9e174`:
+### arch fceea9dd…, kva.so 9d80ee76…; host placement from 15:40Z, Dylan: the VRAM placement is removed)
+- **R6/R7 green at fd9e174**: off ident = R3's six hashes (`ident-off-fd9e174.txt`, session 7a; 7a was then
+  stopped and its captures rerun with host placement as session 8a).
+- **Gate 1 (session 8a)**: `--profile-ops` servers with `RADIANCE_KVA_DUMP_LOGITS`, `RADIANCE_KVA_PROJ_PLACE=host`;
+  one request [4 decoders, 32K prompt] (128 tokens) + each decoder alone. Speed took the decoders path on 14
+  of its 15 approximate steps (1 masked: the step where the decoders' prompts are prefilled beside the
+  first chunk -- no decoder is decoding yet, Pn 5). `tools/logit_compare.py` follows each decoder as a
+  greedy chain (9697d44: a batch index stops naming the same sequence once the long prompt decodes).
+
+| decoder | floor: off batched vs off solo -- mean KL / max KL / top-1 (positions) | **(A) speed batched vs off batched** -- mean KL / max / top-1 (positions) | quality batched vs off batched |
+|---|---|---|---|
+| 0 | 0.737 / 0.737 / 0.00 (1) | **0.0013 / 0.029 / 0.963 (27)** | byte-identical (54) |
+| 1 | 0.097 / 0.097 / 0.00 (1) | **0.0029 / 0.029 / 0.987 (76)** | byte-identical (129) |
+| 2 | 0.316 / 16.3 / 0.981 (52) | **0.0016 / 0.035 / 0.990 (105)** | byte-identical (129) |
+| 3 | 0.023 / 0.044 / 0.75 (4) | **0.0005 / 0.002 / 0.929 (14)** | byte-identical (129) |
+
+  **Gate 1 GREEN**: every decoder's mean KL vs off in the same arrangement is 25-560x below stock's own
+  solo-vs-batched difference for that decoder, its max KL below the floor's, its top-1 disagreement
+  (one flip, at the position where its text then diverges: after 26 / 75 / 104 / 10 generated tokens)
+  at or below the floor's. Quality (unchanged path) stays byte-identical to off. Reading the floor: the
+  stock engine's logits for the SAME prompt differ by 1-2 logit units between "prefilled beside a 32K
+  chunk" and "prefilled alone" (decoder 0: top token 1946 at 18.82 vs 198 at 19.03) -- a large class,
+  stock's own, measured here, not assumed.
