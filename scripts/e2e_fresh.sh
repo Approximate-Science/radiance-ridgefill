@@ -4,7 +4,9 @@
 # WHAT IT PROVES (PLAN-FIX "DECISIONS RECORDED", FINAL DELIVERABLE): the tarballs tools/package.py
 # built install and behave on a stock radiance: a stock stilldeadcode/radiance runtime image, the
 # stock published .rad container, a clean RADIANCE_HOME holding ONLY the packaged plugin, the
-# projector folder unpacked from the package, the template produced by the merge tool.
+# projector folder unpacked from the package. This release selects the mode server-wide only
+# (RADIANCE_KVA=off|quality|speed); the per-request chat-template feature is PARKED
+# (notes/future/per-request.md), so the dist carries no template package by default.
 #
 # THE MODEL FILE IS NEVER COPIED (it is 114 GiB): <work>/model/<basename> is a SYMLINK to RK_MODEL,
 # for this script's own host-side reference and evidence. Docker bind mounts do NOT resolve
@@ -20,16 +22,18 @@
 #   1  no projector mounted (an EMPTY dir shadows any real projector/ the model dir may hold):
 #      the plugin logs the no-projector line and serves stock -> ident EQUALS the baseline.
 #   2  projector mounted, RADIANCE_KVA=off: off never looks -> ident EQUALS the baseline.
-#   3  RADIANCE_KVA=quality: the startup log has the projector line with 0 warning(s), and a
-#      16,384-token prompt (tools/speed.py's prompt builder) is FASTER than the baseline TTFT.
+#   3  RADIANCE_KVA=quality: the startup log has the projector line with 0 warning(s) AND at
+#      least one approximate-step line (the approximation is logged), and a 16,384-token prompt
+#      (tools/speed.py's prompt builder) is FASTER than the baseline TTFT.
 #   4  RADIANCE_KVA=speed: the same checks.
 #   5  a corrupted projector copy (one byte flipped in one proj file, in a scratch copy): the
 #      startup REFUSES that folder BY NAME and serves stock -> ident EQUALS the baseline.
-#   6  --override-chat-template with the packaged pre-merged template and NO kva kwarg:
-#      requests render byte-identically to the unmodified template -> ident EQUALS the baseline.
-#   7  the same with "chat_template_kwargs": {"kva": "on"}: PENDING until Stage F lands (the
-#      marker erasure) -- SKIPPED with that reason unless RK_E2E_STAGE_F=1, which expects the
-#      request to succeed and the log to show the marker detected.
+#   6  the retired switch RADIANCE_KVA_PROJ_PLACE=vram (the projector is ALWAYS streamed from
+#      host RAM now; placement and its switches are gone): the engine REFUSES at startup naming
+#      the switch -- the container exits before /health ever answers.
+#   7  --override-chat-template with "chat_template_kwargs": {"kva": "on"}: PARKED with the
+#      per-request feature (notes/future/per-request.md) -- SKIPPED with that reason unless
+#      RK_E2E_STAGE_F=1 (which needs a dist built with `package.py --with-template`).
 #
 # OUTPUT: <work>/e2e-report.json (every case with pass/fail/skipped and its evidence); exit
 # status 0 only when no case failed. Every container this script starts is stopped and removed
@@ -55,8 +59,10 @@
 #   RK_E2E_MODEL_SHA256   default the published sha256 of the stock container
 #                         (0af5e962...aa4d20, notes/aprime.md R144): refuse a model file that is
 #                         not it. Set to an empty string to skip the (slow) hash of 114 GiB.
-#   RK_E2E_STAGE_F        default unset: case 7 prints SKIPPED; set to 1 to run it (needs the
-#                         Stage F marker erasure in the plugin)
+#   RK_E2E_STAGE_F        default unset: case 7 prints SKIPPED (the per-request feature is
+#                         parked, notes/future/per-request.md); set to 1 to run it -- the dist
+#                         must then carry the chat-template package (build it with
+#                         `tools/package.py --with-template ...`)
 
 set -eu
 
@@ -113,28 +119,58 @@ printf 'e2e: work %s; dist %s; image %s; model %s\n' "$E2E_WORK" "$RK_DIST" "$RK
 set -- "$RK_DIST"/radiance-kva-*.tar.gz
 [ "$#" -eq 1 ] || rk_die "expected exactly one radiance-kva-<version>.tar.gz in $RK_DIST, found: $*"
 E2E_PLUGIN_TARBALL=$1
-for e_tb in "$E2E_PLUGIN_TARBALL" "$RK_DIST/projector-qwen3.8-flash-next.tar.gz" "$RK_DIST/kva-chat-template.tar.gz"; do
+# the projector package is named by the dtype its own kva.json carries (bf16 or int8 --
+# the shipped folder may be either), so it is found by pattern, never hard-coded
+set -- "$RK_DIST"/projector-qwen3.8-flash-next-*.tar.gz
+[ "$#" -eq 1 ] || rk_die "expected exactly one projector-qwen3.8-flash-next-<dtype>.tar.gz in $RK_DIST, found: $*"
+E2E_PROJECTOR_TARBALL=$1
+E2E_PROJECTOR_DIRNAME=$(basename "$E2E_PROJECTOR_TARBALL" .tar.gz)
+# the chat-template package is NOT built by default (per-request KVA is parked): it is
+# extracted when present, and demanded only when RK_E2E_STAGE_F=1 asks for its case
+E2E_TEMPLATE_TARBALL=$RK_DIST/kva-chat-template.tar.gz
+if [ ! -f "$E2E_TEMPLATE_TARBALL" ] && [ "$RK_E2E_STAGE_F" = 1 ]; then
+    rk_die "RK_E2E_STAGE_F=1 needs the chat-template package, which $RK_DIST does not carry: rebuild the dist with tools/package.py --with-template (per-request KVA is parked, notes/future/per-request.md)"
+fi
+for e_tb in "$E2E_PLUGIN_TARBALL" "$E2E_PROJECTOR_TARBALL"; do
     [ -f "$e_tb" ] || rk_die "the dist dir lacks the packaged tarball: $e_tb"
     e_root=$(tar -tzf "$e_tb" | head -1)
     e_want=$(basename "$e_tb" .tar.gz)/
     [ "$e_root" = "$e_want" ] || rk_die "$e_tb does not contain a single root dir $e_want (first entry: $e_root)"
     tar -xzf "$e_tb" -C "$E2E_EXTRACT"
 done
+E2E_TEMPLATE_DIR=''
+if [ -f "$E2E_TEMPLATE_TARBALL" ]; then
+    e_root=$(tar -tzf "$E2E_TEMPLATE_TARBALL" | head -1)
+    e_want=kva-chat-template/
+    [ "$e_root" = "$e_want" ] || rk_die "$E2E_TEMPLATE_TARBALL does not contain a single root dir $e_want (first entry: $e_root)"
+    tar -xzf "$E2E_TEMPLATE_TARBALL" -C "$E2E_EXTRACT"
+    E2E_TEMPLATE_DIR=$E2E_EXTRACT/kva-chat-template
+fi
 
 E2E_PLUGIN_VERSION=$(basename "$E2E_PLUGIN_TARBALL" .tar.gz)
 E2E_PLUGIN_VERSION=${E2E_PLUGIN_VERSION#radiance-kva-}
 E2E_PLUGIN_HOME=$E2E_EXTRACT/radiance-kva-$E2E_PLUGIN_VERSION
-E2E_PROJECTOR=$E2E_EXTRACT/projector-qwen3.8-flash-next
-E2E_TEMPLATE_DIR=$E2E_EXTRACT/kva-chat-template
+E2E_PROJECTOR=$E2E_EXTRACT/$E2E_PROJECTOR_DIRNAME
 export RK_PLUGIN_HOME="$E2E_PLUGIN_HOME"     # rk_docker_prefix mounts it at /plugins:ro
 [ -f "$E2E_PLUGIN_HOME/architectures/qwen4exp_fp8.so" ] || rk_die "the packaged plugin home has no architectures/qwen4exp_fp8.so: $E2E_PLUGIN_HOME"
 [ -f "$E2E_PLUGIN_HOME/kernels/kva.so" ] || rk_die "the packaged plugin home has no kernels/kva.so: $E2E_PLUGIN_HOME"
-[ -f "$E2E_TEMPLATE_DIR/chat_template.jinja" ] || rk_die "the template package has no chat_template.jinja: $E2E_TEMPLATE_DIR"
-for e_dir in "$E2E_PLUGIN_HOME" "$E2E_PROJECTOR" "$E2E_TEMPLATE_DIR"; do
+[ -f "$E2E_PROJECTOR/kva.json" ] || rk_die "the extracted projector package has no kva.json: $E2E_PROJECTOR"
+if [ -n "$E2E_TEMPLATE_DIR" ]; then
+    [ -f "$E2E_TEMPLATE_DIR/chat_template.jinja" ] || rk_die "the template package has no chat_template.jinja: $E2E_TEMPLATE_DIR"
+fi
+set -- "$E2E_PLUGIN_HOME" "$E2E_PROJECTOR"
+[ -n "$E2E_TEMPLATE_DIR" ] && set -- "$@" "$E2E_TEMPLATE_DIR"
+for e_dir in "$@"; do
     (cd "$e_dir" && sha256sum -c SHA256SUMS) ||
         rk_die "the extracted package does not match its SHA256SUMS: $e_dir"
 done
-printf 'e2e: extracted and verified radiance-kva-%s, projector-qwen3.8-flash-next, kva-chat-template\n' "$E2E_PLUGIN_VERSION"
+if [ -n "$E2E_TEMPLATE_DIR" ]; then
+    e_extra=', kva-chat-template'
+else
+    e_extra=' (no chat-template package: per-request KVA is parked)'
+fi
+printf 'e2e: extracted and verified radiance-kva-%s, %s%s\n' "$E2E_PLUGIN_VERSION" \
+    "$E2E_PROJECTOR_DIRNAME" "$e_extra"
 
 # ---------------------------------------------------------------- (b) the model: a symlink, never a copy
 
@@ -204,6 +240,10 @@ e2e_skipped() {
 #   RK_FLAGS as every other measurement, the packaged plugin home as the only plugin home
 #   (exact: the image's own home, no plugin), plus the projector / template bind mounts;
 #   wait for /health. The whole command line is kept in logs/<NAME>.cmd.
+#   With E2E_SERVE_EXPECT=refusal in the environment, the wait instead ends when the
+#   container EXITS at startup (the expected refusal): the log is captured as
+#   logs/<NAME>.log and the container removed; the case body greps it. /health answering
+#   is the FAILURE (the refused thing served).
 e2e_serve() {
     e_name=$1; e_mode=$2; e_proj=$3; e_tmpl=$4; shift 4
     rk_mode_validate "$e_mode"
@@ -238,6 +278,33 @@ e2e_serve() {
     E2E_STARTED="$E2E_STARTED $e_container"
     printf 'e2e: case %s: container %s (id %s) starting; waiting for /health on port %s\n' \
         "$e_name" "$e_container" "$e_cid" "$RK_PORT"
+    if [ "${E2E_SERVE_EXPECT:-health}" = refusal ]; then
+        e_waited=0
+        sleep 5
+        while :; do
+            e_code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' \
+                "http://127.0.0.1:$RK_PORT/health" 2>/dev/null || true)
+            [ "$e_code" = 200 ] &&
+                e2e_die "case $e_name: the engine CAME UP (the expected startup refusal never happened); log: docker logs $e_container"
+            e_state=$(docker container inspect -f '{{.State.Running}}' "$e_container" 2>/dev/null || true)
+            [ "$e_state" = true ] || break
+            if [ "$e_waited" -ge "$RK_E2E_SERVE_TIMEOUT" ]; then
+                e2e_die "case $e_name: the container did not exit within ${RK_E2E_SERVE_TIMEOUT}s (the expected startup refusal never happened)"
+            fi
+            sleep 5
+            e_waited=$((e_waited + 5))
+            if [ $((e_waited % 30)) -eq 0 ]; then printf '  ...still running after %ss\n' "$e_waited"; fi
+        done
+        e2e_ev "$e_name" "container exited at startup (the expected refusal)"
+        docker logs "$e_container" > "$E2E_LOGS/$e_name.log" 2>&1 ||
+            e2e_die "docker logs failed for $e_container"
+        e2e_ev "$e_name" "container log: logs/$e_name.log"
+        docker rm "$e_container" >/dev/null 2>&1 || true
+        e_new=''
+        for e_c in $E2E_STARTED; do [ "$e_c" = "$e_container" ] || e_new="$e_new $e_c"; done
+        E2E_STARTED=${e_new# }
+        return 0
+    fi
     e_waited=0
     while :; do
         e_code=$(curl -s -m 5 -o /dev/null -w '%{http_code}' \
@@ -346,11 +413,11 @@ titles = {
     "0": "stock baseline (image's own plugin home, no projector)",
     "1": "no projector mounted: plugin serves stock (ident == stock)",
     "2": "projector + RADIANCE_KVA=off: ident == stock",
-    "3": "RADIANCE_KVA=quality: projector 0-warning line + TTFT faster than stock",
-    "4": "RADIANCE_KVA=speed: projector 0-warning line + TTFT faster than stock",
+    "3": "RADIANCE_KVA=quality: projector 0-warning line + approximation logged + TTFT faster than stock",
+    "4": "RADIANCE_KVA=speed: projector 0-warning line + approximation logged + TTFT faster than stock",
     "5": "corrupted projector: refused by name, ident == stock",
-    "6": "--override-chat-template, no kva kwarg: ident == stock",
-    "7": "--override-chat-template + kva:on request (Stage F)",
+    "6": "RADIANCE_KVA_PROJ_PLACE=vram: refused by name at startup",
+    "7": "--override-chat-template + kva:on request (parked: per-request KVA)",
 }
 
 def read(name):
@@ -464,6 +531,15 @@ else
     e2e_ev 3 "FAIL: no 'KVA: projector ... matches ... 0 warning(s)' line in logs/3.log"
     e_rc=1
 fi
+if e_n=$(grep -c 'kva: approximate step (quality' "$E2E_LOGS/3.log"); then
+    e2e_ev 3 "PASS: the log shows ${e_n} approximate step(s) in quality mode:"
+    grep 'kva: approximate step (quality' "$E2E_LOGS/3.log" | head -3 | while IFS= read -r e_line; do
+        e2e_ev 3 "  $e_line"
+    done
+else
+    e2e_ev 3 "FAIL: no 'kva: approximate step (quality, ...' line in logs/3.log (the approximation was never logged)"
+    e_rc=1
+fi
 if [ -n "$E2E_TTFT" ]; then
     e2e_ev 3 "quality TTFT at ${E2E_TTFT_LEN} tokens (median of ${E2E_TTFT_REPS} reps): ${E2E_TTFT} ms (stock ${E2E_STOCK_TTFT} ms)"
     if awk -v a="$E2E_TTFT" -v b="$E2E_STOCK_TTFT" 'BEGIN{exit !(a < b)}'; then
@@ -475,7 +551,7 @@ if [ -n "$E2E_TTFT" ]; then
 else
     e_rc=1
 fi
-e2e_status 3 "RADIANCE_KVA=quality: projector 0-warning line + TTFT faster than stock" "$e_rc"
+e2e_status 3 "RADIANCE_KVA=quality: projector 0-warning line + approximation logged + TTFT faster than stock" "$e_rc"
 
 # ---------------------------------------------------------------- case 4: RADIANCE_KVA=speed
 
@@ -495,6 +571,15 @@ else
     e2e_ev 4 "FAIL: no 'KVA: projector ... matches ... 0 warning(s)' line in logs/4.log"
     e_rc=1
 fi
+if e_n=$(grep -c 'kva: approximate step (speed' "$E2E_LOGS/4.log"); then
+    e2e_ev 4 "PASS: the log shows ${e_n} approximate step(s) in speed mode:"
+    grep 'kva: approximate step (speed' "$E2E_LOGS/4.log" | head -3 | while IFS= read -r e_line; do
+        e2e_ev 4 "  $e_line"
+    done
+else
+    e2e_ev 4 "FAIL: no 'kva: approximate step (speed, ...' line in logs/4.log (the approximation was never logged)"
+    e_rc=1
+fi
 if [ -n "$E2E_TTFT" ]; then
     e2e_ev 4 "speed TTFT at ${E2E_TTFT_LEN} tokens (median of ${E2E_TTFT_REPS} reps): ${E2E_TTFT} ms (stock ${E2E_STOCK_TTFT} ms)"
     if awk -v a="$E2E_TTFT" -v b="$E2E_STOCK_TTFT" 'BEGIN{exit !(a < b)}'; then
@@ -506,7 +591,7 @@ if [ -n "$E2E_TTFT" ]; then
 else
     e_rc=1
 fi
-e2e_status 4 "RADIANCE_KVA=speed: projector 0-warning line + TTFT faster than stock" "$e_rc"
+e2e_status 4 "RADIANCE_KVA=speed: projector 0-warning line + approximation logged + TTFT faster than stock" "$e_rc"
 
 # ---------------------------------------------------------------- case 5: a corrupted projector copy
 
@@ -548,30 +633,38 @@ fi
 e2e_ident_equals_stock 5 5 || e_rc=1
 e2e_status 5 "corrupted projector: refused by name, ident == stock" "$e_rc"
 
-# ---------------------------------------------------------------- case 6: the template, no kva kwarg
+# ---------------------------------------------------------------- case 6: a retired switch
 
-# --override-chat-template with the packaged pre-merged template; requests WITHOUT the kva
-# kwarg must render byte-identically to the unmodified template -> the stock hashes
-e2e_serve 6 off "$E2E_PROJECTOR" "$E2E_TEMPLATE_DIR"
-e2e_ident 6 6 || e2e_die "scripts/ident.sh failed in case 6"
-e2e_stop 6
+# The projector is ALWAYS streamed from host RAM now; VRAM placement and its switches are
+# gone. RADIANCE_KVA_PROJ_PLACE is one of the retired pair (_RING is the other): the
+# engine must REFUSE at startup NAMING the switch (an old command line cannot silently
+# run something else) -- the container exits before /health ever answers.
+export RADIANCE_KVA_PROJ_PLACE=vram
+E2E_SERVE_EXPECT=refusal
+e2e_serve 6 quality "$E2E_PROJECTOR" ''
+unset RADIANCE_KVA_PROJ_PLACE
+unset E2E_SERVE_EXPECT
 e_rc=0
-if grep -q 'chat_template.jinja' "$E2E_LOGS/6.log"; then
-    e2e_ev 6 "PASS: the log names the override template:"
-    grep 'chat_template.jinja' "$E2E_LOGS/6.log" | while IFS= read -r e_line; do
+if grep -q 'RADIANCE_KVA_PROJ_PLACE' "$E2E_LOGS/6.log"; then
+    e2e_ev 6 "PASS: the startup log refuses RADIANCE_KVA_PROJ_PLACE by name:"
+    grep 'RADIANCE_KVA_PROJ_PLACE' "$E2E_LOGS/6.log" | while IFS= read -r e_line; do
         e2e_ev 6 "  $e_line"
     done
 else
-    e2e_ev 6 "NOTE: logs/6.log does not name chat_template.jinja (not gated; the engine may not log the override path)"
+    e2e_ev 6 "FAIL: no line names RADIANCE_KVA_PROJ_PLACE in logs/6.log (the refusal must name the retired switch)"
+    e_rc=1
 fi
-e2e_ident_equals_stock 6 6 || e_rc=1
-e2e_status 6 "--override-chat-template, no kva kwarg: ident == stock" "$e_rc"
+e2e_status 6 "RADIANCE_KVA_PROJ_PLACE=vram: refused by name at startup" "$e_rc"
 
-# ---------------------------------------------------------------- case 7: the kva:on request (Stage F)
+# ---------------------------------------------------------------- case 7: the kva:on request (parked)
+
+# PARKED with the per-request feature (notes/future/per-request.md): this release selects
+# the mode server-wide only. The case stays behind RK_E2E_STAGE_F=1 and needs the optional
+# chat-template package (a dist built with `tools/package.py --with-template`).
 
 if [ "$RK_E2E_STAGE_F" != 1 ]; then
-    e2e_skipped 7 "--override-chat-template + kva:on request (Stage F)" \
-        "PENDING: Stage F (the per-request marker erasure) has not landed; set RK_E2E_STAGE_F=1 to run it once it has"
+    e2e_skipped 7 "--override-chat-template + kva:on request (parked: per-request KVA)" \
+        "PARKED: per-request KVA (Stage F) is saved for a future update (notes/future/per-request.md); set RK_E2E_STAGE_F=1 and build the dist with tools/package.py --with-template to run it"
 else
     e2e_serve 7 off "$E2E_PROJECTOR" "$E2E_TEMPLATE_DIR"
     printf '%s' '{"model":"m","messages":[{"role":"user","content":"Say OK."}],"max_tokens":8,"temperature":0,"chat_template_kwargs":{"kva":"on"}}' \
@@ -596,7 +689,7 @@ else
         e2e_ev 7 "FAIL: no marker line in logs/7.log"
         e_rc=1
     fi
-    e2e_status 7 "--override-chat-template + kva:on request (Stage F)" "$e_rc"
+    e2e_status 7 "--override-chat-template + kva:on request (parked: per-request KVA)" "$e_rc"
 fi
 
 # ---------------------------------------------------------------- the report and the verdict
