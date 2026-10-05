@@ -185,6 +185,25 @@ inline void gdn_masked(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, in
 
 /* ---------------------------------------------------------------- the layer */
 
+/* ---------------------------------------------------------------- the staging ring (DD-L) */
+
+/* Layer li's map, host block -> its VRAM slot, on the second lane. The slot was last read by layer
+ * li - 2's GEMM, which lane 0 has already been handed: lane 1 waits for lane 0 first. */
+inline void ring_copy(RadCtx* c, const Kva& k, int64_t li) {
+    rad_lane_join(c, 0, 1);
+    rad_lane(c, 1);
+    RAD_ISSUE_N(c, k.op_ring, k.ring_src[(size_t)li].rows, k.ring_src[(size_t)li], k.ring_dst[(size_t)li]);
+    rad_lane(c, 0);
+}
+
+/* Before layer li's projector GEMM: lane 0 waits for li's copy, and li + 1's starts behind it, so
+ * each copy overlaps a whole layer of compute. Nothing without the ring. */
+inline void ring_next(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li) {
+    if (!k.op_ring) return;
+    rad_lane_join(c, 1, 0);
+    if (li + 1 < m.g.n_layer) ring_copy(c, k, li + 1);
+}
+
 /* The projected block input for the bulk superset [s_lb, b): the projector over the layer-S stream
  * h_S, its codes from the plugin's own quantiser (never re-quantised from bf16, so exact rows keep
  * the connection read's bytes), then kva_select puts the marked rows over `x` and its codes. */
@@ -192,6 +211,7 @@ inline void project_masked(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m
                            const Pass& p, int64_t T) {
     const int64_t r0 = p.s_lb, rows = p.b - p.s_lb, n = m.g.n_embd, wide = m.hccfg.hc * n;
     const ActFP8& x = m.a_x;
+    ring_next(c, k, m, li);
     RAD_ISSUE_N(c, k.op_proj[(size_t)li], rows, brow_slice(k.b_hs, r0, rows, wide),
                 k.proj_w[(size_t)li], k.proj_b[(size_t)li], RAD_NONE,
                 brow_slice(k.xp.x, r0, rows, n));
@@ -231,6 +251,7 @@ inline void masked_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int64_
  * codes. */
 inline void project_bulk(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li, int64_t b) {
     const int64_t n = m.g.n_embd;
+    ring_next(c, k, m, li);
     RAD_ISSUE_N(c, k.op_proj[(size_t)li], b, brows(m.b_h, b), k.proj_w[(size_t)li],
                 k.proj_b[(size_t)li], RAD_NONE, brows(m.a_x.x, b));
     if (k.quant.op)
@@ -320,6 +341,7 @@ inline void straddle_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int6
 
 /* The projector writes the block input `x` from the stream entering layer S, for every row. */
 inline void project(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li, int64_t T) {
+    ring_next(c, k, m, li);
     RAD_ISSUE_N(c, k.op_proj[(size_t)li], T, brows(m.b_h, T), k.proj_w[(size_t)li],
                 k.proj_b[(size_t)li], RAD_NONE, brows(m.a_x.x, T));
 }

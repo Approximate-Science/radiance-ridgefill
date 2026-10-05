@@ -212,6 +212,7 @@ static void approximate_step(RadCtx* c, const Kva& k, const RadBatch* batch, con
     const int rank = rad_rank(c);
     qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
     prologue(c, m, batch);
+    if (k.op_ring) ring_copy(c, k, k.split);   /* layer S's map lands during layers 0 .. S-1 */
     if (p.path == PATH_MASKED || p.path == PATH_STRADDLE) mask_rows(c, k, batch, p);
     const MoeArm probes = probe_arm(c, k, m);
     for (int64_t li = 0; li < k.split; ++li)

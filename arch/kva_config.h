@@ -42,6 +42,10 @@
  *                                 of each card (fewer resident experts); host costs nothing on
  *                                 the card and reads the maps over the link on every
  *                                 approximated chunk (slower ON chunks, R148)        default vram
+ *   env RADIANCE_KVA_PROJ_RING    1 | 0: with host placement, copy each late layer's map into one of
+ *                                 two VRAM slots on the second lane ahead of its GEMM (Dylan's DD-L,
+ *                                 2 x 50 MiB a card), or let the GEMM read host memory directly
+ *                                 (0: every M tile re-reads the map over the link, R148)   default 1
  *   env RADIANCE_KVA_ROWSEL_TABLE class -> score   none -> score_none (R41)
  *                                 all   -> score_all (every id a match: R35')
  *
@@ -89,6 +93,7 @@ struct Config {
     int64_t     seed        = 0;
     int         rowsel_table = 0;          /* kScoreNames' index: score, score_none, score_all */
     int         place       = PLACE_VRAM;
+    bool        ring        = true;        /* host placement: stage each layer's map through VRAM */
     int         stage       = STAGE_AUTO;
     int64_t     stage_rows  = 64;          /* one tile: A.1's profile, notes/impl.md §6 */
     bool        score_bulk  = false;
@@ -170,7 +175,11 @@ inline int read_variants(Config* c) {
         }
     RAD_ARCH_TRY(read_choice("RADIANCE_KVA_ROWSEL_TABLE", { "class", "none", "all" },
                              "class|none|all", &c->rowsel_table));
-    return read_choice("RADIANCE_KVA_PROJ_PLACE", { "vram", "host" }, "vram|host", &c->place);
+    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_PROJ_PLACE", { "vram", "host" }, "vram|host", &c->place));
+    int ring = 1;
+    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_PROJ_RING", { "1", "0" }, "1|0", &ring));
+    c->ring = ring == 0;   /* index 0 is "1" */
+    return RAD_OK;
 }
 
 /* The stager lever, the KL switch and the gate-only debug switches. */

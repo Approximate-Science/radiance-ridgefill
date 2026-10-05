@@ -35,6 +35,10 @@ struct Kva {
     std::vector<RadOperand> proj_w, proj_b;   /* [n_layer]: none below S */
     std::vector<RadOperand> st;               /* [n_layer]: this rank's heads; none below S and on attention */
     RadOperand score = RAD_NONE;
+    /* The staging ring (host placement, kva_projector.h plan_maps): per late layer the host map's
+     * row block and the VRAM slot it is copied into, and the copy op. */
+    std::vector<RadOperand> ring_src, ring_dst;
+    rad_op op_ring = 0;
     /* kva_state_correct per late delta-net layer (undo, apply) and kva_rho_update (quality). */
     std::vector<rad_op> op_undo, op_apply, op_rho;
     /* What each sequence's late delta-net layer had added to its state at its last approximate
@@ -221,7 +225,14 @@ static int decl_fill(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuild
         }
         k.op_proj[(size_t)l] = h;
     }
-    return RAD_OK;
+    if (k.cfg.place != PLACE_HOST || !k.cfg.ring) return RAD_OK;
+    /* libr4d's strided row copy (cast bf16 -> bf16), one [n + 1, hc*n] row block a layer. */
+    k.op_ring = RAD_OP(b, "cast", RAD_PARAMS(RAD_RANGE("M", 1, g.n_embd + 1), RAD_INT("n", wide),
+                                             RAD_STR("from", "bf16"), RAD_STR("to", "bf16")), RAD_NOWEIGHTS);
+    if (k.op_ring || ctx->shape_probe) return RAD_OK;
+    std::fprintf(stderr, "radiance: qwen4exp_kva: no kernel serves the staging ring's copy (cast bf16, "
+                         "n %lld); RADIANCE_KVA_PROJ_RING=0 reads the host maps directly\n", (long long)wide);
+    return RAD_E_UNSUPPORTED;
 }
 
 }  /* namespace qwen4exp_kva */

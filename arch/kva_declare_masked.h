@@ -143,6 +143,8 @@ static int take_upload(const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva
     k.proj_b = u.proj_b;
     k.st = u.st;
     k.score = u.score;
+    k.ring_src = u.ring_src;
+    k.ring_dst = u.ring_dst;
     return RAD_OK;
 }
 

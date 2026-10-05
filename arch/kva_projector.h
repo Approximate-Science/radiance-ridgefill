@@ -49,7 +49,7 @@ struct Upload {
     void* vram = nullptr;
     void* host = nullptr;
     int64_t vram_bytes = 0, host_bytes = 0;
-    std::vector<RadOperand> proj_w, proj_b, st;
+    std::vector<RadOperand> proj_w, proj_b, st, ring_src, ring_dst;
     RadOperand score = RAD_NONE;
 };
 static Upload g_upload[MAX_RANKS];
@@ -157,13 +157,13 @@ inline void* fill_block(const std::vector<Piece>& plan, bool host, int64_t bytes
     }
     if (host) {
         unsigned char* h = (unsigned char*)rad_dev_host_ptr(p);
-        for (const Piece& x : plan) if (x.host && h) std::memcpy(h + x.at, x.src, (size_t)x.bytes);
+        for (const Piece& x : plan) if (x.host && x.src && h) std::memcpy(h + x.at, x.src, (size_t)x.bytes);
         return h ? p : nullptr;
     }
     RadStream s = nullptr;
     bool ok = rad_stream_create(&s, 0) == RAD_OK;
     for (const Piece& x : plan)
-        if (ok && !x.host) ok = rad_memcpy_async((unsigned char*)p + x.at, x.src, x.bytes, s) == RAD_OK;
+        if (ok && !x.host && x.src) ok = rad_memcpy_async((unsigned char*)p + x.at, x.src, x.bytes, s) == RAD_OK;
     ok = ok && rad_stream_sync(s) == RAD_OK;
     if (s) rad_stream_destroy(s);
     if (ok) return p;
@@ -179,55 +179,92 @@ inline unsigned char* dev_at(const Upload& u, bool host, int64_t at) {
     return base ? base + at : nullptr;
 }
 
-/* This rank's copies of what `mode` reads: the projector (vram or host), this rank's value heads of
- * the correction, the selected row table. Once per rank per process. */
 inline void free_upload(Upload& u) {
     if (u.vram) rad_dev_free(u.vram, RAD_MEM_DEVICE);
     if (u.host) rad_dev_free(u.host, RAD_MEM_HOST_MAPPED);
     u = Upload{};
 }
 
+/* Where each tensor of one rank's copy lands: a block offset per layer, -1 = not held. */
+struct Layout {
+    std::vector<int64_t> w, b, st, slot;
+    int64_t score = -1, vend = 0, hend = 0;
+};
+
+/* THE STAGING RING (Dylan's DD-L, host placement only): each layer's map and bias sit in the host
+ * block as ONE [n + 1, wide] row block (the bias in the first n elements of the last row), so one
+ * strided copy moves a layer; two VRAM slots of that size take turns (kva_layer.h ring_*). */
+inline void plan_maps(const Folder& f, const Loaded& l, const qwen4exp_fp8::Model& m, bool host,
+                      bool ring, std::vector<Piece>& plan, Layout* x) {
+    const int64_t n = m.g.n_embd, wide = m.hccfg.hc * n, block = (n + 1) * wide * 2;
+    for (int64_t li = l.split; li < m.g.n_layer; ++li) {
+        const FolderTensor* w = tensor(f, "proj." + std::to_string(li) + ".weight");
+        const FolderTensor* b = tensor(f, "proj." + std::to_string(li) + ".bias");
+        int64_t* end = host ? &x->hend : &x->vend;
+        x->w[li] = place_piece(plan, end, w->data, w->bytes, host);
+        x->b[li] = place_piece(plan, end, b->data, b->bytes, host);
+        if (ring) *end = x->w[li] + block;   /* the bias row's tail: read by the copy, never used */
+    }
+    for (int s = 0; ring && s < 2; ++s) x->slot.push_back(place_piece(plan, &x->vend, nullptr, block, false));
+}
+
+/* This rank's copy plan for `mode`: the maps (vram or host), its value heads of the correction, the
+ * selected row table. */
+inline Layout plan_rank(const Loaded& l, const qwen4exp_fp8::Model& m, const Config& c, int rank,
+                        std::vector<Piece>& plan) {
+    const Folder& f = l.folder;
+    const GdnFP8::Config& g = m.gcfg;
+    const int64_t heads = g.n_head_v * g.head_v * g.head_k * 4;   /* one rank's correction, bytes */
+    Layout x;
+    for (auto* v : { &x.w, &x.b, &x.st }) v->assign(m.g.n_layer, -1);
+    if (c.mode == MODE_PLUMB) return x;
+    plan_maps(f, l, m, c.place == PLACE_HOST, c.place == PLACE_HOST && c.ring, plan, &x);
+    for (int64_t li = l.split; li < m.g.n_layer; ++li) {
+        const FolderTensor* st = m.layers[(size_t)li].full ? nullptr : tensor(f, "st." + std::to_string(li));
+        if (st) x.st[li] = place_piece(plan, &x.vend, st->data + rank * heads, heads, false);
+    }
+    const FolderTensor* sc = c.mode == MODE_QUALITY ? tensor(f, kScoreNames[c.rowsel_table]) : nullptr;
+    if (sc) x.score = place_piece(plan, &x.vend, sc->data, sc->bytes, false);
+    return x;
+}
+
+/* The issue sites' operands for a layout: the maps where the GEMM reads them (the slot a layer takes
+ * turns on, under the ring), and the ring's copy source and destination. */
+inline void take_operands(Upload& u, const Layout& x, const qwen4exp_fp8::Model& m, bool host) {
+    const int64_t n = m.g.n_embd, wide = m.hccfg.hc * n, L = m.g.n_layer;
+    const GdnFP8::Config& g = m.gcfg;
+    for (auto* v : { &u.proj_w, &u.proj_b, &u.st, &u.ring_src, &u.ring_dst }) v->assign(L, RAD_NONE);
+    for (int64_t li = 0; li < L; ++li) {
+        const bool ring = !x.slot.empty() && x.w[li] >= 0;
+        unsigned char* at = ring ? dev_at(u, false, x.slot[li % 2]) : x.w[li] >= 0 ? dev_at(u, host, x.w[li]) : nullptr;
+        if (at) u.proj_w[li] = RAD_P_T2(at, RAD_BF16, n, wide);
+        if (at) u.proj_b[li] = RAD_P_T2(ring ? at + n * wide * 2 : dev_at(u, host, x.b[li]), RAD_BF16, n, 0);
+        if (ring) u.ring_src[li] = RAD_P_T2(dev_at(u, true, x.w[li]), RAD_BF16, n + 1, wide);
+        if (ring) u.ring_dst[li] = RAD_P_T2(at, RAD_BF16, n + 1, wide);
+        if (x.st[li] >= 0) u.st[li] = RAD_P_T2(dev_at(u, false, x.st[li]), RAD_F32, g.n_head_v, g.head_v * g.head_k);
+    }
+}
+
+/* This rank's copies of what `mode` reads. Once per rank per process. */
 inline bool upload_rank(const Loaded& l, const qwen4exp_fp8::Model& m, const Config& c, int rank) {
     Upload& u = g_upload[rank];
-    const int key = (c.mode * 2 + c.place) * 3 + c.rowsel_table;
+    const int key = ((c.mode * 2 + c.place) * 3 + c.rowsel_table) * 2 + c.ring;
     if (u.done && u.key == key) return u.ok;
     free_upload(u);
     u.done = true;
     u.key = key;
-    const Folder& f = l.folder;
-    const bool host = c.place == PLACE_HOST, project = c.mode != MODE_PLUMB;
-    const int64_t n = m.g.n_embd, wide = m.hccfg.hc * n, L = m.g.n_layer;
-    const GdnFP8::Config& g = m.gcfg;
-    const int64_t heads = g.n_head_v * g.head_v * g.head_k * 4;   /* one rank's correction, bytes */
     std::vector<Piece> plan;
-    int64_t vend = 0, hend = 0;
-    std::vector<int64_t> w_at(L, -1), b_at(L, -1), st_at(L, -1);
-    int64_t score_at = -1;
-    for (int64_t li = l.split; project && li < L; ++li) {
-        const FolderTensor* w = tensor(f, "proj." + std::to_string(li) + ".weight");
-        const FolderTensor* b = tensor(f, "proj." + std::to_string(li) + ".bias");
-        w_at[li] = place_piece(plan, host ? &hend : &vend, w->data, w->bytes, host);
-        b_at[li] = place_piece(plan, host ? &hend : &vend, b->data, b->bytes, host);
-        const FolderTensor* st = m.layers[(size_t)li].full ? nullptr : tensor(f, "st." + std::to_string(li));
-        if (st) st_at[li] = place_piece(plan, &vend, st->data + rank * heads, heads, false);
-    }
-    const FolderTensor* sc = c.mode == MODE_QUALITY ? tensor(f, kScoreNames[c.rowsel_table]) : nullptr;
-    if (sc) score_at = place_piece(plan, &vend, sc->data, sc->bytes, false);
-    u.vram = fill_block(plan, false, vend, rank);
-    u.host = fill_block(plan, true, hend, rank);
-    u.vram_bytes = vend;
-    u.host_bytes = hend;
-    if ((vend && !u.vram) || (hend && !u.host)) return false;
-    u.proj_w.assign(L, RAD_NONE); u.proj_b.assign(L, RAD_NONE); u.st.assign(L, RAD_NONE);
-    for (int64_t li = 0; li < L; ++li) {
-        if (w_at[li] >= 0) u.proj_w[li] = RAD_P_T2(dev_at(u, host, w_at[li]), RAD_BF16, n, wide);
-        if (b_at[li] >= 0) u.proj_b[li] = RAD_P_T2(dev_at(u, host, b_at[li]), RAD_BF16, n, 0);
-        if (st_at[li] >= 0) u.st[li] = RAD_P_T2(dev_at(u, false, st_at[li]), RAD_F32, g.n_head_v, g.head_v * g.head_k);
-    }
-    if (sc) u.score = RAD_P_T2(dev_at(u, false, score_at), RAD_F32, m.g.n_vocab_all, 0);
+    const Layout x = plan_rank(l, m, c, rank, plan);
+    u.vram = fill_block(plan, false, x.vend, rank);
+    u.host = fill_block(plan, true, x.hend, rank);
+    u.vram_bytes = x.vend;
+    u.host_bytes = x.hend;
+    if ((x.vend && !u.vram) || (x.hend && !u.host)) return false;
+    take_operands(u, x, m, c.place == PLACE_HOST);
+    if (x.score >= 0) u.score = RAD_P_T2(dev_at(u, false, x.score), RAD_F32, m.g.n_vocab_all, 0);
     std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: rank %d holds the projector: %.1f MiB VRAM, %.1f MiB "
-                         "host-mapped (RADIANCE_KVA_PROJ_PLACE=%s)\n", rank, (double)vend / (1 << 20),
-                 (double)hend / (1 << 20), kPlaceNames[c.place]);
+                         "host-mapped (RADIANCE_KVA_PROJ_PLACE=%s%s)\n", rank, (double)x.vend / (1 << 20),
+                 (double)x.hend / (1 << 20), kPlaceNames[c.place], x.slot.empty() ? "" : ", staging ring");
     u.ok = true;
     return true;
 }

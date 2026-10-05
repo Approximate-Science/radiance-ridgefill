@@ -147,6 +147,10 @@ int rad_issue(RadCtx* c, rad_op op, const RadOperand* opd, int n_opd, int64_t n)
     c->issues.push_back({op, std::vector<RadOperand>(opd, opd + n_opd), n});
     return RAD_OK;
 }
+/* The second lane, recorded in the issue list as pseudo-ops (only the staging ring switches lanes). */
+constexpr rad_op kLane = 0xFFFF0000u, kJoin = 0xFFFF1000u;
+int rad_lane(RadCtx* c, int lane) { c->issues.push_back({kLane, {}, lane}); return RAD_OK; }
+int rad_lane_join(RadCtx* c, int from, int to) { c->issues.push_back({kJoin, {}, from * 16 + to}); return RAD_OK; }
 int rad_step_fail(RadCtx* c, const char* what) { c->step_fail = what ? what : ""; return RAD_E_SHAPE; }
 int rad_rank(RadCtx* c) { return c->rank; }
 RadStream rad_stream(RadCtx*) { return nullptr; }
@@ -787,7 +791,7 @@ TEST(the_raw_operands_point_at_their_tensors_copies) {
 TEST(host_placement_puts_the_maps_in_host_mapped_memory) {
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
-    Env env({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_PROJ_PLACE", "host"}});
+    Env env({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_PROJ_PLACE", "host"}, {"RADIANCE_KVA_PROJ_RING", "0"}});
     RadBuilder kva;
     served(kva);
     hold_kva(kva, {"kva.proj", "kva.st"});
@@ -1882,6 +1886,21 @@ TEST(speed_adds_its_ops_after_the_in_tree_graph) {
  * dt_bias, the experts' tables) under a sizing declare -- and its buffers are the real ones with
  * only dim 0 smaller. */
 TEST(a_sizing_declare_matches_the_real_one) {
+    {   /* a sizing declare alone (no real one before it in this process) copies nothing */
+        RadModelMeta meta = flash_next_meta();
+        RadBuildCtx c = served_ctx();
+        RadBuilder real;
+        REQUIRE_EQ(qwen4exp_fp8::declare(&real, &meta, &c), RAD_OK);   /* the in-tree model only */
+        c.max_tok = 256;
+        c.shape_probe = 1;
+        RadBuilder small;
+        served(small);
+        hold_kva(small, {"kva.proj", "kva.st"});
+        hold_score(small, "kva.rowsel.score");
+        Env env({{"RADIANCE_KVA", "quality"}});
+        CHECK_EQ(qwen4exp_kva::declare(&small, &meta, &c), RAD_OK);
+        CHECK(g_mem.copies.empty() && !qwen4exp_kva::g_upload[0].done);
+    }
     for (const char* mode : {"plumb", "speed", "quality"}) {
         Pair p;
         declare_pair(p, mode);
@@ -1890,12 +1909,14 @@ TEST(a_sizing_declare_matches_the_real_one) {
         RadBuildCtx c = served_ctx();
         c.max_tok = 256;
         c.shape_probe = 1;
-        RadBuilder small;
+        RadBuilder small;   /* the real declare's folder and copies stay */
         served(small);
-        hold_kva(small, {"kva.proj", "kva.st"});
-        hold_score(small, "kva.rowsel.score");
         Env env({{"RADIANCE_KVA", mode}});
+        const size_t copies = g_mem.copies.size();
+        const void* block = qwen4exp_kva::g_upload[0].vram;
         REQUIRE_EQ(qwen4exp_kva::declare(&small, &meta, &c), RAD_OK);
+        CHECK_EQ(g_mem.copies.size(), copies);   /* a sizing declare copies nothing */
+        CHECK(qwen4exp_kva::g_upload[0].vram == block);
         REQUIRE_EQ(small.ops.size(), p.kva.ops.size());
         int fixed_differ = 0;
         for (size_t i = 0; i < small.ops.size(); ++i) {
@@ -2132,6 +2153,56 @@ TEST(the_forward_table_starts_empty) {
     CHECK(qwen4exp_kva::g_forward.declare == nullptr && qwen4exp_kva::g_forward.step == nullptr &&
           qwen4exp_kva::g_forward.probe == nullptr);
     CHECK(qwen4exp_kva::find_shadowed("").empty() || std::getenv("RADIANCE_HOME") != nullptr);
+}
+
+/* THE STAGING RING (DD-L): with host placement, each late layer's map + bias row block is copied
+ * into one of two VRAM slots on lane 1 -- layer S's at the start of the pass, layer li+1's right
+ * before layer li's GEMM, behind a join that waits for the GEMM two layers back to have been handed
+ * to lane 0 -- and lane 0 waits for a layer's copy before its GEMM, which reads that slot. */
+TEST(the_staging_ring_copies_each_map_a_layer_ahead_on_lane_1) {
+    RadModelMeta meta = flash_next_meta();
+    RadBuildCtx c = served_ctx();
+    Env env({{"RADIANCE_KVA", "speed"}, {"RADIANCE_KVA_PROJ_PLACE", "host"}});
+    RadBuilder kva;
+    served(kva);
+    hold_kva(kva, {"kva.proj", "kva.st"});
+    REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
+    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+    const qwen4exp_kva::Upload& u = qwen4exp_kva::g_upload[0];
+    REQUIRE(k.op_ring != 0);
+    CHECK_EQ(kva.ops[k.op_ring - 1].op, std::string("cast"));
+    const int64_t block = 2561LL * 10240 * 2;
+    CHECK_EQ(u.host_bytes, (8 - kSplit) * block);
+    for (int l = kSplit; l < 8; ++l) {
+        const uintptr_t slot = (uintptr_t)k.proj_w[(size_t)l].raw, other = (uintptr_t)k.proj_w[(size_t)(l ^ 1)].raw;
+        CHECK(slot >= kFakeVram && slot != other);
+        CHECK_EQ((uintptr_t)k.proj_b[(size_t)l].raw, slot + 2560u * 10240 * 2);
+        CHECK_EQ((uintptr_t)k.ring_dst[(size_t)l].raw, slot);
+        CHECK_EQ(k.ring_src[(size_t)l].rows, 2561);
+        CHECK((uintptr_t)k.ring_src[(size_t)l].raw >= (uintptr_t)u.host + kDeviceView);
+    }
+    Batch bk = make_step(kva, {{2048}, 0, 2048});   /* a lean speed pass */
+    const Run r = run_step(qwen4exp_kva::step, bk.b);
+    std::vector<std::string> seq;   /* the ring's events and the projector GEMMs, in issue order */
+    for (const RecIssue& i : r.issues) {
+        if (i.op == kLane) seq.push_back("lane" + std::to_string(i.n));
+        else if (i.op == kJoin) seq.push_back("join" + std::to_string(i.n / 16) + std::to_string(i.n % 16));
+        else if (i.op == k.op_ring) {
+            int l = -1;
+            for (int x = kSplit; x < 8; ++x) if (i.opd[0].raw == k.ring_src[(size_t)x].raw) l = x;
+            seq.push_back("copy" + std::to_string(l));
+            CHECK(i.opd[1].raw == k.ring_dst[(size_t)l].raw && i.n == 2561);
+        } else if (i.op && i.op == k.op_proj[(size_t)kSplit]) seq.push_back("gemm4");
+        else for (int x = kSplit + 1; x < 8; ++x) if (i.op == k.op_proj[(size_t)x]) seq.push_back("gemm" + std::to_string(x));
+    }
+    const std::vector<std::string> want = {
+        "join01", "lane1", "copy4", "lane0",
+        "join10", "join01", "lane1", "copy5", "lane0", "gemm4",
+        "join10", "join01", "lane1", "copy6", "lane0", "gemm5",
+        "join10", "join01", "lane1", "copy7", "lane0", "gemm6",
+        "join10", "gemm7" };
+    CHECK(seq == want);
+    if (seq != want) for (const std::string& e : seq) std::fprintf(stderr, " %s", e.c_str());
 }
 
 /* ==================================================================== the folder on disk */
