@@ -241,13 +241,30 @@ static int decl_fill_i8(RadBuilder* b, const Geom& g, const qwen4exp_fp8::Model&
     return RAD_E_UNSUPPORTED;
 }
 
+/* THE STAGING RING'S COPY: libr4d's strided row copy (cast bf16 -> bf16, r4d_p2p_copy2d -- bytes moved,
+ * no value converted, so int8 codes ride it as rows of bf16 pairs), one row block a layer: the bf16
+ * map and its bias, [n + 1, hc*n], or the int8 map's stored codes, scales and bias in fewer rows. */
+static int decl_ring(RadBuilder* b, const Geom& g, const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva& k) {
+    const int64_t wide = m.hccfg.hc * g.n_embd;
+    k.op_ring = RAD_OP(b, "cast", RAD_PARAMS(RAD_RANGE("M", 1, g.n_embd + 1), RAD_INT("n", wide),
+                                             RAD_STR("from", "bf16"), RAD_STR("to", "bf16")), RAD_NOWEIGHTS);
+    if (k.op_ring || ctx->shape_probe) return RAD_OK;
+    std::fprintf(stderr, "radiance: qwen4exp_kva: no kernel serves the staging ring's copy (cast bf16, "
+                         "n %lld): the projector is streamed from host memory and cannot run without it\n",
+                 (long long)wide);
+    return RAD_E_UNSUPPORTED;
+}
+
 static int decl_fill(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva& k) {
     Geom g = m.g;
     g.max_tok = ctx->max_tok;
     for (rad_buf h : { m.b_h, m.a_x.x, m.a_x.cq(), m.a_x.cs() })
         if (h) RAD_ARCH_TRY(rad_buf_concurrent(b, h));
     RAD_ARCH_TRY(k.quant.declare(b, g, m.a_x, g.n_embd));
-    if (k.int8) return decl_fill_i8(b, g, m, ctx, k);
+    if (k.int8) {
+        RAD_ARCH_TRY(decl_fill_i8(b, g, m, ctx, k));
+        return decl_ring(b, g, m, ctx, k);
+    }
     const int64_t wide = m.hccfg.hc * g.n_embd;
     for (int64_t l = k.split; l < g.n_layer; ++l) {
         /* kva.so's forward of the engine's gemm_nt_bias row (kernels/forward.cpp): the projector is
@@ -266,14 +283,7 @@ static int decl_fill(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuild
         }
         k.op_proj[(size_t)l] = h;
     }
-    if (k.cfg.place != PLACE_HOST || !k.cfg.ring) return RAD_OK;
-    /* libr4d's strided row copy (cast bf16 -> bf16), one [n + 1, hc*n] row block a layer. */
-    k.op_ring = RAD_OP(b, "cast", RAD_PARAMS(RAD_RANGE("M", 1, g.n_embd + 1), RAD_INT("n", wide),
-                                             RAD_STR("from", "bf16"), RAD_STR("to", "bf16")), RAD_NOWEIGHTS);
-    if (k.op_ring || ctx->shape_probe) return RAD_OK;
-    std::fprintf(stderr, "radiance: qwen4exp_kva: no kernel serves the staging ring's copy (cast bf16, "
-                         "n %lld); RADIANCE_KVA_PROJ_RING=0 reads the host maps directly\n", (long long)wide);
-    return RAD_E_UNSUPPORTED;
+    return decl_ring(b, g, m, ctx, k);
 }
 
 }  /* namespace qwen4exp_kva */

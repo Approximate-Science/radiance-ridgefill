@@ -200,7 +200,7 @@ The fitted tensors the radiance KVA plugin reads. The model file stays exactly a
 5. Check the startup log: "KVA: projector <folder> ... matches <model>".
 
 Docker: mount the model's DIRECTORY (not the single file), or set RADIANCE_KVA_PROJECTOR to this folder.
-RADIANCE_KVA_PROJ_PLACE=host keeps the projector maps off the cards (slower approximated chunks).
+The projector is streamed from host memory: it costs the cards two one-layer staging slots, not the whole map.
 """
 
 

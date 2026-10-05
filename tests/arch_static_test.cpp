@@ -690,6 +690,19 @@ TEST(the_container_routes_switches_are_refused_by_name) {
         CHECK_EQ(st, RAD_E_INVAL);
         CHECK(has(log, (std::string(name) + "=all is retired with the container append").c_str()));
     }
+    /* Retired with the vram placement (Dylan, Stage E): any value, the documented ones included. */
+    for (auto [name, value] : {std::pair<const char*, const char*>{"RADIANCE_KVA_PROJ_PLACE", "vram"},
+                               {"RADIANCE_KVA_PROJ_PLACE", "host"}, {"RADIANCE_KVA_PROJ_RING", "1"},
+                               {"RADIANCE_KVA_PROJ_RING", "0"}}) {
+        RadBuilder kva;
+        hold_kva(kva, {"kva.proj", "kva.st"});
+        Env env({{"RADIANCE_KVA", "quality"}, {name, value}});
+        int st = RAD_OK;
+        const std::string log = stderr_of([&] { st = qwen4exp_kva::declare(&kva, &meta, &c); });
+        CHECK_EQ(st, RAD_E_INVAL);
+        CHECK(has(log, (std::string(name) + "=" + value + " is retired: the projector is always streamed "
+                        "from host memory through the staging ring").c_str()));
+    }
 }
 
 
@@ -722,8 +735,9 @@ TEST(speed_takes_the_folder_and_declares_its_kernel_ops) {
     CHECK_EQ(undo, 3);    /* delta-net layers 4, 5, 6 */
     CHECK_EQ(apply, 3);
     CHECK_EQ(gemm, 8 - kSplit);
-    /* 4 maps + 4 biases + 3 corrections, no row table (speed reads none) */
-    CHECK_EQ(g_mem.copies.size(), (size_t)(2 * (8 - kSplit) + 3));
+    /* VRAM copies: the 3 corrections only (speed reads no row table); the maps and biases are written
+     * into the host block on the host */
+    CHECK_EQ(g_mem.copies.size(), (size_t)3);
     for (int l = 0; l < 8; ++l) {
         CHECK_EQ(k.proj_w[(size_t)l].kind == RAD_OPK_RAW, l >= kSplit);
         CHECK_EQ(k.st[(size_t)l].kind == RAD_OPK_RAW, l >= kSplit && l != 7);
@@ -733,7 +747,7 @@ TEST(speed_takes_the_folder_and_declares_its_kernel_ops) {
     RadBuilder again;
     hold_appended_weights(again);
     CHECK_EQ(qwen4exp_kva::declare(&again, &meta, &c), RAD_OK);
-    CHECK_EQ(g_mem.copies.size(), (size_t)(2 * (8 - kSplit) + 3));
+    CHECK_EQ(g_mem.copies.size(), (size_t)3);
 }
 
 /* What each RAW operand points at is the copy of exactly its tensor: the projector map [n, hc*n]
@@ -763,16 +777,21 @@ TEST(the_raw_operands_point_at_their_tensors_copies) {
                 return nullptr;
             };
             auto src = [&](const std::string& n) { return g_test_folder.tensors[n].data; };
+            const qwen4exp_kva::Upload& up = qwen4exp_kva::g_upload[rank];
+            const int64_t row = 10240 * 2;
             for (int l = kSplit; l < 8; ++l) {
                 const std::string L = std::to_string(l);
                 const RadOperand& w = k.proj_w[(size_t)l];
-                const Upload* uw = copy_of(w);
-                const Upload* ub = copy_of(k.proj_b[(size_t)l]);
-                REQUIRE(uw && ub);
-                CHECK(uw->src == src("proj." + L + ".weight") && uw->bytes == 2560LL * 10240 * 2);
+                /* the GEMM reads the slot this layer takes turns on; the ring copies the layer's host
+                 * row block there: the map's 2,560 rows, then the bias in row 2,560 */
                 CHECK(w.dtype == RAD_BF16 && w.rows == 2560 && w.cols == 10240);
-                CHECK(ub->src == src("proj." + L + ".bias") && ub->bytes == 2560 * 2);
+                CHECK((uintptr_t)w.raw >= kFakeVram && (uintptr_t)w.raw == (uintptr_t)k.ring_dst[(size_t)l].raw);
+                CHECK_EQ((uintptr_t)k.proj_b[(size_t)l].raw, (uintptr_t)w.raw + 2560u * row);
                 CHECK_EQ(((uintptr_t)w.raw - kFakeVram) % 256, 0u);
+                const unsigned char* block = (const unsigned char*)k.ring_src[(size_t)l].raw - kDeviceView;
+                CHECK(block >= (const unsigned char*)up.host && block < (const unsigned char*)up.host + up.host_bytes);
+                CHECK(std::memcmp(block, src("proj." + L + ".weight"), 2560 * row) == 0);
+                CHECK(std::memcmp(block + 2560 * row, src("proj." + L + ".bias"), 2560 * 2) == 0);
                 if (l == 7) continue;
                 const Upload* us = copy_of(k.st[(size_t)l]);
                 REQUIRE(us != nullptr);
@@ -786,13 +805,13 @@ TEST(the_raw_operands_point_at_their_tensors_copies) {
         }
 }
 
-/* RADIANCE_KVA_PROJ_PLACE=host: the projector maps go to host-mapped memory (written on the host,
- * read through its device view), nothing of them to VRAM; the correction and the row table stay
- * in VRAM. */
-TEST(host_placement_puts_the_maps_in_host_mapped_memory) {
+/* The projector maps live in host-mapped memory (written on the host, read through its device view by
+ * the ring's copy), nothing of them in VRAM but the two ring slots; the correction and the row table
+ * stay in VRAM. */
+TEST(the_maps_live_in_host_mapped_memory) {
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
-    Env env({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_PROJ_PLACE", "host"}, {"RADIANCE_KVA_PROJ_RING", "0"}});
+    Env env({{"RADIANCE_KVA", "quality"}});
     RadBuilder kva;
     served(kva);
     hold_kva(kva, {"kva.proj", "kva.st"});
@@ -804,11 +823,11 @@ TEST(host_placement_puts_the_maps_in_host_mapped_memory) {
     const qwen4exp_kva::Upload& u = qwen4exp_kva::g_upload[0];
     const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
     for (int l = kSplit; l < 8; ++l) {
-        const uintptr_t w = (uintptr_t)k.proj_w[(size_t)l].raw;
+        const uintptr_t w = (uintptr_t)k.ring_src[(size_t)l].raw;
         CHECK(w >= (uintptr_t)u.host + kDeviceView && w < (uintptr_t)u.host + kDeviceView + (uintptr_t)u.host_bytes);
     }
-    CHECK_EQ(u.host_bytes, (int64_t)(8 - kSplit) * (2560LL * 10240 * 2 + 2560 * 2));   /* 256-aligned already */
-    CHECK(has(log, "MiB host-mapped (RADIANCE_KVA_PROJ_PLACE=host)"));
+    CHECK_EQ(u.host_bytes, (int64_t)(8 - kSplit) * (2561LL * 10240 * 2));   /* one [n + 1, hc*n] row block a layer */
+    CHECK(has(log, "MiB host-mapped (bf16 maps)"));
     CHECK((uintptr_t)k.st[kSplit].raw >= kFakeVram && (uintptr_t)k.score.raw >= kFakeVram);
 }
 
@@ -1073,7 +1092,8 @@ TEST(the_stage_switch_and_threshold_gate_the_lever) {
 /* ==================================================================== issue sequences */
 
 struct Run {
-    std::vector<RecIssue> issues;
+    std::vector<RecIssue> issues;   /* the KVA step's without the staging ring's lanes and copies */
+    std::vector<RecIssue> all;      /* every issue, the ring's included */
     std::string           log;
     int                   device_calls = 0;
     std::vector<std::pair<const void*, size_t>> reads;
@@ -1087,7 +1107,14 @@ Run run_step(void (*step)(RadCtx*, const RadBatch*), const RadBatch& b, int rank
     g_ctx = &c;
     r.log = stderr_of([&] { step(&c, &b); });
     g_ctx = nullptr;
-    r.issues = c.issues;
+    r.all = c.issues;
+    /* THE RING IS ALWAYS ON (the projector streams from host memory), and the in-tree oracle has no
+     * ring: the KVA step's lane switches, joins and copies are set aside here and checked on their
+     * own (the_staging_ring_copies_each_map_a_layer_ahead_on_lane_1). Its op is declared after the
+     * whole in-tree graph, so no in-tree handle can share its number. */
+    const rad_op ring = step == qwen4exp_kva::step ? qwen4exp_kva::g_kva[rank].op_ring : 0;
+    for (const RecIssue& i : c.issues)
+        if (i.op != kLane && i.op != kJoin && (!ring || i.op != ring)) r.issues.push_back(i);
     r.device_calls = c.device_calls;
     r.reads = c.reads;
     return r;
@@ -1902,7 +1929,7 @@ TEST(speed_adds_its_ops_after_the_in_tree_graph) {
     CHECK_EQ(n["quant_act_i8g"], 1);
     CHECK_EQ(n["kva_state_correct"], 2 * 3);
     CHECK_EQ(n["kva_mask"], 1);
-    CHECK_EQ(n["cast"], 1);
+    CHECK_EQ(n["cast"], 2);   /* the layer-S stream into h_S, and the staging ring's copy (always on) */
     CHECK_EQ(n["kva_select"], 1);
     CHECK_EQ(n["kva_drop_rows"], 1);
     CHECK_EQ(n["moe_gemm_q"], 0);
@@ -2071,7 +2098,6 @@ TEST(a_mode_whose_kva_op_no_kernel_serves_is_refused_by_name) {
 TEST(a_switch_with_an_unknown_value_is_refused_naming_the_values) {
     struct Case { const char* name; const char* value; const char* allowed; };
     for (const Case& c : {Case{"RADIANCE_KVA", "fast", "off|plumb|speed|quality"},
-                          Case{"RADIANCE_KVA_PROJ_PLACE", "gpu", "vram|host"},
                           Case{"RADIANCE_KVA_ROWSEL_TABLE", "rare", "class|none|all"},
                           Case{"RADIANCE_KVA_STAGE", "never", "auto|stock"},
                           Case{"RADIANCE_KVA_STRADDLE", "middle", "split|end"},
@@ -2217,7 +2243,7 @@ TEST(the_forward_table_starts_empty) {
 TEST(the_staging_ring_copies_each_map_a_layer_ahead_on_lane_1) {
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
-    Env env({{"RADIANCE_KVA", "speed"}, {"RADIANCE_KVA_PROJ_PLACE", "host"}});
+    Env env({{"RADIANCE_KVA", "speed"}});
     RadBuilder kva;
     served(kva);
     hold_kva(kva, {"kva.proj", "kva.st"});
@@ -2239,7 +2265,7 @@ TEST(the_staging_ring_copies_each_map_a_layer_ahead_on_lane_1) {
     Batch bk = make_step(kva, {{2048}, 0, 2048});   /* a lean speed pass */
     const Run r = run_step(qwen4exp_kva::step, bk.b);
     std::vector<std::string> seq;   /* the ring's events and the projector GEMMs, in issue order */
-    for (const RecIssue& i : r.issues) {
+    for (const RecIssue& i : r.all) {
         if (i.op == kLane) seq.push_back("lane" + std::to_string(i.n));
         else if (i.op == kJoin) seq.push_back("join" + std::to_string(i.n / 16) + std::to_string(i.n % 16));
         else if (i.op == k.op_ring) {
@@ -2366,22 +2392,32 @@ TEST(an_int8_folder_uploads_its_maps_in_the_gemms_stored_form) {
     CHECK_EQ(kva.bufs[k.b_s8 - 1].second.dtype, (uint32_t)RAD_F32);
     CHECK(kva.concurrent.count(k.b_q8) && kva.concurrent.count(k.b_s8));
     CHECK_EQ(g_fake_i8.relayouts, 2 * (8 - kSplit));
-    auto copy_of = [&](const RadOperand& o) -> const Upload* {
-        for (const Upload& u : g_mem.copies) if (u.dst == o.raw) return &u;
-        return nullptr;
+    /* The row block, from the hook's sizes (each 256 bytes past the plane): codes at 0, scales at the
+     * next 256-byte boundary, the bias after them; whole rows of hc*n bf16. */
+    const int64_t codes = 2560LL * 10240 + 256, scales = 2560LL * 80 * 2 + 256;
+    const int64_t scale_at = (codes + 255) / 256 * 256, bias_at = (scale_at + scales + 255) / 256 * 256;
+    const int64_t rows = (bias_at + 5120 + 20479) / 20480;
+    auto relaid = [](const unsigned char* got, const unsigned char* src, int64_t plane) {
+        bool ok = true;
+        for (int64_t i = 0; i < plane + 256 && ok; ++i) ok = got[i] == (i < plane ? (unsigned char)(src[i] ^ 0x5A) : 0x77);
+        return ok;
     };
     for (int l = kSplit; l < 8; ++l) {
+        const std::string L = std::to_string(l);
         const RadOperand &w = k.proj_w[(size_t)l], &sc = k.proj_s[(size_t)l], &b = k.proj_b[(size_t)l];
-        const Upload *uw = copy_of(w), *us = copy_of(sc), *ub = copy_of(b);
-        REQUIRE(uw && us && ub);
-        CHECK(w.dtype == RAD_I8 && w.rows == 2560 && w.cols == 10240);
+        CHECK(w.dtype == RAD_I8 && w.rows == 2560 && w.cols == 10240 && w.raw == k.ring_dst[(size_t)l].raw);
         CHECK(sc.dtype == RAD_BF16 && sc.rows == 2560 && sc.cols == 80);
-        CHECK_EQ(uw->bytes, 2560LL * 10240 + 256);
-        CHECK_EQ(us->bytes, 2560LL * 80 * 2 + 256);
-        CHECK(ub->src == g_test_folder.tensors["proj." + std::to_string(l) + ".bias"].data && ub->bytes == 5120);
+        CHECK_EQ((uintptr_t)sc.raw, (uintptr_t)w.raw + (uintptr_t)scale_at);
+        CHECK_EQ((uintptr_t)b.raw, (uintptr_t)w.raw + (uintptr_t)bias_at);
+        CHECK_EQ(k.ring_src[(size_t)l].rows, rows);
+        CHECK_EQ(k.ring_dst[(size_t)l].rows, rows);
+        const unsigned char* block = (const unsigned char*)k.ring_src[(size_t)l].raw - kDeviceView;
+        CHECK(relaid(block, g_test_folder.tensors["proj." + L + ".codes"].data, 2560LL * 10240));
+        CHECK(relaid(block + scale_at, g_test_folder.tensors["proj." + L + ".scale"].data, 2560LL * 80 * 2));
+        CHECK(std::memcmp(block + bias_at, g_test_folder.tensors["proj." + L + ".bias"].data, 5120) == 0);
     }
-    CHECK(has(log, "; int8 maps"));
-    CHECK(kva.notes.size() && has(kva.notes.back(), "(int8, vram)"));
+    CHECK(has(log, "(int8 maps)"));
+    CHECK(kva.notes.size() && has(kva.notes.back(), "(int8, streamed from host)"));
 }
 
 /* Each issue as text, with this declare's handles named: the KVA ops by role, every other op and
@@ -2396,6 +2432,12 @@ std::vector<std::string> named(const std::vector<RecIssue>& v, const RadBuilder&
     if (k.op_bias) ops[k.op_bias] = "BIAS";
     std::vector<std::string> out;
     for (const RecIssue& r : v) {
+        if (r.op && r.op == k.op_ring) {   /* the row block differs by dtype: the layer it moves is what matters */
+            int l = -1;
+            for (int x = kSplit; x < 8; ++x) if (r.opd[1].raw == k.ring_dst[(size_t)x].raw && r.opd[0].raw == k.ring_src[(size_t)x].raw) l = x;
+            out.push_back("RING layer " + std::to_string(l));
+            continue;
+        }
         std::string t = (ops.count(r.op) ? ops[r.op] : std::to_string(r.op)) + " n" + std::to_string(r.n);
         for (const RadOperand& o : r.opd) {
             const bool vram = o.kind == RAD_OPK_RAW && (uintptr_t)o.raw >= kFakeVram && (uintptr_t)o.raw < kFakeVramEnd;
@@ -2471,7 +2513,7 @@ TEST(the_int8_projector_quantises_the_stream_once_then_gemm_and_bias_a_layer) {
         const qwen4exp_kva::Kva& k8 = qwen4exp_kva::g_kva[0];
         REQUIRE(k8.int8 && !kb.int8);
         const Run r8 = run_step(qwen4exp_kva::step, x.b);
-        const std::vector<std::string> got_t = named(r8.issues, i8, k8), want_t = as_int8(rb.issues, bf, kb, i8, k8);
+        const std::vector<std::string> got_t = named(r8.all, i8, k8), want_t = as_int8(rb.all, bf, kb, i8, k8);
         int quants = 0, bad = 0;
         for (const RecIssue& r : r8.issues) quants += r.op == k8.op_quant8;
         CHECK_EQ(quants, 1);
@@ -2490,24 +2532,6 @@ TEST(the_int8_projector_quantises_the_stream_once_then_gemm_and_bias_a_layer) {
             }
         CHECK_EQ(r8.device_calls, 0);
     }
-}
-
-/* Host placement moves bf16 maps (and its ring copies bf16 rows): with an int8 folder it is refused
- * by name and the engine serves stock -- the in-tree graph, nothing copied. */
-TEST(an_int8_folder_with_host_placement_serves_stock) {
-    RadModelMeta meta = flash_next_meta();
-    RadBuildCtx c = served_ctx();
-    Env env({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_PROJ_PLACE", "host"}});
-    RadBuilder stock, kva;
-    served(stock);
-    served(kva);
-    hold_kva_i8(kva);
-    hold_score(kva, "kva.rowsel.score");
-    REQUIRE_EQ(qwen4exp_fp8::declare(&stock, &meta, &c), RAD_OK);
-    const std::string log = stderr_of([&] { CHECK_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK); });
-    check_same_graph(stock, kva);
-    CHECK(g_mem.copies.empty());
-    CHECK(has(log, "holds int8 maps, which are placed in VRAM only"));
 }
 
 /* No int8 GEMM row in the loaded libraries, or rows that would read different stored bytes (one

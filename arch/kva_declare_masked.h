@@ -89,12 +89,11 @@ static void note_config(RadBuilder* b, const Kva& k) {
     const Config& c = k.cfg;
     char rows[24] = "any";
     if (c.stage_rows != INT64_MAX) std::snprintf(rows, sizeof rows, "<= %lld", (long long)c.stage_rows);
-    rad_note(b, "KVA: mode %s from layer %lld, tail %lld, tile %lld; projector %s (%s, %s), correction %s "
+    rad_note(b, "KVA: mode %s from layer %lld, tail %lld, tile %lld; projector %s (%s, streamed from host), correction %s "
                 "(alpha %g), row table %s, rows %s share %g seed %lld; stage %s (exact rows %s), "
                 "straddle %s%s%s",
              kModeNames[c.mode], (long long)k.split, (long long)c.tail, (long long)k.tile,
-             g_loaded.folder.place.dir.c_str(), k.int8 ? "int8" : "bf16", kPlaceNames[c.place],
-             k.have_st ? "held" : "absent",
+             g_loaded.folder.place.dir.c_str(), k.int8 ? "int8" : "bf16", k.have_st ? "held" : "absent",
              c.alpha, k.have_rowsel ? kScoreNames[c.rowsel_table] : "absent",
              kRowselNames[c.rowsel], c.share, (long long)c.seed, kStageNames[c.stage],
              rows, kStraddleNames[c.straddle],
@@ -124,13 +123,6 @@ static bool take_folder(RadBuilder* b, const RadModelMeta* meta, const qwen4exp_
     const Loaded& l = load_folder(meta, b, m);
     const Config& c = k.cfg;
     if (!l.usable) return false;
-    if (l.int8 && c.place == PLACE_HOST && c.mode != MODE_PLUMB) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: the projector %s holds int8 maps, which are "
-                             "placed in VRAM only; RADIANCE_KVA_PROJ_PLACE=host moves bf16 maps (point "
-                             "RADIANCE_KVA_PROJECTOR at the bf16 folder, or unset the placement); serving stock\n",
-                     l.folder.place.dir.c_str());
-        return false;
-    }
     if (c.mode == MODE_QUALITY && !tensor(l.folder, kScoreNames[c.rowsel_table])) {
         std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: mode quality selects exact rows from the "
                              "table '%s', and the projector %s holds none; serving stock\n",

@@ -44,24 +44,22 @@
  *
  *   env RADIANCE_KVA_PROJECTOR    the folder, ahead of projector/ beside the model file. A folder
  *                                 whose manifest says "projector": {"dtype": "i8"} (tools/kva_projector.py
- *                                 int8) holds the int8 maps: half the VRAM, read by the engine's int8 GEMM
- *                                 (kva_int8.h); vram placement only
- *   env RADIANCE_KVA_PROJ_PLACE   vram | host: where the projector maps live. vram costs ~1.2 GiB
- *                                 of each card (fewer resident experts); host costs nothing on
- *                                 the card and reads the maps over the link on every
- *                                 approximated chunk (slower ON chunks, R148)        default vram
- *   env RADIANCE_KVA_PROJ_RING    1 | 0: with host placement, copy each late layer's map into one of
- *                                 two VRAM slots on the second lane ahead of its GEMM (Dylan's DD-L,
- *                                 2 x 50 MiB a card), or let the GEMM read host memory directly
- *                                 (0: every M tile re-reads the map over the link -- measured
- *                                 2.7x slower than exact at 16K/32K; the ring +6%/+10% over
- *                                 vram, notes/aprime.md R148)                             default 1
+ *                                 int8) holds the int8 maps: half the bytes on the link, read by the
+ *                                 engine's int8 GEMM (kva_int8.h)
+ *
+ * THE PROJECTOR IS ALWAYS STREAMED FROM HOST MEMORY (Dylan, 2026-10-05): its maps live in host-mapped
+ * memory and each late layer's map is copied into one of two VRAM slots on the second lane ahead of
+ * its GEMM (kva_projector.h, kva_layer.h ring_*). There is no placement choice: maps kept in VRAM cost
+ * ~1,100 resident expert slots a card and made a configuration stock serves refuse to start (the
+ * pinned pool overflowed at --max-num-batched-tokens 8192 --max-num-seqs 10), and the plugin cannot
+ * see the engine's budget at declare to choose safely (notes/stagee.md §8).
  *   env RADIANCE_KVA_ROWSEL_TABLE class -> score   none -> score_none (R41)
  *                                 all   -> score_all (every id a match: R35')
  *
  * RETIRED with the container append (A'), refused by name so an old command line cannot silently
  * run something else: RADIANCE_KVA_PROJ and RADIANCE_KVA_ST (a variant is its own folder now:
- * point RADIANCE_KVA_PROJECTOR at it) and RADIANCE_KVA_DECLARE (tools/dev/README.md).
+ * point RADIANCE_KVA_PROJECTOR at it) and RADIANCE_KVA_DECLARE (tools/dev/README.md). RETIRED with
+ * the vram placement (Stage E): RADIANCE_KVA_PROJ_PLACE and RADIANCE_KVA_PROJ_RING.
  */
 #ifndef QWEN4EXP_KVA_CONFIG_H
 #define QWEN4EXP_KVA_CONFIG_H
@@ -80,13 +78,11 @@ enum Mode     { MODE_OFF = 0, MODE_PLUMB, MODE_SPEED, MODE_QUALITY };
 enum Rowsel   { ROWSEL_CLASS = 0, ROWSEL_RANDOM, ROWSEL_ALL };
 enum Stage    { STAGE_AUTO = 0, STAGE_STOCK };
 enum Straddle { STRADDLE_SPLIT = 0, STRADDLE_END };
-enum Place    { PLACE_VRAM = 0, PLACE_HOST };
 
 static const char* const kModeNames[]     = { "off", "plumb", "speed", "quality" };
 static const char* const kRowselNames[]   = { "class", "random", "all" };
 static const char* const kStageNames[]    = { "auto", "stock" };
 static const char* const kStraddleNames[] = { "split", "end" };
-static const char* const kPlaceNames[]    = { "vram", "host" };
 
 /* The shortest exact tail the method was ever run at (tcc's MIN_TAIL, KVA-FACTS §5). */
 constexpr int64_t kMinTail = 512;
@@ -102,8 +98,6 @@ struct Config {
     double      share       = 0.25;
     int64_t     seed        = 0;
     int         rowsel_table = 0;          /* kScoreNames' index: score, score_none, score_all */
-    int         place       = PLACE_VRAM;
-    bool        ring        = true;        /* host placement: stage each layer's map through VRAM */
     int         stage       = STAGE_AUTO;
     int64_t     stage_rows  = INT64_MAX;   /* always stream: notes/impl.md A.1 R96, the guard's trade */
     bool        score_bulk  = false;
@@ -183,13 +177,16 @@ inline int read_variants(Config* c) {
                          retired, v);
             return RAD_E_INVAL;
         }
-    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_ROWSEL_TABLE", { "class", "none", "all" },
-                             "class|none|all", &c->rowsel_table));
-    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_PROJ_PLACE", { "vram", "host" }, "vram|host", &c->place));
-    int ring = 1;
-    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_PROJ_RING", { "1", "0" }, "1|0", &ring));
-    c->ring = ring == 0;   /* index 0 is "1" */
-    return RAD_OK;
+    for (const char* retired : { "RADIANCE_KVA_PROJ_PLACE", "RADIANCE_KVA_PROJ_RING" })
+        if (const char* v = env(retired)) {
+            std::fprintf(stderr, "radiance: qwen4exp_kva: %s=%s is retired: the projector is always "
+                                 "streamed from host memory through the staging ring (maps kept in VRAM "
+                                 "could make a configuration stock serves refuse to start); unset it\n",
+                         retired, v);
+            return RAD_E_INVAL;
+        }
+    return read_choice("RADIANCE_KVA_ROWSEL_TABLE", { "class", "none", "all" }, "class|none|all",
+                       &c->rowsel_table);
 }
 
 /* The stager lever, the KL switch and the gate-only debug switches. */

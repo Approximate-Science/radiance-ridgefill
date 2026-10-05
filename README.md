@@ -70,9 +70,7 @@ naming both, and runs. `arch/kva_config.h` is the full list of switches.
 | `RADIANCE_KVA_ALPHA` | 0..1, default 1 | correction strength |
 | `RADIANCE_KVA_ROWSEL` | `class`, `random`, `all` | quality mode's exact-row rule |
 | `RADIANCE_KVA_SHARE` | (0, 1], default 0.25 | share of a window's class matches kept exact |
-| `RADIANCE_KVA_PROJECTOR` | a directory | the projector folder, ahead of `projector/` beside the model |
-| `RADIANCE_KVA_PROJ_PLACE` | `vram` (default), `host` | where the projector maps live. `vram` costs 1.2 GiB of each card (~970 fewer resident expert slots a rank); `host` keeps them in host-mapped memory and copies each late layer's map into one of two VRAM slots (100 MiB a card) ahead of its GEMM, so approximated chunks run slower: measured quality TTFT +6% at 16K and +10% at 32K against `vram`, which at 16K is level with exact (+2.5%, CI includes 0), at 32K still 25% faster than exact (notes/aprime.md, R148) |
-| `RADIANCE_KVA_PROJ_RING` | `1` (default), `0` | gate-only: `0` lets the GEMM read the host maps in place -- measured 2.7x SLOWER than exact (every M tile re-reads the map over the link); do not serve with it |
+| `RADIANCE_KVA_PROJECTOR` | a directory | the projector folder, ahead of `projector/` beside the model. A folder built by `tools/kva_projector.py int8 --from <bf16 folder> --out <dir>` holds the maps in int8 (the container trunk's own `i8*bf16[1x128]` encoding, 0.65 GiB instead of 1.23 GiB, half the bytes each approximated chunk streams); point this switch at it to use it |
 | `RADIANCE_KVA_ROWSEL_TABLE` | `class`/`none`/`all` | which of the folder's row tables quality mode uses (`none`/`all` are controls) |
 | `RADIANCE_KVA_STAGE` | `auto` (default), `stock` | the expert-stager lever: `auto` lets the late layers stream only their routed experts on an approximate pass (notes/impl.md §2); `stock` leaves staging as it is |
 | `RADIANCE_KVA_STAGE_ROWS` | rows | `auto` streams only when the pass has at most this many exact rows, else the pass runs the stock step. Default: no limit -- measured on warmed servers, streaming beats the stock step by 220-240 ms a straddling chunk at 512-1,984 exact rows, and a 64-row limit cost 331 ms at 9,216 and ran every T 2560 chunk exact (notes/impl.md, Stage A.1 R96) |
@@ -80,6 +78,15 @@ naming both, and runs. `arch/kva_config.h` is the full list of switches.
 | `RADIANCE_KVA_STRADDLE`, `RADIANCE_KVA_FORCE_SPLIT`, `RADIANCE_KVA_SHIFT_B`, `RADIANCE_KVA_FORCE_STREAM` | `split`/`end`, rows, ±rows, `1` | gate-only debug switches (R50, R47, R51, R94); each is said loudly at startup |
 | `RADIANCE_KVA_DUMP` | a directory | debug only, synchronises mid-step: the layer-S stream of every approximate chunk (`boundary.p<P>.npy` + `boundary.jsonl`) and the device mask of every masked one (`mask.jsonl`, `rows.jsonl`) |
 | `RADIANCE_KVA_PROJ`, `RADIANCE_KVA_ST`, `RADIANCE_KVA_DECLARE` | -- | retired with the container append; refused by name |
+| `RADIANCE_KVA_PROJ_PLACE`, `RADIANCE_KVA_PROJ_RING` | -- | retired: the projector is always streamed from host memory (below); refused by name |
+
+**Where the projector lives:** in host memory, always. Each rank holds the maps in one host-mapped block (1.2 GiB
+bf16, 0.6 GiB int8) and two VRAM slots of one late layer's map (2 × 50 MiB bf16, 2 × 25.4 MiB int8); on every
+approximated chunk the second lane copies layer L+1's map into the free slot while layer L computes. VRAM costs the
+slots, this rank's correction heads (27 MiB) and the row table (1 MiB) -- about 1% of the resident expert slots.
+Keeping the maps in VRAM instead (an earlier option, removed) cost ~1,100 expert slots a card and made a
+configuration stock radiance serves refuse to start (`--max-num-batched-tokens 8192 --max-num-seqs 10`: the pinned
+pool overflowed), and the plugin cannot see the engine's budget when it declares (notes/stagee.md §8).
 
 A mode with no usable projector serves stock and says why. A configuration that cannot run refuses at
 startup by name (tail of two steps less a tile or more, kva.so missing, or libr4d not loaded -- kva.so's
