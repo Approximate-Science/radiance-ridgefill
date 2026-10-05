@@ -3,6 +3,12 @@
 #
 #   gpuq.sh release env RK_RELEASE_VERSION=0.1.0 sh scripts/release_session.sh   (from a checkout of main's HEAD)
 #
+# A VERSION CHANGE RE-RUNS ONLY THE VERSION-DEPENDENT PART (the measurements never read the version string):
+#   gpuq.sh release-pkg env RK_RELEASE_PARTS="package e2e" RK_RELEASE_VERSION=<x.y.z> RK_RELEASE_DIST=<fresh dir> \
+#       sh scripts/release_session.sh
+# RK_RELEASE_PARTS (default "package e2e measure") picks the parts; the frozen home of RK_RELEASE_COMMIT (default HEAD)
+# is reused when it exists; extraction and the e2e work dir are per version (evidence/release/{extract,e2e}-<version>).
+#
 # Every server runs radiance 1.0.13's shipped flashnext profile (RK_RELEASE_FLAGS, below: MTP 3, prefix cache on with
 # host and disk tiers, 2,048-token steps, wht6 wire, 8 sequences), headroom 3,072 MiB instead of 96. Only the
 # R64 servers add --num-speculative-tokens 0 --profile-ops (the logits capture follows one greedy decoder and must
@@ -24,7 +30,9 @@ set -u
 W=$(CDPATH= cd "$(dirname "$0")/.." && pwd)
 cd "$W" || exit 1
 D=$(readlink -f "$W/data")
-COMMIT=$(git rev-parse HEAD) SHORT=$(git rev-parse --short HEAD)
+COMMIT=$(git rev-parse "${RK_RELEASE_COMMIT:-HEAD}") SHORT=$(git rev-parse --short "${RK_RELEASE_COMMIT:-HEAD}")
+: "${RK_RELEASE_PARTS:=package e2e measure}"
+has() { case " $RK_RELEASE_PARTS " in *" $1 "*) return 0 ;; esac; return 1; }
 E=$W/evidence/release; mkdir -p "$E"
 : "${RK_RELEASE_VERSION:=0.1.0}"
 # the radiance release the plugin is built against and served on (1.0.13 since the rebase, Dylan 2026-10-05):
@@ -64,29 +72,40 @@ quiet() {
     [ $n -ge 60 ] && break; sleep 10; n=$((n + 1)); done
   echo "load $(cut -d' ' -f1 /proc/loadavg) busy $busy waited $((n * 10))s"
 }
-log "RELEASE start $(date -u +%FT%TZ) boot $(cat /proc/sys/kernel/random/boot_id) commit $COMMIT version $RK_RELEASE_VERSION; radiance $RK_RADIANCE_VERSION ($RK_IMAGE, build $RK_BUILD_IMAGE, source $RK_RADIANCE_SRC)"
+log "RELEASE start $(date -u +%FT%TZ) boot $(cat /proc/sys/kernel/random/boot_id) parts '$RK_RELEASE_PARTS' commit $COMMIT version $RK_RELEASE_VERSION; radiance $RK_RADIANCE_VERSION ($RK_IMAGE, build $RK_BUILD_IMAGE, source $RK_RADIANCE_SRC)"
 
 # 0 + 1 ------------------------------------------------------------------------------------------------
-scripts/frozen_home.sh "$SHORT" > "$E/frozen_home.out" 2>&1 ||
-  { log "frozen home FAILED: $(grep -E 'FAIL|error' "$E/frozen_home.out" | head -5 | tr '\n' '|')"; exit 2; }
-log "home $SHORT: $(grep 'tests passed' "$E/frozen_home.out")"
+X=$E/extract-$RK_RELEASE_VERSION
+if has package; then
+if [ -f "$D/home-$SHORT/kernels/kva.so" ] && [ -f "$E/frozen_home-$SHORT.out" ]; then
+  log "home $SHORT: reused ($(grep 'tests passed' "$E/frozen_home-$SHORT.out"))"
+else
+  scripts/frozen_home.sh "$SHORT" > "$E/frozen_home-$SHORT.out" 2>&1 ||
+    { log "frozen home FAILED: $(grep -E 'FAIL|error' "$E/frozen_home-$SHORT.out" | head -5 | tr '\n' '|')"; exit 2; }
+  log "home $SHORT: $(grep 'tests passed' "$E/frozen_home-$SHORT.out")"
+fi
 python3 tools/package.py --home "$D/home-$SHORT" --projector "$D/projector-qwen38fn-int8" --out "$RK_RELEASE_DIST" \
-  --version "$RK_RELEASE_VERSION" --commit "$COMMIT" --radiance-version "$RK_RADIANCE_VERSION" > "$E/package.out" 2>&1 ||
-  { log "package FAILED: $(tail -3 "$E/package.out" | tr '\n' '|')"; exit 2; }
+  --version "$RK_RELEASE_VERSION" --commit "$COMMIT" --radiance-version "$RK_RADIANCE_VERSION" > "$E/package-$RK_RELEASE_VERSION.out" 2>&1 ||
+  { log "package FAILED: $(tail -3 "$E/package-$RK_RELEASE_VERSION.out" | tr '\n' '|')"; exit 2; }
 (cd "$RK_RELEASE_DIST" && sha256sum -c SHA256SUMS) > "$E/dist-sums.txt" 2>&1 || { log "dist SHA256SUMS FAILED"; exit 2; }
-X=$E/extract; rm -rf "$X"; mkdir -p "$X"
+rm -rf "$X"; mkdir -p "$X"
 for t in "$RK_RELEASE_DIST"/*.tar.gz; do tar -xzf "$t" -C "$X"; done
 for d in "$X"/*/; do (cd "$d" && sha256sum -c SHA256SUMS) >> "$E/dist-sums.txt" 2>&1 || { log "SHA256SUMS FAILED in $d"; exit 2; }; done
 log "dist: $(cd "$RK_RELEASE_DIST" && ls -1 | tr '\n' ' '); every SHA256SUMS verified ($(grep -c ': OK$' "$E/dist-sums.txt") files)"
 cat "$RK_RELEASE_DIST/SHA256SUMS" | tee -a "$E/session.log"
+fi
+[ -d "$X" ] || { log "no extracted packages for version $RK_RELEASE_VERSION ($X): run the package part"; exit 2; }
 PLUGIN=$(ls -d "$X"/radiance-kva-*/ | head -1); PROJ=$(ls -d "$X"/projector-qwen3.8-flash-next-*/ | head -1)
 export RK_PLUGIN_HOME=${PLUGIN%/}
 MOUNT="-v ${PROJ%/}:/models/projector:ro"   # the extracted projector beside the model, as a user lays it out
 
 # 2 ----------------------------------------------------------------------------------------------------
-RK_DIST=$RK_RELEASE_DIST RK_E2E_WORK=$E/e2e RK_E2E_CACHE_ROOT=$K/e2e scripts/e2e_fresh.sh > "$E/e2e.out" 2>&1; rc=$?
-log "e2e exit $rc: $(grep -E '^e2e: case' "$E/e2e.out" | sed 's/^e2e: //' | tr '\n' '|')"
+if has e2e; then
+RK_DIST=$RK_RELEASE_DIST RK_E2E_WORK=$E/e2e-$RK_RELEASE_VERSION RK_E2E_CACHE_ROOT=$K/e2e scripts/e2e_fresh.sh > "$E/e2e-$RK_RELEASE_VERSION.out" 2>&1; rc=$?
+log "e2e exit $rc: $(grep -E '^e2e: case' "$E/e2e-$RK_RELEASE_VERSION.out" | sed 's/^e2e: //' | tr '\n' '|')"
 klog
+fi
+has measure || { log "RELEASE end $(date -u +%FT%TZ) (parts: $RK_RELEASE_PARTS)"; exit 0; }
 
 # 3 + 4 ------------------------------------------------------------------------------------------------
 N=$E/needle; mkdir -p "$N"
