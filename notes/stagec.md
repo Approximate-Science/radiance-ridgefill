@@ -60,3 +60,11 @@ F1-F5 (floor) and H1-H8 (hazard wiring) all caught.
   predicted (engine checkpoint retention), so none of their tail came from cache. `hazard_rate.py
   --require-match` therefore reports DISAGREE (its superset vs the device's exact count). Rerun planned
   with one document per triple and enough `--checkpoint-slots`.
+
+**R64 redefined (orchestrator, 18:25Z, agreeing with the reading above).** Turn 2 with the cache and
+turn 2 without it are EACH scored against exact (KL / NLL on the same positions); bar: cached KL <=
+no-cache KL within noise (the cache must never make a follow-up worse than recomputing it), and both
+within the quality-mode budget already accepted. Reason: with the cache, turn 2 resumes from turn 1's
+snapshot, whose own exact tail stayed exact; a no-cache recompute of the longer turn-2 prompt
+approximates those positions -- so the two differ by design and identity is the wrong bar.
+**R65 corpus bar (orchestrator)**: >= 8 real branches before R65/R66 are read.
