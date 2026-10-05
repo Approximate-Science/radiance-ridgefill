@@ -335,9 +335,24 @@ round's stock 9,981 / 19,393 ms; tables: `evidence/stagee/scripts/s4table.py evi
   at (no default changed here).
 - int8-a's 32K sample was lost to a measurement-hygiene slip: an interactive command naming a path outside the repo
   that matches the preflight's squatter pattern ran at the moment of a check (the preflight fails closed on a process
-  it cannot read). Since then every command run during samples carries the repo path, which the preflight skips.
+  it cannot read). Since then every command run during MY samples carries the repo path, which my preflight skips;
+  during another lane's samples (whose preflight skips only its own repo) no command of mine names the pattern.
 - **R85 (production wire `--tp-wire wht6`), minimal: GREEN.** plumb rows byte-identical to stock under wht6. Quality
   T2560 paired vs stock under wht6: last 512 −0.0025 [−0.0145, +0.0103]; whole tail (last 2,047) +0.0102 [+0.0025,
   +0.0176] -- the same metric on the exact wire (S1's rows, plumb = stock) is +0.0021 [−0.0126, +0.0157] and +0.0131
   [+0.0020, +0.0235]: the production wire adds nothing to KVA's cost.
 - The held-cost controls of this session are in §14.
+
+## 16. main merged into stage-e (b316096, 2026-10-05 ~19:25Z) -- merge-readiness
+- main had moved (Stage B merged: 185e31b R56's min-bulk-rows gate, 1252304 R53' mixed set, 173dfc4 speed beside
+  decoders, Stage C/F tools, release docs). `git merge-tree` showed one textual conflict (kva_config.h, two switch docs
+  added at the same line: both kept) and the build would have hidden two semantic ones, fixed in the merge:
+  - `RADIANCE_KVA_MIN_BULK_ROWS` defaulted on the placement (`c->place == PLACE_HOST`); host is the only placement
+    here, so the default is 1,024 unconditionally; B's test no longer sets the retired PROJ_PLACE (refused by name).
+  - B's speed-beside-decoders path projected with its own bf16-only GEMM after the two-slot `ring_next`: with an
+    int8 folder it would have run a bf16 GEMM over int8 codes. It now goes through `project_rows` (`project_beside`),
+    and the int8-vs-bf16 issue comparison covers that path too.
+- main untracks the `evidence` symlink (1a53237), so the merge deleted this worktree's shared link: recreated at once
+  from `git show 1a53237^:evidence` (no session had started; nothing written in between).
+- Verification: S4 builds its frozen home from b316096 (the host suite, static case set included, runs in that build;
+  falls back to 6a68dde if it fails) and measures everything on it; its mutants run on that source.
