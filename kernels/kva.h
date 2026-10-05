@@ -1,9 +1,10 @@
-/* kva.h -- what the three KVA ops share between the row table, the host rows and the device rows.
+/* kva.h -- what the KVA ops share between the row table, the host rows and the device rows.
  *
  * The plugin is one .so with a host row (the oracle, plain C++) and a device row per op. The
  * operand parsing is host code shared by both rows, so a device row can never accept an operand
  * its oracle would refuse. The few formulas that DEFINE an op's answer -- the row hash of the
- * random selector, the rho clamp, softplus, the bf16 decode -- are written once here and compiled
+ * random selector, kva_mask's window, the rho clamp, softplus, the bf16 decode -- are written once
+ * here and compiled
  * for both sides, so "host == device" is a statement about the kernels and not about two spellings
  * of one definition.
  */
@@ -21,21 +22,23 @@
 #define KVA_HD
 #endif
 
-/* The device selector keeps one 4-byte key per row in LDS: this many rows is 32 KiB of the 64 KiB
- * a dispatch may use (docs/PLUGIN.md, "What a launch may do"). It is also the engine's default
- * --max-num-batched-tokens, so the device row serves every chunk the scheduler cuts by default;
- * a larger step falls to no device row for that band and is refused at issue, by name. */
-enum { KVA_ROWSEL_MAX_ROWS = 8192, KVA_ROWSEL_THREADS = 256 };
+/* kva_mask's device row keeps one 4-byte key per window row in LDS: this many rows is 32 KiB of
+ * the 64 KiB a dispatch may use (docs/PLUGIN.md, "What a launch may do"). The window is at most
+ * the bulk end b rows (b' <= b), so the row is constrained to M (issued at b) <= this, which is
+ * also the engine's default --max-num-batched-tokens; a larger band falls to no device row and is
+ * refused at issue, by name. The mask itself (n rows) is not bounded by it. */
+enum { KVA_MASK_MAX_ROWS = 8192, KVA_MASK_THREADS = 256 };
 
 /* softplus' large-x cutoff: above it log1p(e^x) is x to every bit f32 holds. The value libref and
  * libr4d default `softplus_thr` to, and torch.nn.functional.softplus's threshold, which is what the
  * reference (kva b0/worker_ext.py log_gate) used. */
 #define KVA_SOFTPLUS_THRESHOLD 20.0f
 
-enum { KVA_MODE_CLASS = 0, KVA_MODE_RANDOM = 1, KVA_MODE_ALL = 2 };
+/* kva_mask's `mode`, in the order rows.cpp's constraint and the parse spell them. */
+enum { KVA_MODE_NONE = 0, KVA_MODE_CLASS = 1, KVA_MODE_RANDOM = 2, KVA_MODE_ALL = 3 };
 
 /* Operand positions, in schema order (rows.cpp holds the schemas). */
-enum { RS_TOKENS = 0, RS_POS, RS_SCORE, RS_ROWS, RS_MASK };
+enum { MK_CU = 0, MK_TOKENS, MK_POS, MK_SCORE, MK_MASK, MK_BOUNDS };
 enum { RH_A = 0, RH_MASK, RH_ALOG, RH_DTBIAS, RH_ND, RH_SIDX, RH_BOUNDS };
 enum { SC_STATE = 0, SC_STATE_IDX, SC_APPLIED, SC_APPLIED_IDX, SC_C, SC_ND, SC_ND_IDX, SC_BOUNDS };
 enum { SR_STATE = 0, SR_STATE_IDX, SR_OUT };
@@ -90,16 +93,41 @@ KVA_HD inline float kva_bf16_to_f32(uint16_t h) {
  * VALUE as the device kernel's argument, so every field is a plain scalar or pointer (all three
  * structs are well under the 768-byte argument limit). */
 
-typedef struct KvaRowsel {
-    const int32_t* tokens;  int64_t n;       /* [n] token ids of the chunk */
-    const int32_t* positions; int64_t pos_stride;  /* token t's absolute position: positions[t * pos_stride] */
-    const float*   score;   int64_t vocab;   /* [vocab] per-id score; non-finite = not a match */
-    int32_t*       rows;    int64_t cap;     /* [cap] selected rows, ascending, -1 padded */
-    int32_t*       mask;                     /* [n] 1 = approximated (not selected) */
+typedef struct KvaMask {
+    const int32_t* cu_last;                  /* [2] {s, e}; device memory on the device row */
+    const int32_t* tokens;  int64_t b;       /* [b] ids of rows [0, b): b is the bulk end */
+    const int32_t* positions; int64_t pos_stride;  /* row i's absolute position: positions[i * pos_stride] */
+    const float*   score;   int64_t vocab;   /* [vocab]; null (absent) only in none / all mode */
+    int32_t*       mask;    int64_t n;       /* [n], every row written: 1 = approximated */
+    int32_t*       bounds;                   /* [4] {s, b', b', e} */
     double         share;
     long long      seed;
     int            mode;                     /* KVA_MODE_* */
-} KvaRowsel;
+} KvaMask;
+
+/* kva_mask's window W = [s, b') of the step's last sequence -- s, e from cu_last, b the bulk end,
+ * b' = min(max(b, s), e) -- into w[0..2] = {s, b', e}. False when cu_last is out of order (s < 0,
+ * s > e or e > n): the host row refuses that. The device row cannot (the values are device memory
+ * and a return code would need a synchronize), so it takes the window EMPTY inside the clamped
+ * [s, e]: every row exact, the plain model, rather than approximating rows nobody chose. */
+KVA_HD inline bool kva_mask_window(int64_t s, int64_t e, int64_t b, int64_t n, int64_t* w) {
+    const bool valid = s >= 0 && s <= e && e <= n;
+    const int64_t end = e < 0 ? 0 : (e > n ? n : e);
+    const int64_t start = s < 0 ? 0 : (s > end ? end : s);
+    const int64_t bulk = b < start ? start : (b > end ? end : b);
+    w[0] = start;
+    w[1] = valid ? bulk : start;
+    w[2] = end;
+    return valid;
+}
+
+/* Row i's class score, -inf when the row does not match: a non-finite score (NaN fails both
+ * compares) or an id outside the table. */
+KVA_HD inline float kva_mask_score(const KvaMask* g, int64_t i) {
+    const int32_t id = g->tokens[i];
+    const float s = id >= 0 && id < g->vocab ? g->score[id] : -INFINITY;
+    return s > -INFINITY && s < INFINITY ? s : -INFINITY;
+}
 
 typedef struct KvaRho {
     const void*    a;       int64_t a_pitch, a_col; int a_bf16;   /* [n, n_head], any strides */
@@ -169,19 +197,19 @@ extern "C" {
 #endif
 
 /* host_ref.cpp: operand checks shared by both rows. RAD_OK or a named refusal. */
-int kva_rowsel_parse(const RadArgs* a, KvaRowsel* out);
+int kva_mask_parse(const RadArgs* a, KvaMask* out);
 int kva_rho_parse(const RadArgs* a, KvaRho* out);
 int kva_correct_parse(const RadArgs* a, KvaCorrect* out);
 int kva_state_read_parse(const RadArgs* a, KvaStateRead* out);
 
 /* host_ref.cpp: the host rows (oracles). */
-int kva_rowsel_host(const RadArgs* a, RadStream s);
+int kva_mask_host(const RadArgs* a, RadStream s);
 int kva_rho_host(const RadArgs* a, RadStream s);
 int kva_correct_host(const RadArgs* a, RadStream s);
 int kva_state_read_host(const RadArgs* a, RadStream s);
 
-/* rowsel.hip, rho.hip, state_correct.hip: the device rows. */
-int kva_rowsel_device(const RadArgs* a, RadStream s);
+/* mask.hip, rho.hip, state_correct.hip: the device rows. */
+int kva_mask_device(const RadArgs* a, RadStream s);
 int kva_rho_device(const RadArgs* a, RadStream s);
 int kva_correct_device(const RadArgs* a, RadStream s);
 int kva_state_read_device(const RadArgs* a, RadStream s);

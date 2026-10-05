@@ -1,5 +1,5 @@
-# kva -- the kernel library of the KVA / RidgeFill plugin: kva_rowsel, kva_rho_update and
-# kva_state_correct, a host row (the oracle) and a device row each.
+# kva -- the kernel library of the KVA / RidgeFill plugin: kva_mask, kva_rho_update,
+# kva_state_correct and kva_state_read, a host row (the oracle) and a device row each.
 #
 # Built from the plugin's top-level CMakeLists.txt (add_subdirectory), or on its own against an
 # installed radiance -- `cmake -S kernels -B build -DCMAKE_PREFIX_PATH=<radiance prefix>` -- the
@@ -37,7 +37,7 @@ endif()
 
 set(KVA_HIP_SOURCES "")
 if(KVA_HIP)
-  set(KVA_HIP_SOURCES rowsel.hip rho.hip state_correct.hip)
+  set(KVA_HIP_SOURCES mask.hip rho.hip state_correct.hip)
 endif()
 
 rad_add_plugin(kva kernels SOURCES rows.cpp host_ref.cpp HIP_SOURCES ${KVA_HIP_SOURCES})

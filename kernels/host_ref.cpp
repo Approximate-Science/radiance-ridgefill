@@ -57,37 +57,41 @@ static int parse_mode(const char* s, const char* const* names, int n) {
     return -1;
 }
 
-extern "C" int kva_rowsel_parse(const RadArgs* a, KvaRowsel* g) {
-    const RadTensor* tok = rad_arg_in(a, RS_TOKENS);
-    const RadTensor* pos = rad_arg_in(a, RS_POS);
-    const RadTensor* score = rad_arg_in(a, RS_SCORE);
-    const RadTensor* rows = rad_arg_in(a, RS_ROWS);
-    const RadTensor* mask = rad_arg_in(a, RS_MASK);
-    if (!tok || !pos || !score || !rows || !mask) return RAD_E_INVAL;
-    if (tok->dtype != RAD_I32 || pos->dtype != RAD_I32 || score->dtype != RAD_F32 ||
-        rows->dtype != RAD_I32 || mask->dtype != RAD_I32) return RAD_E_DTYPE;
-    if (!dense(tok) || !dense(score) || !dense(rows) || !dense(mask)) return RAD_E_STRIDE;
-    static const char* const modes[] = { "class", "random", "all" };
-    long long cap = -1, seed = 0;
-    g->mode = parse_mode(rad_args_gets(a, "mode"), modes, 3);
+/* Every check that needs no operand VALUE: cu_last is device memory on the device row, so its
+ * order (s <= e <= n) is checked where it is read (kva_mask_window). */
+extern "C" int kva_mask_parse(const RadArgs* a, KvaMask* g) {
+    const RadTensor* cu = rad_arg_in(a, MK_CU);
+    const RadTensor* tok = rad_arg_in(a, MK_TOKENS);
+    const RadTensor* pos = rad_arg_in(a, MK_POS);
+    const RadTensor* score = rad_arg_in(a, MK_SCORE);   /* optional: none / all never read it */
+    const RadTensor* mask = rad_arg_in(a, MK_MASK);
+    const RadTensor* bounds = rad_arg_in(a, MK_BOUNDS);
+    static const char* const modes[] = { "none", "class", "random", "all" };
+    g->mode = parse_mode(rad_args_gets(a, "mode"), modes, 4);
     g->share = rad_args_getf_or(a, "share", NAN);
-    if (g->mode < 0 || !rad_args_geti(a, "cap", &cap) || !rad_args_geti(a, "seed", &seed) ||
-        !(g->share >= 0.0 && g->share <= 1.0)) return RAD_E_INVAL;
-    g->n = rad_tensor_numel(tok);
-    g->vocab = rad_tensor_numel(score);
-    /* `cap` is a CAPACITY: written by the operand's extent, bounded by the parameter. */
-    g->cap = cap < rad_tensor_numel(rows) ? cap : rad_tensor_numel(rows);
-    /* Positions: [n], or component-major [c, n] whose row 0 is the index (RadBatch::rope_pos's
-     * layout); token t is at t * the last axis' stride either way. */
-    if (pos->rank < 1 || pos->rank > 2) return RAD_E_SHAPE;
-    g->pos_stride = pos->stride[pos->rank - 1];
-    if (cap < 0 || rad_tensor_numel(mask) < g->n || pos->shape[pos->rank - 1] < g->n)
-        return RAD_E_SHAPE;
+    long long seed = 0;
+    const bool ranked = g->mode == KVA_MODE_CLASS || g->mode == KVA_MODE_RANDOM;
+    if (!cu || !tok || !pos || !mask || !bounds || (ranked && !score) || g->mode < 0 ||
+        !rad_args_geti(a, "seed", &seed) || !(g->share >= 0.0 && g->share <= 1.0)) return RAD_E_INVAL;
+    if (cu->dtype != RAD_I32 || tok->dtype != RAD_I32 || pos->dtype != RAD_I32 ||
+        mask->dtype != RAD_I32 || bounds->dtype != RAD_I32 || (score && score->dtype != RAD_F32))
+        return RAD_E_DTYPE;
+    if (!dense(cu) || !dense(tok) || !dense(mask) || !dense(bounds) || (score && !dense(score)))
+        return RAD_E_STRIDE;
+    g->b = rad_tensor_numel(tok);
+    /* Positions: [b], or component-major [c, b] whose row 0 is the index (RadBatch::rope_pos's
+     * layout); row i is at i * the last axis' stride either way. */
+    if (pos->rank < 1 || pos->rank > 2 || pos->shape[pos->rank - 1] < g->b ||
+        rad_tensor_numel(cu) < 2 || rad_tensor_numel(bounds) < 4) return RAD_E_SHAPE;
+    g->cu_last = (const int32_t*)cu->data;
     g->tokens = (const int32_t*)tok->data;
     g->positions = (const int32_t*)pos->data;
-    g->score = (const float*)score->data;
-    g->rows = (int32_t*)rows->data;
+    g->pos_stride = pos->stride[pos->rank - 1];
+    g->score = score ? (const float*)score->data : nullptr;
+    g->vocab = score ? rad_tensor_numel(score) : 0;
     g->mask = (int32_t*)mask->data;
+    g->n = rad_tensor_numel(mask);
+    g->bounds = (int32_t*)bounds->data;
     g->seed = seed;
     return RAD_OK;
 }
@@ -207,45 +211,50 @@ extern "C" int kva_state_read_parse(const RadArgs* a, KvaStateRead* g) {
     return RAD_OK;
 }
 
-/* ================================================================== kva_rowsel */
+/* ================================================================== kva_mask */
 
-extern "C" int kva_rowsel_host(const RadArgs* a, RadStream) {
-    KvaRowsel g{};
-    const int rc = kva_rowsel_parse(a, &g);
-    if (rc != RAD_OK) return rc;
-    std::vector<float> key((size_t)g.n);      /* class: the score, -inf where the row does not match */
-    std::vector<uint32_t> hash((size_t)g.n);  /* random: the row's rank key */
+/* How many rows of the window rank before window row j, by the mode's key. */
+static int64_t mask_ahead(const KvaMask& g, const std::vector<float>& key,
+                          const std::vector<uint32_t>& hash, int64_t j) {
+    int64_t ahead = 0;
+    for (int64_t m = 0; m < (int64_t)key.size(); ++m)
+        ahead += g.mode == KVA_MODE_CLASS
+                     ? key[(size_t)m] > key[(size_t)j] || (key[(size_t)m] == key[(size_t)j] && m < j)
+                     : hash[(size_t)m] < hash[(size_t)j] || (hash[(size_t)m] == hash[(size_t)j] && m < j);
+    return ahead;
+}
+
+/* The rule inside W = [s, end): kept rows 0, every other row 1. */
+static void mask_window_host(const KvaMask& g, int64_t s, int64_t end) {
+    const int64_t w = end - s;
+    std::vector<float> key((size_t)w, -INFINITY);   /* class: the score, -inf where no match */
+    std::vector<uint32_t> hash((size_t)w, 0);       /* random: the row's rank key */
     int64_t matches = 0;
-    for (int64_t i = 0; i < g.n; ++i) {
-        const int32_t id = g.tokens[i];
-        const float s = id >= 0 && id < g.vocab ? g.score[id] : -INFINITY;
-        key[(size_t)i] = std::isfinite(s) ? s : -INFINITY;
-        hash[(size_t)i] = kva_row_hash(g.seed, (uint32_t)g.positions[i * g.pos_stride]);
-        matches += std::isfinite(s) ? 1 : 0;
+    const bool ranked = g.mode == KVA_MODE_CLASS || g.mode == KVA_MODE_RANDOM;
+    for (int64_t j = 0; j < w && ranked; ++j) {
+        key[(size_t)j] = kva_mask_score(&g, s + j);
+        hash[(size_t)j] = kva_row_hash(g.seed, (uint32_t)g.positions[(s + j) * g.pos_stride]);
+        matches += key[(size_t)j] > -INFINITY ? 1 : 0;
     }
-    const int64_t k = g.mode == KVA_MODE_ALL ? g.n : (int64_t)std::rint(g.share * (double)matches);
-    const int64_t limit = k < g.cap ? k : g.cap;
-    int64_t out = 0;
-    for (int64_t i = 0; i < g.n; ++i) {
-        int64_t ahead = 0;   /* rows that rank before row i */
-        bool eligible = true;
-        if (g.mode == KVA_MODE_ALL) {
-            ahead = i;
-        } else if (g.mode == KVA_MODE_CLASS) {
-            eligible = key[(size_t)i] > -INFINITY;
-            for (int64_t j = 0; j < g.n; ++j)
-                ahead += key[(size_t)j] > key[(size_t)i] ||
-                         (key[(size_t)j] == key[(size_t)i] && j < i);
-        } else {
-            for (int64_t j = 0; j < g.n; ++j)
-                ahead += hash[(size_t)j] < hash[(size_t)i] ||
-                         (hash[(size_t)j] == hash[(size_t)i] && j < i);
-        }
-        const bool kept = eligible && ahead < limit;
-        g.mask[i] = kept ? 0 : 1;
-        if (kept) g.rows[out++] = (int32_t)i;
+    const int64_t k = (int64_t)std::rint(g.share * (double)matches);   /* half to even */
+    for (int64_t j = 0; j < w; ++j) {
+        bool kept = g.mode == KVA_MODE_ALL;
+        if (g.mode == KVA_MODE_CLASS) kept = key[(size_t)j] > -INFINITY && mask_ahead(g, key, hash, j) < k;
+        if (g.mode == KVA_MODE_RANDOM) kept = mask_ahead(g, key, hash, j) < k;
+        g.mask[s + j] = kept ? 0 : 1;
     }
-    for (int64_t i = out; i < g.cap; ++i) g.rows[i] = -1;
+}
+
+extern "C" int kva_mask_host(const RadArgs* a, RadStream) {
+    KvaMask g{};
+    const int rc = kva_mask_parse(a, &g);
+    if (rc != RAD_OK) return rc;
+    int64_t w[3];
+    if (!kva_mask_window(g.cu_last[0], g.cu_last[1], g.b, g.n, w)) return RAD_E_INVAL;
+    for (int64_t i = 0; i < g.n; ++i) g.mask[i] = 0;   /* outside the window: exact */
+    mask_window_host(g, w[0], w[1]);
+    const int32_t bounds[4] = { (int32_t)w[0], (int32_t)w[1], (int32_t)w[1], (int32_t)w[2] };
+    std::memcpy(g.bounds, bounds, sizeof bounds);
     return RAD_OK;
 }
 

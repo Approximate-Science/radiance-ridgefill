@@ -235,7 +235,9 @@ static int run_group(const RadKernelInfo* row, std::vector<Buf*> opds, const std
 /* ================================================================== described operands
  * Operands built from a row's own opd_shape hook -- what a tool calling the row cold would build. */
 
-static Buf from_desc(const RadOpdDesc& d, int64_t prev_extent, Rng& r) {
+/* `m` is the geometry's M: a cumulative-lengths operand is [0 .. M] spread evenly, as the engine's
+ * tools fill one (the batch's shape, not a draw). */
+static Buf from_desc(const RadOpdDesc& d, int64_t prev_extent, int64_t m, Rng& r) {
     std::vector<int64_t> shape(d.shape, d.shape + d.rank);
     Buf b = make(d.dtype, shape);
     const int64_t n = rad_tensor_numel(&b.t);
@@ -244,7 +246,9 @@ static Buf from_desc(const RadOpdDesc& d, int64_t prev_extent, Rng& r) {
     if (d.flags & RAD_OPD_F_IDX_UNIQUE)
         for (int64_t i = 0; i < hi; ++i) perm.push_back((int32_t)i);
     for (int64_t i = 0; i < n; ++i) {
-        if (d.fill == RAD_FILL_INDEX && (d.flags & RAD_OPD_F_IDX_UNIQUE)) {
+        if (d.fill == RAD_FILL_INDEX && (d.flags & RAD_OPD_F_IDX_CU)) {
+            seti(b, i, (int32_t)(n > 1 ? i * m / (n - 1) : m));
+        } else if (d.fill == RAD_FILL_INDEX && (d.flags & RAD_OPD_F_IDX_UNIQUE)) {
             const int64_t j = i + r.below((int64_t)perm.size() - i);
             std::swap(perm[(size_t)i], perm[(size_t)j]);
             seti(b, i, perm[(size_t)i]);
@@ -261,9 +265,8 @@ static Buf from_desc(const RadOpdDesc& d, int64_t prev_extent, Rng& r) {
 
 /* The geometry each op is described and exercised at in the generic cases. */
 static std::vector<RadParam> described_params(const char* op) {
-    if (!std::strcmp(op, "kva_rowsel"))
-        return { pint("M", 64), pint("cap", 16), pf64("share", 0.25), pint("seed", 7),
-                 pstr("mode", "class") };
+    if (!std::strcmp(op, "kva_mask"))
+        return { pint("M", 64), pf64("share", 0.25), pint("seed", 7), pstr("mode", "class") };
     if (!std::strcmp(op, "kva_rho_update")) return { pint("M", 48), pint("n_head", 4) };
     if (!std::strcmp(op, "kva_state_read"))
         return { pint("M", 3), pint("n_head", 2), pint("sd0", 8), pint("sd1", 8) };
@@ -284,14 +287,14 @@ static bool described_operands(const RadKernelInfo* row, const std::vector<RadPa
         RadOpdDesc d{};
         if (row->opd_shape(p.data(), (int)p.size(), i, &d) != RAD_OK) return false;
         if (d.flags & RAD_OPD_F_ABSENT) continue;
-        store[(size_t)i] = from_desc(d, prev, r);
+        store[(size_t)i] = from_desc(d, prev, rad_param_getdim(p.data(), (int)p.size(), "M", 0), r);
         opds[(size_t)i] = &store[(size_t)i];
         prev = d.shape[0];
     }
     return true;
 }
 
-static const char* const kOps[] = { "kva_rowsel", "kva_rho_update", "kva_state_correct",
+static const char* const kOps[] = { "kva_mask", "kva_rho_update", "kva_state_correct",
                                     "kva_state_read" };
 
 /* Rows whose launch is still a stub (R8). Emptied as each row was implemented (all six were stubs
@@ -372,52 +375,62 @@ TEST(described_operands_launch, "both") {
 
 static const int32_t kSentinel = 0x5A5A5A5A;
 
-struct RowselOut { int rc = 0; std::vector<int32_t> rows, mask; };
+/* One kva_mask call. token_ids is `ids` (so b is its extent), the mask has n rows, cu_last is
+ * {s, e}; row i's position is first_pos + i, laid out component-major [components, b] when
+ * components > 1 (row 0 the index, the rest junk). A null table passes `score` absent. */
+struct MaskCall {
+    std::vector<int32_t> ids;
+    int64_t n = 0;
+    int32_t s = 0, e = 0;
+    const std::vector<float>* table = nullptr;
+    double share = 0.25;
+    long long seed = 0;
+    const char* mode = "class";
+    int32_t first_pos = 0;
+    int64_t components = 1;
+};
 
-/* Positions are first_pos, first_pos + 1, ... (one sequence's chunk). components > 1 lays them out
- * component-major [components, n] like RadBatch::rope_pos, row 0 the index and the rest junk. */
-static RowselOut run_rowsel(const RadKernelInfo* row, const std::vector<int32_t>& ids,
-                            const std::vector<float>& table, int64_t cap, double share,
-                            long long seed, const char* mode, int32_t first_pos = 0,
-                            int64_t components = 1) {
-    const int64_t n = (int64_t)ids.size();
-    Buf tok = make(RAD_I32, { n }), score = make(RAD_F32, { (int64_t)table.size() });
-    Buf rows = make(RAD_I32, { cap }), mask = make(RAD_I32, { n });
-    Buf pos = components > 1 ? make(RAD_I32, { components, n }) : make(RAD_I32, { n });
-    for (int64_t i = 0; i < components * n; ++i) seti(pos, i, i < n ? first_pos + (int32_t)i : 7777 + (int32_t)i);
-    for (int64_t i = 0; i < n; ++i) { seti(tok, i, ids[(size_t)i]); seti(mask, i, kSentinel); }
-    for (size_t i = 0; i < table.size(); ++i) setf(score, (int64_t)i, table[i]);
-    for (int64_t i = 0; i < cap; ++i) seti(rows, i, kSentinel);
-    RowselOut o;
-    o.rc = run_group(row, { &tok, &pos, &score, &rows, &mask },
-                     { pint("M", n), pint("cap", cap), pf64("share", share), pint("seed", seed),
-                       pstr("mode", mode) });
-    for (int64_t i = 0; i < cap; ++i) o.rows.push_back(geti(rows, i));
-    for (int64_t i = 0; i < n; ++i) o.mask.push_back(geti(mask, i));
+struct MaskOut { int rc = 0; std::vector<int32_t> mask, bounds; };
+
+static MaskOut run_mask(const RadKernelInfo* row, const MaskCall& c) {
+    const int64_t b = (int64_t)c.ids.size(), vocab = c.table ? (int64_t)c.table->size() : 1;
+    Buf cu = make(RAD_I32, { 2 }), tok = make(RAD_I32, { b }), score = make(RAD_F32, { vocab });
+    Buf mask = make(RAD_I32, { c.n }), bounds = make(RAD_I32, { 4 });
+    Buf pos = c.components > 1 ? make(RAD_I32, { c.components, b }) : make(RAD_I32, { b });
+    seti(cu, 0, c.s);
+    seti(cu, 1, c.e);
+    for (int64_t i = 0; i < b; ++i) seti(tok, i, c.ids[(size_t)i]);
+    for (int64_t i = 0; i < c.components * b; ++i)
+        seti(pos, i, i < b ? c.first_pos + (int32_t)i : 7777 + (int32_t)i);
+    for (int64_t i = 0; c.table && i < vocab; ++i) setf(score, i, (*c.table)[(size_t)i]);
+    for (int64_t i = 0; i < c.n; ++i) seti(mask, i, kSentinel);
+    for (int64_t i = 0; i < 4; ++i) seti(bounds, i, kSentinel);
+    MaskOut o;
+    o.rc = run_group(row, { &cu, &tok, &pos, c.table ? &score : nullptr, &mask, &bounds },
+                     { pint("M", b), pf64("share", c.share), pint("seed", c.seed), pstr("mode", c.mode) });
+    for (int64_t i = 0; i < c.n; ++i) o.mask.push_back(geti(mask, i));
+    for (int64_t i = 0; i < 4; ++i) o.bounds.push_back(geti(bounds, i));
     return o;
 }
 
-/* The kept rows (rows_idx without its -1 padding). */
-static std::vector<int32_t> kept_rows(const RowselOut& o) {
+/* The rows of [lo, hi) the mask keeps exact (0), and how many rows of the whole mask are 1. */
+static std::vector<int32_t> zero_rows(const MaskOut& o, int64_t lo, int64_t hi) {
     std::vector<int32_t> k;
-    for (int32_t r : o.rows) if (r >= 0) k.push_back(r);
+    for (int64_t i = lo; i < hi; ++i) if (o.mask[(size_t)i] == 0) k.push_back((int32_t)i);
     return k;
 }
 
-/* rows_idx ascending then -1 padded, and mask 0 exactly on the kept rows. */
-static bool rowsel_consistent(const RowselOut& o) {
-    size_t i = 0;
-    for (; i < o.rows.size() && o.rows[i] >= 0; ++i)
-        if ((i && o.rows[i] <= o.rows[i - 1]) || o.rows[i] >= (int32_t)o.mask.size()) return false;
-    const size_t kept = i;
-    for (; i < o.rows.size(); ++i) if (o.rows[i] != -1) return false;
-    size_t zeros = 0;
-    for (int32_t m : o.mask) {
-        if (m != 0 && m != 1) return false;
-        zeros += m == 0;
-    }
-    for (size_t j = 0; j < kept; ++j) if (o.mask[(size_t)o.rows[j]] != 0) return false;
-    return zeros == kept;
+static int64_t ones(const MaskOut& o) {
+    int64_t c = 0;
+    for (int32_t m : o.mask) c += m == 1;
+    return c;
+}
+
+/* Every mask row 0 or 1, every row outside [s, end) 0, bounds {s, end, end, e}. */
+static bool mask_shaped(const MaskOut& o, int32_t s, int32_t end, int32_t e) {
+    for (size_t i = 0; i < o.mask.size(); ++i)
+        if (o.mask[i] != 0 && (o.mask[i] != 1 || (int64_t)i < s || (int64_t)i >= end)) return false;
+    return o.bounds == std::vector<int32_t>{ s, end, end, e };
 }
 
 struct RhoRun {
@@ -556,103 +569,174 @@ static int64_t st_at(const CorrectRun& k, int64_t s, int64_t h, int64_t i, int64
 
 /* ================================================================== host semantics */
 
-/* Hand-built chunk: ties, a non-finite score of every kind, an id past the table, and k at .5. */
-TEST(rowsel_class_semantics, "host") {
-    const RadKernelInfo* row = find_row("kva_rowsel", RAD_DOMAIN_HOST);
+/* Hand-built step: four rows of other sequences (s = 4), the last sequence's ten bulk rows [4, 14)
+ * and a two-row tail [14, 16). The window has ties, a non-finite score of every kind, an id past
+ * the table and k at .5; the rows outside it carry the table's best id, so a row that ranked from
+ * row 0 instead of s, or past b', would keep them. */
+TEST(mask_class_semantics, "host") {
+    const RadKernelInfo* row = find_row("kva_mask", RAD_DOMAIN_HOST);
     REQUIRE(row != nullptr);
     const std::vector<float> table = { 5.0f, 3.0f, -INFINITY, 5.0f, 1.0f, NAN, INFINITY, 2.0f };
-    /* rows:                         0  1  2  3  4  5  6  7  8  9   matches: 0 1 3 4 5 9 (six) */
-    const std::vector<int32_t> ids = { 0, 1, 2, 3, 4, 0, 9, 5, 6, 7 };
-    const RowselOut half = run_rowsel(row, ids, table, 4, 0.5, 0, "class");   /* k = 3 */
-    CHECK_EQ(half.rc, RAD_OK);
-    CHECK(half.rows == (std::vector<int32_t>{ 0, 3, 5, -1 }));   /* the three 5.0s, by position */
-    CHECK(half.mask == (std::vector<int32_t>{ 0, 1, 1, 0, 1, 0, 1, 1, 1, 1 }));
-    const RowselOut more = run_rowsel(row, ids, table, 4, 0.75, 0, "class");  /* 4.5 -> 4 */
-    CHECK(more.rows == (std::vector<int32_t>{ 0, 1, 3, 5 }));
-    const RowselOut cut = run_rowsel(row, ids, table, 2, 0.75, 0, "class");   /* k 4 > cap 2 */
-    CHECK(cut.rows == (std::vector<int32_t>{ 0, 3 }));
-    CHECK(rowsel_consistent(cut));
-    const RowselOut quarter = run_rowsel(row, ids, table, 4, 0.25, 0, "class");  /* 1.5 -> 2 */
-    CHECK(quarter.rows == (std::vector<int32_t>{ 0, 3, -1, -1 }));
-    const RowselOut none = run_rowsel(row, ids, table, 4, 1.0 / 12.0, 0, "class");  /* 0.5 -> 0 */
-    CHECK(none.rows == (std::vector<int32_t>{ -1, -1, -1, -1 }));
-    CHECK(none.mask == std::vector<int32_t>(10, 1));
-    const RowselOut two = run_rowsel(row, ids, table, 4, 5.0 / 12.0, 0, "class");  /* 2.5 -> 2 */
-    CHECK(two.rows == (std::vector<int32_t>{ 0, 3, -1, -1 }));
+    MaskCall c;
+    /* window rows j:          0  1  2  3  4  5  6  7  8  9   matches: j 0 1 3 4 5 9 (six) */
+    c.ids = { 0, 0, 0, 0,      0, 1, 2, 3, 4, 0, 9, 5, 6, 7 };   /* b = 14 */
+    c.n = 16; c.s = 4; c.e = 16; c.table = &table;
+    struct Want { double share; std::vector<int32_t> window; } wants[] = {
+        { 0.5,        { 0, 1, 1, 0, 1, 0, 1, 1, 1, 1 } },   /* k 3: the three 5.0s, by row */
+        { 0.75,       { 0, 0, 1, 0, 1, 0, 1, 1, 1, 1 } },   /* 4.5 -> 4 (half to even): + the 3.0 */
+        { 0.25,       { 0, 1, 1, 0, 1, 1, 1, 1, 1, 1 } },   /* 1.5 -> 2 */
+        { 1.0 / 12.0, { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 } },   /* 0.5 -> 0 */
+        { 5.0 / 12.0, { 0, 1, 1, 0, 1, 1, 1, 1, 1, 1 } },   /* 2.5 -> 2 */
+        { 1.0,        { 0, 0, 1, 0, 0, 0, 1, 1, 1, 0 } },   /* every match */
+    };
+    for (const Want& w : wants) {
+        c.share = w.share;
+        const MaskOut o = run_mask(row, c);
+        std::vector<int32_t> want(16, 0);
+        std::copy(w.window.begin(), w.window.end(), want.begin() + 4);
+        CHECK_EQ(o.rc, RAD_OK);
+        CHECK(o.mask == want);
+        CHECK(o.bounds == (std::vector<int32_t>{ 4, 14, 14, 16 }));
+    }
 }
 
-TEST(rowsel_random_and_all_semantics, "host") {
-    const RadKernelInfo* row = find_row("kva_rowsel", RAD_DOMAIN_HOST);
+/* b' = min(max(b, s), e): a bulk end before s is an empty window, one past e stops at e; an empty
+ * last sequence (s == e) and s == b are empty windows; none writes 1 exactly on W, all writes 0. */
+TEST(mask_window_clamping, "host") {
+    const RadKernelInfo* row = find_row("kva_mask", RAD_DOMAIN_HOST);
     REQUIRE(row != nullptr);
-    std::vector<float> table(100, -INFINITY);
-    std::vector<int32_t> ids(100);
-    for (int i = 0; i < 100; ++i) { ids[(size_t)i] = i; if (i % 5 < 3) table[(size_t)i] = 1.0f; }
-    /* 60 matches, share 0.25: k = 15, drawn from all 100 rows. */
-    const RowselOut a = run_rowsel(row, ids, table, 32, 0.25, 7, "random");
-    const RowselOut b = run_rowsel(row, ids, table, 32, 0.25, 7, "random");
-    const RowselOut other = run_rowsel(row, ids, table, 32, 0.25, 8, "random");
-    const RowselOut cut = run_rowsel(row, ids, table, 10, 0.25, 7, "random");
-    CHECK_EQ(a.rc, RAD_OK);
-    CHECK_EQ(kept_rows(a).size(), 15);
-    CHECK(rowsel_consistent(a));
-    CHECK(a.rows == b.rows);                       /* deterministic for a seed */
-    CHECK(kept_rows(other) != kept_rows(a));       /* and the seed matters */
-    CHECK_EQ(kept_rows(cut).size(), 10);           /* k 15 > cap 10: the 10 best of the 15 */
-    for (int32_t r : kept_rows(cut))
-        CHECK(std::find(a.rows.begin(), a.rows.end(), r) != a.rows.end());
-    const RowselOut all = run_rowsel(row, { 3, 1, 4, 1, 5 }, table, 8, 0.25, 0, "all");
-    CHECK(all.rows == (std::vector<int32_t>{ 0, 1, 2, 3, 4, -1, -1, -1 }));
-    CHECK(all.mask == std::vector<int32_t>(5, 0));
-    const RowselOut all_cut = run_rowsel(row, std::vector<int32_t>(12, 2), table, 8, 0.25, 0, "all");
-    CHECK(all_cut.rows == (std::vector<int32_t>{ 0, 1, 2, 3, 4, 5, 6, 7 }));
-    CHECK(all_cut.mask == (std::vector<int32_t>{ 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1 }));
+    struct Win { int64_t b, n; int32_t s, e, end; } wins[] = {
+        { 3, 10, 5, 9, 5 },     /* b < s: empty, bounds {5, 5, 5, 9} */
+        { 12, 12, 2, 8, 8 },    /* b > e: W = [2, 8) */
+        { 5, 10, 5, 9, 5 },     /* b == s: empty */
+        { 6, 6, 6, 6, 6 },      /* s == e == n: the last sequence has no row */
+        { 10, 10, 0, 10, 10 },  /* one sequence, every row bulk */
+        { 7, 12, 3, 12, 7 },    /* bulk then a tail [7, 12) */
+    };
+    for (const Win& w : wins) {
+        MaskCall c;
+        c.ids.assign((size_t)w.b, 1);
+        c.n = w.n; c.s = w.s; c.e = w.e; c.mode = "none";
+        const MaskOut none = run_mask(row, c);
+        CHECK_EQ(none.rc, RAD_OK);
+        CHECK(mask_shaped(none, w.s, w.end, w.e));
+        CHECK_EQ(ones(none), w.end - w.s);
+        c.mode = "all";
+        const MaskOut all = run_mask(row, c);
+        CHECK(mask_shaped(all, w.s, w.end, w.e) && ones(all) == 0);
+    }
 }
 
-/* The random control keys on the ABSOLUTE position: two chunks of one prompt with the same tokens
- * keep the same count but different offsets; the same seed and positions keep the same rows; the
- * index row of a component-major [3, n] positions operand reads like [n]; class mode ignores it. */
-TEST(rowsel_random_keys_on_position, "host") {
-    const RadKernelInfo* row = find_row("kva_rowsel", RAD_DOMAIN_HOST);
+/* transcribed from kva.h's kva_row_hash, to pin the random rule's key (seed, absolute position). */
+static uint32_t test_mix32(uint32_t x) {
+    x ^= x >> 16; x *= 0x7feb352dU; x ^= x >> 15; x *= 0x846ca68bU; x ^= x >> 16;
+    return x;
+}
+static uint32_t test_row_hash(long long seed, uint32_t position) {
+    const unsigned long long s = (unsigned long long)seed;
+    const uint32_t mixed = test_mix32((uint32_t)s ^ test_mix32((uint32_t)(s >> 32)));
+    return test_mix32(mixed ^ (position * 0x9E3779B9U + 0x7F4A7C15U));
+}
+
+/* Random mode over W = [100, 900) of a 1100-row step: exactly k = rint(share x matches in W) rows
+ * kept, and they are the k smallest (hash(seed, position), row) of W; same seed and positions ->
+ * same rows; another seed or other positions -> other rows; [3, b] positions read like [b]; class
+ * mode does not read positions. */
+TEST(mask_random_semantics, "host") {
+    const RadKernelInfo* row = find_row("kva_mask", RAD_DOMAIN_HOST);
     REQUIRE(row != nullptr);
     std::vector<float> table(64, -INFINITY);
     for (int i = 0; i < 64; i += 2) table[(size_t)i] = (float)(i % 7);
-    std::vector<int32_t> ids(2048);
-    for (int i = 0; i < 2048; ++i) ids[(size_t)i] = (i * 37) % 64;   /* half the rows match */
-    const RowselOut first = run_rowsel(row, ids, table, 512, 0.25, 3, "random", 0);
-    const RowselOut second = run_rowsel(row, ids, table, 512, 0.25, 3, "random", 2048);
-    const RowselOut again = run_rowsel(row, ids, table, 512, 0.25, 3, "random", 2048);
-    const RowselOut planes = run_rowsel(row, ids, table, 512, 0.25, 3, "random", 2048, 3);
-    CHECK_EQ(kept_rows(first).size(), 256);    /* 1024 matches x 0.25, every chunk */
-    CHECK_EQ(kept_rows(second).size(), 256);
-    CHECK(kept_rows(first) != kept_rows(second));   /* not the same in-chunk offsets */
-    CHECK(second.rows == again.rows && second.mask == again.mask);
-    CHECK(planes.rows == second.rows);
-    CHECK(rowsel_consistent(first) && rowsel_consistent(second));
-    CHECK(run_rowsel(row, ids, table, 512, 0.25, 3, "class", 0).rows ==
-          run_rowsel(row, ids, table, 512, 0.25, 3, "class", 2048).rows);
+    MaskCall c;
+    for (int i = 0; i < 900; ++i) c.ids.push_back((i * 37) % 64);   /* half the rows match */
+    c.n = 1100; c.s = 100; c.e = 1000; c.table = &table; c.mode = "random"; c.seed = 3;
+    c.first_pos = 3000;
+    const MaskOut a = run_mask(row, c);
+    CHECK_EQ(a.rc, RAD_OK);
+    CHECK(mask_shaped(a, 100, 900, 1000));
+    std::vector<std::pair<uint32_t, int32_t>> keys;
+    for (int32_t i = 100; i < 900; ++i) keys.push_back({ test_row_hash(3, (uint32_t)(3000 + i)), i });
+    std::sort(keys.begin(), keys.end());
+    std::vector<int32_t> want;
+    for (size_t j = 0; j < 100; ++j) want.push_back(keys[j].second);   /* 400 matches x 0.25 */
+    std::sort(want.begin(), want.end());
+    CHECK(zero_rows(a, 100, 900) == want);
+    CHECK(run_mask(row, c).mask == a.mask);
+    MaskCall seed = c, moved = c, planes = c, cls = c, cls_moved = c;
+    seed.seed = 4;
+    moved.first_pos = 5000;
+    planes.components = 3;
+    cls.mode = cls_moved.mode = "class";
+    cls_moved.first_pos = 5000;
+    CHECK(zero_rows(run_mask(row, seed), 100, 900) != want);
+    CHECK(zero_rows(run_mask(row, moved), 100, 900) != want);
+    CHECK(run_mask(row, planes).mask == a.mask);
+    CHECK(run_mask(row, cls).mask == run_mask(row, cls_moved).mask);
+}
+
+/* cu_last out of order is refused by the host row (the device row's fail-safe is a gpu case). */
+TEST(mask_refuses_bad_window, "host") {
+    const RadKernelInfo* row = find_row("kva_mask", RAD_DOMAIN_HOST);
+    REQUIRE(row != nullptr);
+    MaskCall c;
+    c.ids.assign(8, 0);
+    c.n = 10; c.mode = "none";
+    struct Cu { int32_t s, e; int rc; } cus[] = {
+        { -1, 5, RAD_E_INVAL }, { 6, 5, RAD_E_INVAL }, { 2, 11, RAD_E_INVAL },
+        { 10, 10, RAD_OK }, { 0, 0, RAD_OK }, { 0, 10, RAD_OK } };
+    for (const Cu& cu : cus) {
+        c.s = cu.s; c.e = cu.e;
+        CHECK_EQ(run_mask(row, c).rc, cu.rc);
+    }
 }
 
 /* Refusals by name; the parse is shared with the device row. */
 TEST(refuses_bad_operands, "both") {
     if (!group_runnable()) return;
-    const RadKernelInfo* rs = find_row("kva_rowsel", group_domain());
+    const RadKernelInfo* mk = find_row("kva_mask", group_domain());
     const RadKernelInfo* rh = find_row("kva_rho_update", group_domain());
     const RadKernelInfo* sc = find_row("kva_state_correct", group_domain());
-    REQUIRE(rs && rh && sc);
+    REQUIRE(mk && rh && sc);
     const std::vector<float> table = { 1.0f, 2.0f };
-    CHECK_EQ(run_rowsel(rs, { 0, 1 }, table, 2, 0.5, 0, "classy").rc, RAD_E_INVAL);
-    CHECK_EQ(run_rowsel(rs, { 0, 1 }, table, 2, 1.5, 0, "class").rc, RAD_E_INVAL);
-    Buf tok = make(RAD_I32, { 4 }), score16 = make(RAD_BF16, { 2 }), rows = make(RAD_I32, { 2 });
-    Buf mask = make(RAD_I32, { 4 }), short_mask = make(RAD_I32, { 3 }), score = make(RAD_F32, { 2 });
-    Buf pos = make(RAD_I32, { 4 }), short_pos = make(RAD_I32, { 3 }), pos16 = make(RAD_BF16, { 4 });
-    const std::vector<RadParam> p = { pint("M", 4), pint("cap", 2), pf64("share", 0.5),
-                                      pint("seed", 0), pstr("mode", "class") };
-    CHECK_EQ(run_group(rs, { &tok, &pos, &score16, &rows, &mask }, p), RAD_E_DTYPE);
-    CHECK_EQ(run_group(rs, { &tok, &pos16, &score, &rows, &mask }, p), RAD_E_DTYPE);
-    CHECK_EQ(run_group(rs, { &tok, &pos, &score, nullptr, &mask }, p), RAD_E_INVAL);
-    CHECK_EQ(run_group(rs, { &tok, nullptr, &score, &rows, &mask }, p), RAD_E_INVAL);
-    CHECK_EQ(run_group(rs, { &tok, &pos, &score, &rows, &short_mask }, p), RAD_E_SHAPE);
-    CHECK_EQ(run_group(rs, { &tok, &short_pos, &score, &rows, &mask }, p), RAD_E_SHAPE);
+    MaskCall mc;
+    mc.ids = { 0, 1, 0, 1 };
+    mc.n = 4; mc.s = 0; mc.e = 4; mc.table = &table;
+    MaskCall bad_mode = mc, bad_share = mc, no_score = mc, no_score_rand = mc, no_score_none = mc,
+             no_score_all = mc;
+    bad_mode.mode = "classy";
+    bad_share.share = 1.5;
+    no_score.table = no_score_rand.table = no_score_none.table = no_score_all.table = nullptr;
+    no_score_rand.mode = "random";
+    no_score_none.mode = "none";
+    no_score_all.mode = "all";
+    CHECK_EQ(run_mask(mk, bad_mode).rc, RAD_E_INVAL);
+    CHECK_EQ(run_mask(mk, bad_share).rc, RAD_E_INVAL);
+    CHECK_EQ(run_mask(mk, no_score).rc, RAD_E_INVAL);       /* class needs the table */
+    CHECK_EQ(run_mask(mk, no_score_rand).rc, RAD_E_INVAL);  /* random counts matches */
+    CHECK_EQ(run_mask(mk, no_score_none).rc, RAD_OK);
+    CHECK_EQ(run_mask(mk, no_score_all).rc, RAD_OK);
+    Buf cu = make(RAD_I32, { 2 }), cu1 = make(RAD_I32, { 1 }), cu_f = make(RAD_F32, { 2 });
+    Buf tok = make(RAD_I32, { 4 }), pos = make(RAD_I32, { 4 }), short_pos = make(RAD_I32, { 3 });
+    Buf pos16 = make(RAD_BF16, { 4 }), score = make(RAD_F32, { 2 }), score16 = make(RAD_BF16, { 2 });
+    Buf mask = make(RAD_I32, { 4 }), bounds = make(RAD_I32, { 4 }), bounds3 = make(RAD_I32, { 3 });
+    seti(cu, 1, 4);
+    const std::vector<RadParam> p = { pint("M", 4), pf64("share", 0.5), pint("seed", 0),
+                                      pstr("mode", "class") };
+    std::vector<RadParam> no_seed = p;
+    no_seed.erase(no_seed.begin() + 2);
+    CHECK_EQ(run_group(mk, { &cu, &tok, &pos, &score, &mask, &bounds }, p), RAD_OK);
+    CHECK_EQ(run_group(mk, { &cu, &tok, &pos, &score, &mask, &bounds }, no_seed), RAD_E_INVAL);
+    CHECK_EQ(run_group(mk, { nullptr, &tok, &pos, &score, &mask, &bounds }, p), RAD_E_INVAL);
+    CHECK_EQ(run_group(mk, { &cu, nullptr, &pos, &score, &mask, &bounds }, p), RAD_E_INVAL);
+    CHECK_EQ(run_group(mk, { &cu, &tok, nullptr, &score, &mask, &bounds }, p), RAD_E_INVAL);
+    CHECK_EQ(run_group(mk, { &cu, &tok, &pos, &score, nullptr, &bounds }, p), RAD_E_INVAL);
+    CHECK_EQ(run_group(mk, { &cu, &tok, &pos, &score, &mask, nullptr }, p), RAD_E_INVAL);
+    CHECK_EQ(run_group(mk, { &cu_f, &tok, &pos, &score, &mask, &bounds }, p), RAD_E_DTYPE);
+    CHECK_EQ(run_group(mk, { &cu, &tok, &pos16, &score, &mask, &bounds }, p), RAD_E_DTYPE);
+    CHECK_EQ(run_group(mk, { &cu, &tok, &pos, &score16, &mask, &bounds }, p), RAD_E_DTYPE);
+    CHECK_EQ(run_group(mk, { &cu1, &tok, &pos, &score, &mask, &bounds }, p), RAD_E_SHAPE);
+    CHECK_EQ(run_group(mk, { &cu, &tok, &short_pos, &score, &mask, &bounds }, p), RAD_E_SHAPE);
+    CHECK_EQ(run_group(mk, { &cu, &tok, &pos, &score, &mask, &bounds3 }, p), RAD_E_SHAPE);
     CHECK_EQ(run_group(rh, {}, { pint("M", 8), pint("n_head", 4) }), RAD_E_INVAL);
     CorrectRun k = correct_operands(3, 2, 4, 4, { 0 }, 0);
     CHECK_EQ(run_correct(sc, k, "redo", 1.0, false), RAD_E_INVAL);
@@ -1033,9 +1117,11 @@ static std::vector<int32_t> ints(const Json* j) {
     return v;
 }
 
-/* R33: on each quick doc's first chunk the row keeps exactly fnlev.rules' rows (the SIDECAR lane's
- * tools/rows_compare.py fixture, format kva-rowsel-fixture-1). */
-TEST(rowsel_matches_fnlev_rules, "both") {
+/* R33: kva_mask in class mode over window [0, 2048) of each quick doc keeps exactly fnlev.rules'
+ * rows (the SIDECAR lane's tools/rows_compare.py fixture, format kva-rowsel-fixture-1); and the
+ * same 2048 ids placed at rows [64, 2112) of a 2112-row step (cu_last {64, 2112}, the rows before
+ * them the table's best id) keep those rows + 64, with every row before 64 left at 0. */
+TEST(mask_matches_fnlev_rules, "both") {
     if (!group_runnable()) return;
     const char* path = std::getenv("KVA_ROWSEL_FIXTURE");
     FILE* f = path ? std::fopen(path, "rb") : nullptr;
@@ -1047,26 +1133,41 @@ TEST(rowsel_matches_fnlev_rules, "both") {
     JsonReader rd{ body.c_str() };
     const Json fx = rd.value();
     REQUIRE(rd.ok && fx.get("format") && fx.get("format")->str == "kva-rowsel-fixture-1");
-    const RadKernelInfo* row = find_row("kva_rowsel", group_domain());
-    const RadKernelInfo* host = find_row("kva_rowsel", RAD_DOMAIN_HOST);
+    const RadKernelInfo* row = find_row("kva_mask", group_domain());
+    const RadKernelInfo* host = find_row("kva_mask", RAD_DOMAIN_HOST);
     REQUIRE(row && host && fx.get("vocab") && fx.get("kept_ids") && fx.get("kept_scores") &&
-            fx.get("docs") && fx.get("share") && fx.get("window"));
+            fx.get("docs") && fx.get("share"));
     std::vector<float> table((size_t)fx.get("vocab")->num, -INFINITY);
     const std::vector<int32_t> kept = ints(fx.get("kept_ids"));
-    for (size_t i = 0; i < kept.size(); ++i) table[(size_t)kept[i]] = (float)fx.get("kept_scores")->arr[i].num;
-    const double share = fx.get("share")->num;
-    /* PLAN D12's capacity at a chunk of `window` rows: share x window rounded up to 64. */
-    const int64_t cap = (int64_t)std::ceil(share * fx.get("window")->num / 64.0) * 64;
+    int32_t best = kept.empty() ? 0 : kept[0];
+    for (size_t i = 0; i < kept.size(); ++i) {
+        table[(size_t)kept[i]] = (float)fx.get("kept_scores")->arr[i].num;
+        if (table[(size_t)kept[i]] > table[(size_t)best]) best = kept[i];
+    }
     for (const Json& doc : fx.get("docs")->arr) {
         const std::vector<int32_t> ids = ints(doc.get("token_ids")), want = ints(doc.get("rows"));
-        const RowselOut got = run_rowsel(row, ids, table, cap, share, 0, "class");
-        CHECK_EQ(got.rc, RAD_OK);
-        CHECK(rowsel_consistent(got));
-        CHECK_EQ(kept_rows(got).size(), (size_t)doc.get("k")->num);
-        if (kept_rows(got) != want) fail_at(__FILE__, __LINE__, doc.get("doc")->str + ": rows differ from fnlev.rules");
-        if (row != host) CHECK(got.rows == run_rowsel(host, ids, table, cap, share, 0, "class").rows);
-        std::fprintf(stderr, "  %-10s n %zu  k %zu  == fnlev.rules%s\n", doc.get("doc")->str.c_str(),
-                     ids.size(), want.size(), row != host ? " == host row" : "");
+        const int32_t w = (int32_t)ids.size(), shift = 64;
+        MaskCall plain;
+        plain.ids = ids;
+        plain.n = w; plain.s = 0; plain.e = w; plain.table = &table;
+        plain.share = fx.get("share")->num; plain.mode = "class";
+        MaskCall moved = plain;
+        moved.ids.assign((size_t)shift, best);
+        moved.ids.insert(moved.ids.end(), ids.begin(), ids.end());
+        moved.n = moved.e = w + shift; moved.s = shift;
+        std::vector<int32_t> want_moved;
+        for (int32_t r : want) want_moved.push_back(r + shift);
+        const MaskOut a = run_mask(row, plain), m = run_mask(row, moved);
+        CHECK(a.rc == RAD_OK && m.rc == RAD_OK);
+        CHECK(mask_shaped(a, 0, w, w) && mask_shaped(m, shift, w + shift, w + shift));
+        CHECK_EQ(zero_rows(a, 0, w).size(), (size_t)doc.get("k")->num);
+        if (zero_rows(a, 0, w) != want) fail_at(__FILE__, __LINE__, doc.get("doc")->str + ": rows differ from fnlev.rules");
+        if (zero_rows(m, shift, w + shift) != want_moved || zero_rows(m, 0, shift).size() != (size_t)shift)
+            fail_at(__FILE__, __LINE__, doc.get("doc")->str + ": shifted window differs from fnlev.rules + 64");
+        if (row != host) CHECK(a.mask == run_mask(host, plain).mask && m.mask == run_mask(host, moved).mask);
+        std::fprintf(stderr, "  %-10s n %d  k %zu  == fnlev.rules (window [0, %d) and [64, %d))%s\n",
+                     doc.get("doc")->str.c_str(), w, want.size(), w, w + shift,
+                     row != host ? " == host row" : "");
     }
 }
 
@@ -1146,43 +1247,87 @@ TEST(state_read_device_matches_host, "gpu") {
                  out_host.bytes.size(), differ, nonzero_out_of_pool ? "no" : "yes");
 }
 
-/* R33's device leg: the device row equals the host row on chunks with many ties, non-matching
- * rows, every mode, truncation (k > cap), tiny and maximal n. */
-TEST(rowsel_device_matches_host, "gpu") {
+/* A random window layout over an n-row step, the bulk end b kept within the device row's LDS
+ * budget: whole step, a window inside, b before s (empty), b past e. */
+static MaskCall random_window(Rng& r, int64_t n, int layout) {
+    MaskCall c;
+    const int64_t limit = 8192;   /* KVA_MASK_MAX_ROWS: b above it is a refused geometry */
+    int64_t s = layout == 0 ? 0 : r.below(n / 2 + 1), e = n, b = std::min(n, limit);
+    if (layout == 1) b = s + r.below(std::max<int64_t>(std::min(e, limit) - s, 0) + 1);
+    if (layout >= 2) e = s + r.below(n - s + 1);
+    if (layout == 2) b = s - r.below(s + 1);
+    if (layout == 3) b = e + 1 + r.below(50);
+    c.ids.assign((size_t)std::min(std::max<int64_t>(b, 1), limit), 0);
+    for (int32_t& id : c.ids) id = (int32_t)r.below(1010) - 5;   /* a few ids outside the table */
+    c.n = n; c.s = (int32_t)s; c.e = (int32_t)e;
+    return c;
+}
+
+/* kva_mask's device leg: device == host on mask and bounds, byte for byte, over random windows
+ * (s > 0, b before s, b past e, tails), every mode, heavy ties, ids outside the table, n up to
+ * past the LDS budget (the mask is not bounded by it, only b is). */
+TEST(mask_device_matches_host, "gpu") {
     if (!group_runnable()) return;
-    const RadKernelInfo* dev = find_row("kva_rowsel", RAD_DOMAIN_DEVICE);
-    const RadKernelInfo* host = find_row("kva_rowsel", RAD_DOMAIN_HOST);
+    const RadKernelInfo* dev = find_row("kva_mask", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("kva_mask", RAD_DOMAIN_HOST);
     REQUIRE(dev && host);
     Rng r{ 41 };
     std::vector<float> table(1000);
     const float levels[] = { -INFINITY, -INFINITY, 1.0f, 2.0f, 2.5f, 3.0f };   /* ties everywhere */
-    for (float& s : table) s = levels[r.below(6)];
-    const int64_t sizes[] = { 1, 7, 300, 2048, 8192 };
-    const char* modes[] = { "class", "random", "all" };
-    int cases_run = 0;
-    for (int64_t n : sizes) {
-        std::vector<int32_t> ids((size_t)n);
-        for (int32_t& id : ids) id = (int32_t)r.below(1010) - 5;   /* a few ids outside the table */
-        for (const char* mode : modes)
-            for (int64_t cap : { (int64_t)3, (int64_t)512, n })
+    for (float& v : table) v = levels[r.below(6)];
+    int runs = 0, windows = 0, shifted = 0;
+    for (int64_t n : { 1, 7, 300, 2048, 8192, 9000 })
+        for (int layout = 0; layout < 4; ++layout) {
+            MaskCall c = random_window(r, n, layout);
+            c.table = &table; c.seed = 12345; c.first_pos = 4096;
+            for (const char* mode : { "none", "class", "random", "all" })
                 for (double share : { 0.25, 1.0 }) {
-                    const int64_t comps = cases_run % 2 ? 3 : 1;   /* every other case [3, n] */
-                    const RowselOut h = run_rowsel(host, ids, table, cap, share, 12345, mode, 4096, comps);
-                    const RowselOut d = run_rowsel(dev, ids, table, cap, share, 12345, mode, 4096, comps);
-                    CHECK_EQ(d.rc, RAD_OK);
-                    CHECK(d.rows == h.rows && d.mask == h.mask);
-                    CHECK(rowsel_consistent(d));
-                    ++cases_run;
+                    c.mode = mode; c.share = share; c.components = runs % 2 ? 3 : 1;
+                    const MaskOut h = run_mask(host, c), d = run_mask(dev, c);
+                    CHECK(h.rc == RAD_OK && d.rc == RAD_OK);
+                    CHECK(d.mask == h.mask && d.bounds == h.bounds);
+                    ++runs;
                 }
+            const MaskOut h = run_mask(host, c);
+            windows += h.bounds[1] > h.bounds[0];
+            shifted += h.bounds[0] > 0 && h.bounds[1] > h.bounds[0];
+        }
+    MaskCall c = random_window(r, 4000, 1);
+    c.table = &table; c.mode = "random"; c.seed = 99; c.first_pos = 2048;
+    MaskCall next = c;
+    next.first_pos = 6144;
+    const MaskOut once = run_mask(dev, c), again = run_mask(dev, c), other = run_mask(dev, next);
+    CHECK(once.mask == again.mask);                       /* deterministic: seed + positions */
+    CHECK(ones(other) == ones(once) && other.mask != once.mask);
+    std::fprintf(stderr, "  %d configurations (%d layouts with a window, %d with s > 0): device mask and bounds == host\n",
+                 runs, windows, shifted);
+}
+
+/* What the device row does with operands the host row refuses: cu_last out of order (it cannot
+ * return what it reads on the device) -> the window empty inside the clamped [s, e], every mask row
+ * 0, bounds {s, s, s, e} clamped; a bulk end past the LDS budget is refused at launch. */
+TEST(mask_device_fail_safe, "gpu") {
+    if (!group_runnable()) return;
+    const RadKernelInfo* dev = find_row("kva_mask", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("kva_mask", RAD_DOMAIN_HOST);
+    REQUIRE(dev && host);
+    const std::vector<float> table(8, 1.0f);
+    struct Bad { int32_t s, e; std::vector<int32_t> bounds; } bads[] = {
+        { -3, 10, { 0, 0, 0, 10 } }, { 12, 8, { 8, 8, 8, 8 } }, { 2, 21, { 2, 2, 2, 16 } } };
+    for (const Bad& bad : bads) {
+        MaskCall c;
+        c.ids.assign(14, 1);
+        c.n = 16; c.s = bad.s; c.e = bad.e; c.table = &table; c.mode = "none";
+        const MaskOut d = run_mask(dev, c);
+        CHECK_EQ(d.rc, RAD_OK);
+        CHECK(d.mask == std::vector<int32_t>(16, 0) && d.bounds == bad.bounds);
+        CHECK_EQ(run_mask(host, c).rc, RAD_E_INVAL);
     }
-    std::vector<int32_t> ids(2048);
-    for (int32_t& id : ids) id = (int32_t)r.below(1000);
-    const RowselOut once = run_rowsel(dev, ids, table, 512, 0.25, 99, "random", 2048);
-    const RowselOut again = run_rowsel(dev, ids, table, 512, 0.25, 99, "random", 2048);
-    const RowselOut next = run_rowsel(dev, ids, table, 512, 0.25, 99, "random", 4096);
-    CHECK(once.rows == again.rows && once.mask == again.mask);   /* deterministic: seed + positions */
-    CHECK(kept_rows(next).size() == kept_rows(once).size() && kept_rows(next) != kept_rows(once));
-    std::fprintf(stderr, "  %d configurations: device rows_idx and mask == host\n", cases_run);
+    MaskCall big;
+    big.ids.assign(8193, 1);
+    big.n = 8193; big.e = 8193; big.table = &table;
+    CHECK_EQ(run_mask(dev, big).rc, RAD_E_SHAPE);
+    CHECK_EQ(run_mask(host, big).rc, RAD_OK);
 }
 
 /* R34's device leg: device vs host on model-sized gates (bf16 a as a column slice of the a|b

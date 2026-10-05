@@ -1,13 +1,15 @@
 /* rows.cpp -- the kva kernel library's op schemas, its row table and its operand descriptions.
  *
- * THREE NEW OPS, none of them in docs/OPS.md, so this plugin FIXES their schemas (the first plugin
- * in hierarchy order to declare an op does) and nothing else in the engine knows them. Each has a
+ * NEW OPS, none of them in docs/OPS.md, so this plugin FIXES their schemas (the first plugin in
+ * hierarchy order to declare an op does) and nothing else in the engine knows them. Each has a
  * host row -- plain C++, the oracle the device row is tested against (tests/kernel_test.cpp) --
- * and, in a HIP build, a device row. The plan they implement is PLAN.md §5 of the KVA plugin build.
+ * and, in a HIP build, a device row. The plan they implement is PLAN.md §5 of the KVA plugin build
+ * and PLAN-FIX v2 Stage A (the device mask; schemas in notes/impl.md §1).
  *
  * Every row carries an `opd_shape`, so a tool can call it cold instead of skipping it by name. No
- * row has a scratch hook (rowsel keeps its keys in LDS; the other two need nothing), tunables, a
+ * row has a scratch hook (kva_mask keeps its keys in LDS; the others need nothing), tunables, a
  * layout hook or a `describe`: each is one fixed launch issued once per layer per prefill chunk.
+ * No parameter carries a role (R98): nothing here is a sequence chunk or a capacity.
  */
 #include "kva.h"
 
@@ -17,25 +19,24 @@
 #define P_INT(k) { (k), RAD_P_INT, RAD_REQUIRED, RAD_PROLE_NONE }
 #define P_STR(k) { (k), RAD_P_STR, RAD_REQUIRED, RAD_PROLE_NONE }
 #define P_F64(k) { (k), RAD_P_F64, RAD_REQUIRED, RAD_PROLE_NONE }
-/* A CAPACITY (rad_abi.h): the kernel writes by its operands' extents and treats the value as a
- * bound, so a sizing declare at a smaller max_tok may hand it a smaller one. `cap` is derived from
- * max_tok at declare (PLAN D12), which is exactly the case the role exists for. */
-#define P_CAP(k) { (k), RAD_P_INT, RAD_REQUIRED, RAD_PROLE_CAPACITY }
 
 #define OPD(n)   { (n), RAD_OPD_IN, 0 }
 #define OPD_O(n) { (n), RAD_OPD_IN, 1 }
 #define OUT(n)   { (n), RAD_OPD_OUT, 0 }
 #define INOUT(n) { (n), RAD_OPD_INOUT, 0 }
 #define WGT(n)   { (n), RAD_OPD_WEIGHT, 0 }
+#define WGT_O(n) { (n), RAD_OPD_WEIGHT, 1 }
 
 #define ARR(a) (a), (int)(sizeof(a) / sizeof((a)[0]))
 
 /* ================================================================== schemas */
 
-static const RadParamSpec pRowsel[] = { P_INT("M"), P_CAP("cap"), P_F64("share"), P_INT("seed"),
-                                        P_STR("mode") };
-static const RadOperandSpec oRowsel[] = { OPD("token_ids"), OPD("positions"), WGT("score"),
-                                          OUT("rows_idx"), OUT("mask") };
+/* M is issued at the bulk end b only to select the band: the engine hands a kernel a ranged
+ * parameter at its band's upper bound (rad_abi.h "ranges collapsed"), so b itself is read as
+ * token_ids' extent, which is per issue and is what a recorded pass replays. */
+static const RadParamSpec pMask[] = { P_INT("M"), P_F64("share"), P_INT("seed"), P_STR("mode") };
+static const RadOperandSpec oMask[] = { OPD("cu_last"), OPD("token_ids"), OPD("positions"),
+                                        WGT_O("score"), OUT("mask"), OUT("bounds") };
 
 static const RadParamSpec pRho[] = { P_INT("M"), P_INT("n_head") };
 static const RadOperandSpec oRho[] = { OPD("a"), OPD("mask"), WGT("A_log"), WGT("dt_bias"),
@@ -53,17 +54,22 @@ static const RadParamSpec pStateRead[] = { P_INT("M"), P_INT("n_head"), P_INT("s
 static const RadOperandSpec oStateRead[] = { OPD("state"), OPD("state_idx"), OUT("out") };
 
 static const RadOpSchema kSchemas[] = {
-{ "kva_rowsel", ARR(pRowsel), ARR(oRowsel),
-  "Which rows of ONE prefill chunk run exact (KVA quality mode). M = n rows (token_ids' extent). "
-  "A row matches when score[token_ids[i]] is finite (an id outside the table does not match). "
-  "k = rint(share * matches), half to even (Python's round). mode class: row i is kept iff it "
-  "matches and fewer than k matching rows rank before it by (score descending, row ascending); "
-  "mode random: the same k over ALL rows, ranked by a 32-bit hash of (seed, absolute position) ascending, ties by row; mode "
-  "all: k = n, ranked by row. At most min(cap, rows_idx extent) rows are kept (the best). "
-  "rows_idx = kept rows ascending, -1 padded; mask[i] = 1 for every row NOT kept (approximated). "
-  "`positions` is the batch's token index in its sequence (RadBatch::positions), [n] or "
-  "component-major [c, n] (row 0 is read, at the operand's strides); only random mode reads it. "
-  "i32 ids, positions, rows and mask; f32 score table." },
+{ "kva_mask", ARR(pMask), ARR(oMask),
+  "Which rows of the step's LAST sequence run exact (KVA, the device mask). cu_last [2] = {s, e} "
+  "(cu_seqlens + n_seq - 1, read on the device); b = token_ids' extent (rows [0, b) of the step, "
+  "the bulk end; M is issued at b only to pick the band); b' = min(max(b, s), e); the window is "
+  "W = [s, b'). mask [n] (n = its extent) is written on every row: 0 outside W. Inside W, mode "
+  "none: 1 (every row approximated); all: 0 (every row exact); class: a row matches when "
+  "score[token_ids[i]] is finite (an id outside the table does not); k = rint(share * matches in "
+  "W), half to even (Python's round); a row is kept (0) iff it matches and fewer than k matching "
+  "rows of W rank before it by (score descending, row ascending), else 1; random: the same k over "
+  "ALL rows of W, ranked by a 32-bit hash of (seed, positions[i]) ascending, ties by row. bounds "
+  "[4] = {s, b', b', e}. Refused (host row): s < 0, s > e, e > n; the device row, which reads "
+  "cu_last on the device and cannot refuse, takes W empty inside the clamped [s, e] instead "
+  "(every row 0). score is optional and required by class and random. `positions` is the "
+  "batch's token index in its sequence (RadBatch::positions), [b] or component-major [c, b] "
+  "(row 0 is read, at the operand's strides); only random mode reads it. i32 cu_last, ids, "
+  "positions, mask and bounds; f32 score table." },
 { "kva_rho_update", ARR(pRho), ARR(oRho),
   "The decayed share of approximated rows in each GDN head's state, carried across one "
   "sequence's chunks (KVA quality mode). Per head h, sequentially over the n rows of `a` "
@@ -143,15 +149,16 @@ static int64_t param(const RadParam* p, int n_p, const char* key) {
     return rad_param_getdim(p, n_p, key, 0);
 }
 
-static int shape_rowsel(const RadParam* p, int n_p, int operand, RadOpdDesc* out) {
-    const int64_t n = param(p, n_p, "M"), cap = param(p, n_p, "cap");
+static int shape_mask(const RadParam* p, int n_p, int operand, RadOpdDesc* out) {
+    const int64_t n = param(p, n_p, "M");
     const int64_t vocab = 4 * n;   /* ids repeat a little, so ties and repeated tokens occur */
     return pick(out, operand, {
+        opd_idx({ 2 }, n, RAD_OPD_F_IDX_CU),             /* {0, M}: one sequence, all bulk */
         opd_idx({ n }, vocab),
         opd_idx({ n }, 64 * n, RAD_OPD_F_IDX_UNIQUE),   /* distinct, as a sequence's positions are */
         opd(RAD_F32, { vocab }),
-        opd_idx({ cap }, n),
         opd_idx({ n }, 2),
+        opd_idx({ 4 }, n),
     });
 }
 
@@ -201,9 +208,9 @@ static int shape_state_read(const RadParam* p, int n_p, int operand, RadOpdDesc*
 
 /* ================================================================== the row table */
 
-static const RadConstraint cRowselHost[] = { RAD_CIN("mode", "class random all") };
-static const RadConstraint cRowselDevice[] = { RAD_CIN("mode", "class random all"),
-                                               RAD_CLE("M", KVA_ROWSEL_MAX_ROWS) };
+static const RadConstraint cMaskHost[] = { RAD_CIN("mode", "none class random all") };
+static const RadConstraint cMaskDevice[] = { RAD_CIN("mode", "none class random all"),
+                                             RAD_CLE("M", KVA_MASK_MAX_ROWS) };
 static const RadConstraint cCorrect[] = { RAD_CIN("mode", "undo apply") };
 
 #define ROW(nm, opname, what, shp, dts, dom, cons, fn, shapefn)                                  \
@@ -214,9 +221,9 @@ static const RadConstraint cCorrect[] = { RAD_CIN("mode", "undo apply") };
       nullptr, fn, nullptr, nullptr, nullptr, shapefn, nullptr, nullptr, nullptr }
 
 static const RadKernelInfo kKernels[] = {
-ROW("kva_rowsel_host", "kva_rowsel", "chunk row selection, O(n^2) rank counting, the oracle",
-    "any n and cap", "i32 ids / rows / mask, f32 score", RAD_DOMAIN_HOST, cRowselHost,
-    kva_rowsel_host, shape_rowsel),
+ROW("kva_mask_host", "kva_mask", "last-sequence window mask, O(w^2) rank counting, the oracle",
+    "any n and b", "i32 cu_last / ids / mask / bounds, f32 score", RAD_DOMAIN_HOST, cMaskHost,
+    kva_mask_host, shape_mask),
 ROW_NC("kva_rho_update_host", "kva_rho_update", "per-head decayed approximated share, the oracle",
        "any n and n_head", "bf16 or f32 a, i32 mask, f32 A_log / dt_bias / ND", RAD_DOMAIN_HOST,
        kva_rho_host, shape_rho),
@@ -227,9 +234,9 @@ ROW_NC("kva_state_read_host", "kva_state_read", "GDN state slot copy-out, the or
        "any slot strides", "f32 state / out, i32 slots", RAD_DOMAIN_HOST, kva_state_read_host,
        shape_state_read),
 #ifdef KVA_HAVE_HIP
-ROW("kva_rowsel_device", "kva_rowsel", "chunk row selection in one workgroup, keys in LDS",
-    "n up to the LDS key budget (KVA_ROWSEL_MAX_ROWS), any cap", "i32 ids / rows / mask, f32 score",
-    RAD_DOMAIN_DEVICE, cRowselDevice, kva_rowsel_device, shape_rowsel),
+ROW("kva_mask_device", "kva_mask", "last-sequence window mask in one workgroup, keys in LDS",
+    "b up to the LDS key budget (KVA_MASK_MAX_ROWS), any n", "i32 cu_last / ids / mask / bounds, f32 score",
+    RAD_DOMAIN_DEVICE, cMaskDevice, kva_mask_device, shape_mask),
 ROW_NC("kva_rho_update_device", "kva_rho_update", "one thread a head, sequential over the rows",
        "any n and n_head", "bf16 or f32 a, i32 mask, f32 A_log / dt_bias / ND", RAD_DOMAIN_DEVICE,
        kva_rho_device, shape_rho),
@@ -252,10 +259,10 @@ static const RadPluginInfo kInfo = {
     RAD_PLUGIN_KERNEL,
     "kva",
     "0.1.0",
-    "KVA / RidgeFill prefill ops: kva_rowsel (exact rows of a chunk), kva_rho_update (decayed "
-    "approximated share per GDN head), kva_state_correct (GDN terminal-state correction), "
-    "kva_state_read (GDN state slot copy-out for the correction refit). A host "
-    "row (the oracle) and, in a HIP build, a device row each.",
+    "KVA / RidgeFill prefill ops: kva_mask (which rows of the last sequence run exact, on the "
+    "device), kva_rho_update (decayed approximated share per GDN head), kva_state_correct (GDN "
+    "terminal-state correction), kva_state_read (GDN state slot copy-out for the correction "
+    "refit). A host row (the oracle) and, in a HIP build, a device row each.",
     KVA_BUILD_TARGET
 };
 
