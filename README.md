@@ -10,9 +10,19 @@ library, and `tools/kva_projector.py`, which builds the projector folder the plu
 
 Two inputs: an **installed radiance** and a **source checkout of the same release**. The arch plugin
 compiles radiance's `arch/qwen4exp_fp8/qwen4exp_fp8.cpp`, which radiance does not install; configure
-refuses a checkout whose release or headers differ from the install, naming both.
+refuses a checkout whose release or headers differ from the install, naming both. Building either tree
+needs CMake ≥ 3.21 (the `cmake_minimum_required` of both top-level `CMakeLists.txt` files) and, on the
+Docker path, Ninja — which, like the compiler, is inside the build image, not on the host.
 
 ### In Docker (the path the served plugins come from)
+
+Prerequisites: Docker with BuildKit (`docker buildx`) on the host — nothing else; the build stage
+carries its own cmake, ninja and g++-14, so no compiler, Ninja or ROCm install is needed outside it.
+The `radiance-build` image is made by radiance's `docker/build.sh`: it streams `git archive` of the
+chosen commit as the build context to `docker buildx` and stops at the Dockerfile's `build` stage
+(`rocm/dev-ubuntu-24.04` plus cmake, ninja-build and g++-14), which configures with Ninja and installs
+radiance under `DESTDIR=/stage` — that staged install at `/stage/opt/radiance` is what the snippet
+below builds the plugins against.
 
 1. Build radiance's compiler image once, from the radiance checkout at the release you serve:
    ```sh
@@ -41,7 +51,7 @@ GPU targets come from the radiance install (`gfx1201` in the default image) or `
 
 ### Host-only (no ROCm, no GPU)
 
-Build radiance host-only outside its tree, then the plugins against it; the tests need no card:
+Build radiance host-only outside radiance's source tree, then the plugins against it; the tests need no card:
 ```sh
 cmake -S <radiance> -B build-radiance-host -DRAD_WITH_HIP=OFF -DRAD_WITH_FFMPEG=OFF -DRAD_BUILD_TESTS=OFF \
       -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$PWD/build-radiance-host/install"
@@ -50,6 +60,19 @@ cmake -S . -B build-host -DCMAKE_PREFIX_PATH="$PWD/build-radiance-host/install" 
       -DRAD_WITH_HIP=OFF
 cmake --build build-host -j && (cd build-host && ctest -LE gpu --output-on-failure)
 ```
+
+The Python tier (the `tests/test_*.py` suites and the tools they exercise) needs no build at all:
+```sh
+pip install -r tools/requirements.txt
+python -m pytest tests -q
+```
+Any test that needs machine-local data is SKIPPED unless you opt in; each skip reason names the env
+var to set. The full set (grep `tests/`): `KVA_RESEARCH_ROOT` (a checkout of the research repo the
+refit imports read-only), `KVA_TOKENIZER` (a checkpoint directory), `KVA_SIDECAR` (a built
+`kva-sidecar.safetensors`), `KVA_TEST_TOKENIZER` (a tokenizer directory) and
+`KVA_TEST_OPERATOR_TEMPLATE` (an operator base chat template). Without them the run is green on the
+suites that fake their inputs.
+
 `-DRAD_WITH_HIP=OFF` leaves out the device rows even against a HIP install. Every `build*/` and `home/`
 directory is git-ignored.
 
