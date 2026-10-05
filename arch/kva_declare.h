@@ -237,16 +237,24 @@ static int check_mode(const Kva& k, const qwen4exp_fp8::Model& m) {
                              "and the model holds none of it\n", mode, c.proj);
         return RAD_E_UNSUPPORTED;
     }
-    /* n_ahead is capped at max_tok (radiance core/sched/batch.cpp:1066-1080), so a tail longer
-     * than one step could never be satisfied and no chunk would ever be approximated. The operator
-     * route that needs no plugin change: --checkpoint-interval below --max-num-batched-tokens gives
-     * smaller per-request chunks while n_ahead stays capped at the step (README, R84). */
-    if (c.tail > max_tok) {
+    /* A TAIL LONGER THAN A STEP (REFUTATION §4, R100). n_ahead is capped at the step C =
+     * max_tok (radiance core/sched/batch.cpp:1066-1080), so a full chunk only PROVES that row i
+     * has (n_tok-1-i) + C tokens after it: rows [0, n_tok - ceil_G(T - C)) are bulk and the rest run
+     * exact (derive()) -- lower coverage, never a wrong row. That leaves a bulk row only while
+     * ceil_G(T - C) < C, i.e. T <= 2C - G; above it no chunk could ever be approximated, so the
+     * mode is refused rather than served as an expensive no-op. The operator route that needs no
+     * plugin change: --checkpoint-interval below --max-num-batched-tokens (README, R84). */
+    const int64_t G = m.gcfg.chunk;
+    if (c.tail > 2 * max_tok - G) {
         std::fprintf(stderr, "radiance: qwen4exp_kva: kva.tail is %lld tokens and the largest step "
-                             "is %lld (--max-num-batched-tokens); a chunk is approximated only "
-                             "when %lld prompt tokens follow it, and the scheduler never reports "
-                             "more than %lld. Lower the tail or raise the step.\n",
-                     (long long)c.tail, (long long)max_tok, (long long)c.tail, (long long)max_tok);
+                             "is %lld (--max-num-batched-tokens); the scheduler never reports more "
+                             "than %lld prompt tokens ahead, so only rows followed by %lld - %lld "
+                             "more tokens inside the chunk are provably bulk, and with the delta "
+                             "net's %lld-row tile none is once the tail exceeds %lld (2 x %lld - %lld). "
+                             "Lower the tail or raise the step.\n",
+                     (long long)c.tail, (long long)max_tok, (long long)max_tok, (long long)c.tail,
+                     (long long)max_tok, (long long)G, (long long)(2 * max_tok - G),
+                     (long long)max_tok, (long long)G);
         return RAD_E_UNSUPPORTED;
     }
     if (c.tail < kMinTail) {

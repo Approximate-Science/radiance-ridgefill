@@ -1567,20 +1567,47 @@ int refused(std::initializer_list<std::pair<const char*, const char*>> env, RadB
     return st;
 }
 
-/* R84: a tail longer than a step refuses with both numbers and names the operator route. */
-TEST(a_tail_longer_than_a_step_is_refused_with_both_numbers) {
-    RadBuilder b;
-    hold_kva(b, {"kva.proj", "kva.st"});
-    std::string err;
-    CHECK(refused({{"RADIANCE_KVA", "speed"}, {"RADIANCE_KVA_TAIL", "4096"}}, b, &err) < 0);
-    CHECK(has(err, "4096") && has(err, "2048"));
-    RadBuilder b2;
-    hold_kva(b2, {"kva.proj", "kva.st"});
-    CHECK(refused({{"RADIANCE_KVA", "speed"}}, b2, &err, 1024) < 0);
-    CHECK(has(err, "2048") && has(err, "1024"));
-    RadBuilder b3;
-    hold_kva(b3, {"kva.proj", "kva.st"});
-    CHECK_EQ(refused({{"RADIANCE_KVA", "speed"}, {"RADIANCE_KVA_TAIL", "1024"}}, b3, &err, 1024), RAD_OK);
+/* R84 / R100: a tail of two steps less one tile or more refuses with the numbers -- no chunk could
+ * ever hold a provably-bulk row -- and every tail up to it is served (2C - G = 4032 at C = 2048). */
+TEST(a_tail_of_two_steps_less_a_tile_or_more_is_refused) {
+    struct Case { const char* tail; int64_t max_tok; bool ok; };
+    for (const Case& c : {Case{"4096", 2048, false}, Case{"4033", 2048, false}, Case{"4032", 2048, true},
+                          Case{"2560", 2048, true}, Case{"2048", 1024, false}, Case{"1984", 1024, true},
+                          Case{"1024", 1024, true}}) {
+        RadBuilder b;
+        hold_kva(b, {"kva.proj", "kva.st"});
+        std::string err;
+        const int st = refused({{"RADIANCE_KVA", "speed"}, {"RADIANCE_KVA_TAIL", c.tail}}, b, &err, c.max_tok);
+        CHECK_EQ(st == RAD_OK, c.ok);
+        if (!c.ok) CHECK(has(err, c.tail) && has(err, std::to_string(c.max_tok).c_str()) && has(err, "tile"));
+    }
+}
+
+/* R100 -- A TAIL PAST THE STEP (T = 2560, C = 2048): a capped n_ahead proves only C tokens ahead, so a
+ * full chunk's first n_tok - ceil_64(T - C) = n_tok - 512 rows are bulk and the rest exact; with
+ * fewer than T - C + 64 ahead nothing is provable and the pass is stock. Never the lean fill (some
+ * rows of every chunk are exact). */
+TEST(a_tail_past_the_step_approximates_the_provable_rows) {
+    using qwen4exp_kva::PATH_STOCK;
+    using qwen4exp_kva::PATH_MASKED;
+    struct Case { const char* mode; Shape s; int path; int64_t b, s_lb; };
+    for (const Case& c : {Case{"quality", {{2048}, 0, 2048}, PATH_MASKED, 1536, 0},
+                          Case{"speed", {{2048}, 0, 2048}, PATH_MASKED, 1536, 0},
+                          Case{"quality", {{2048}, 0, 1024}, PATH_MASKED, 512, 0},
+                          Case{"quality", {{2048}, 0, 576}, PATH_MASKED, 64, 0},
+                          Case{"quality", {{2048}, 0, 575}, PATH_STOCK, 0, 0},
+                          Case{"quality", {{2048}, 0, 512}, PATH_STOCK, 0, 0},
+                          Case{"speed", {{1, 1, 1, 1, 1, 1, 1, 1, 1984}, 8, 2048}, PATH_MASKED, 1480, 8}}) {
+        Env e({{"RADIANCE_KVA_TAIL", "2560"}});
+        Pair p;
+        declare_pair(p, c.mode);
+        REQUIRE_EQ(p.st, RAD_OK);
+        Batch x = make_step(p.kva, c.s);
+        const qwen4exp_kva::Pass got = qwen4exp_kva::derive(qwen4exp_kva::g_kva[0], &x.b);
+        CHECK_EQ(got.path, c.path);
+        CHECK_EQ(got.b, c.b);
+        CHECK_EQ(got.s_lb, c.s_lb);
+    }
 }
 
 TEST(a_tail_below_the_measured_minimum_is_refused) {
