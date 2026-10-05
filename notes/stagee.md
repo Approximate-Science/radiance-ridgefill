@@ -249,3 +249,33 @@ copy counters / RADIANCE_LOG_STEPS on a slow vs fast server, and whether a stock
 - Earlier stock-vs-plugin warm-up evidence (e1, ediag3 warm-up reps): 5 stock/off boots and plumb-held run 2K at
   1,227-1,234 ms from the first request; every e1 quality server (vram and host, ON and held) started at 1,426-1,453 ms;
   ediag3's quality-host-held started slow and turned fast mid-warm-up, its speed-host-held started fast. S2 settles it.
+
+## 12. S2 -- the slow prefill state is engine/machine state, NOT the plugin (2026-10-05 17:09-17:52Z, home bc7e742)
+`tools/settle.py` on fresh boots (52b8145/bc7e742): 15 interleaved cycles of 1K/2K/4K/8K prefills from /health, /stats
+(mover, link, passes) polled every second; evidence/stagee/s2/ (settle-*.json/.txt, serve logs). 2K / 8K ms:
+| boot | 2K first → steps → settled | 8K | 
+|---|---|---|
+| stock-1, off-1, stock-2, off-2 | 1,366 → **1,250** at ~90-99 s | 4,966 → 5,060 at the same step |
+| quality held-1/-2, speed held-1/-2 (identical) | 1,600 → 1,405 at ~30 s → **1,283** at ~112 s | 5,877 → 5,080 → 5,190-5,225 |
+| **stock-3, off-3** | **1,600 → 1,548, never faster in 150 s** | 5,771 → 5,712 |
+- The levels are discrete and reproducible to the millisecond within a configuration (the engine is deterministic for
+  a request sequence); each step coincides with a ~700-800-promotion burst of the expert mover. Card temperature or
+  clock at boot does not predict the state (exact-1 fast at 65 °C, exact-3 slow at 50 °C).
+- **So the e1/A.1 "ON server 0.85x" was a cross-state comparison** (stock boots that happened to be fast vs plugin boots
+  that were slow), and ediag3's slow-state profile (every rank-1 kernel 1.3-3x slower) is an engine/machine state that
+  stock servers enter too.
+- **Held cost in MATCHED states** (every pass the stock step, projector held): fast 1,283 vs 1,251 (+2.6%), mid 1,405
+  vs 1,366 (+2.9%), 8K +2.5-3%; slow ≈ level. Routed-expert hit rate trails stock by 1-1.5 points throughout (0.767 vs
+  0.776 at start, 0.922 vs 0.932 at 135 s) -- consistent with the ring's 128 MiB of VRAM (−167 slab slots, −1%). S3
+  opens with stock at headroom +128 MiB to test exactly that.
+- **Protocol (binding from here): pair only servers in the same state** -- interleave, classify each server by its 2K
+  level from a settle trace (S3 adds a 2K probe to every warm-up), and report state-mismatched pairs as such.
+
+## 13. Dropped from the plan (orchestrator's pace cut, 2026-10-05 ~17:20Z) and why
+- e3 (int8 short-prompt VRAM table, vram-int8 / bf16-held rounds): only mattered for VRAM placement, which is removed.
+- e1's remaining arms (qh-held-b, 32-seq d-* for vram): VRAM placement removed; settled decode = stock is shown (§4).
+- R86 (`--kv-cache-dtype bf16`), R88 (48K-160K contexts), R89 (long-prompt determinism × 3 boots), R90
+  (`--deterministic`), R87 engine TP1: not needed to ship this stage -- SKIPPED by decision (their scripts e4/e5 and
+  corpora stay in evidence/stagee/ and data/stagee/ for a later pass). R85 (production wire wht6) kept minimal: plumb
+  byte identity + quality T2560 KL vs stock under wht6, batched into S3's lock.
+- 9K in the int8-ring vs bf16-ring TTFT: 16K and 32K only.
