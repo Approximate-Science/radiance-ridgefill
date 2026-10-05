@@ -17,6 +17,10 @@
 #                                  chunk; each decoder's text (temperature 0), its sha256, the draft
 #                                  counters (R60), and each decoder alone. R54: a mode's decoder texts
 #                                  equal off's byte for byte; RADIANCE_KVA_MASK=all must change them.
+#   scripts/conc.sh accept <label> R60's acceptance half: the long prompt, then RK_TEXT_D decoders 0.5 s
+#                                  later as SEPARATE requests, each reporting its own draft_n /
+#                                  draft_n_accepted (a batched request's counts sum all its choices,
+#                                  the approximated prompt's included).
 #
 # Env (defaults in tools/conc.py / scripts/common.sh): RK_DOCS (required: JSONL of {"prompt"}, the long
 # prompt's text), RK_PORT, RK_EVIDENCE, RK_STAGE (output dir under RK_EVIDENCE), RK_CONTAINER (default
@@ -27,7 +31,7 @@ set -eu
 
 . "$(dirname "$0")/common.sh"
 
-[ "$#" -eq 2 ] || rk_die "usage: RK_DOCS=<ppl.jsonl> scripts/conc.sh ttft|text <label>"
+[ "$#" -eq 2 ] || rk_die "usage: RK_DOCS=<ppl.jsonl> scripts/conc.sh ttft|text|accept <label>"
 [ -n "${RK_DOCS:-}" ] && [ -r "$RK_DOCS" ] || rk_die "RK_DOCS is not a readable file: ${RK_DOCS:-unset}"
 if [ -z "${RK_CONTAINER:-}" ]; then
     RK_CONTAINER=$(docker ps --filter name=radiance-kva- --format '{{.Names}}' | head -1)

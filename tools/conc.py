@@ -274,6 +274,46 @@ def run_text(label, out_dir):
     return result
 
 
+def run_accept(label, out_dir):
+    """R60's acceptance half: a batched request's draft counts are summed over all its choices
+    (core/server/server.cpp timings_of), the approximated prompt's own included. So here the long
+    prompt (max_tokens 1) goes first and RK_TEXT_D decoders follow 0.5 s later as SEPARATE requests,
+    each reporting its own draft_n / draft_n_accepted; RK_REPS rounds."""
+    docs = [json.loads(l)["prompt"] for l in open(os.environ["RK_DOCS"]) if l.strip()]
+    doc_ids = [tokenize(d) for d in docs]
+    length = int(os.environ.get("RK_TEXT_LENGTH", "32768"))
+    d = int(os.environ.get("RK_TEXT_D", "4").split()[-1])
+    tokens = int(os.environ.get("RK_TEXT_TOKENS", "256"))
+    questions = ["Implement an LRU cache in Go with a fixed capacity and a small test.",
+                 "Explain why merge sort is O(n log n), step by step.",
+                 "Write a short story about a lighthouse keeper who finds a map.",
+                 "Describe how a hash table resolves collisions, with examples."]
+    prompts = [tokenize(f"Question: {q}\nAnswer:") for q in questions[:d]]
+    result = {"label": label, "kind": "accept", "runs": []}
+    for rep in range(int(os.environ.get("RK_REPS", "3"))):
+        wait_idle()
+        out = [None] * d
+        def ask(i):
+            out[i] = post("/v1/completions", {"model": "m", "prompt": prompts[i], "max_tokens": tokens, "temperature": 0})
+        long_t = threading.Thread(target=post, args=("/v1/completions", {"model": "m", "prompt": long_prompt(length, doc_ids, rep + 1),
+                                                                          "max_tokens": 1, "temperature": 0}))
+        long_t.start()
+        time.sleep(0.5)
+        threads = [threading.Thread(target=ask, args=(i,)) for i in range(d)]
+        for t in threads:
+            t.start()
+        for t in threads + [long_t]:
+            t.join()
+        for i, r in enumerate(out):
+            tm = r.get("timings") or {}
+            text = r["choices"][0]["text"]
+            result["runs"].append({"rep": rep, "decoder": i, "draft_n": tm.get("draft_n", 0),
+                                   "draft_n_accepted": tm.get("draft_n_accepted", 0),
+                                   "sha": hashlib.sha256(text.encode()).hexdigest()[:16]})
+            print(f"  accept rep {rep} decoder {i}: {tm.get('draft_n_accepted', 0)}/{tm.get('draft_n', 0)}  {result['runs'][-1]['sha']}", flush=True)
+    return result
+
+
 def run_pair(label, out_dir):
     """R58': two long prompts in ONE batched request (admitted together) beside RK_CONC decoders."""
     docs = [json.loads(l)["prompt"] for l in open(os.environ["RK_DOCS"]) if l.strip()]
@@ -309,9 +349,9 @@ def run_pair(label, out_dir):
 
 def main():
     global BASE
-    kinds = {"ttft": run_ttft, "text": run_text, "pair": run_pair}
+    kinds = {"ttft": run_ttft, "text": run_text, "pair": run_pair, "accept": run_accept}
     if len(sys.argv) != 3 or sys.argv[1] not in kinds:
-        die("usage: conc.py ttft|text|pair <label>")
+        die("usage: conc.py ttft|text|pair|accept <label>")
     kind, label = sys.argv[1], sys.argv[2]
     BASE = f"http://127.0.0.1:{os.environ.get('RK_PORT', '8100')}"
     out_dir = os.path.join(os.environ["RK_EVIDENCE"], os.environ.get("RK_STAGE", "scratch"))
