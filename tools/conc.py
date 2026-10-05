@@ -52,14 +52,15 @@ def post(path, body):
 
 
 def metrics():
-    """The engine's counters, name -> value (unlabelled lines only)."""
+    """The engine's counters, name -> value, summed over a name's label sets."""
     with urllib.request.urlopen(BASE + "/metrics", timeout=30) as r:
         out = {}
         for line in r.read().decode().splitlines():
-            if line and not line.startswith("#") and "{" not in line:
+            if line and not line.startswith("#"):
                 name, _, value = line.rpartition(" ")
+                name = name.split("{")[0].strip()
                 try:
-                    out[name] = float(value)
+                    out[name] = out.get(name, 0.0) + float(value)
                 except ValueError:
                     pass
         return out
