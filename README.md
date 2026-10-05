@@ -71,7 +71,8 @@ naming both, and runs. `arch/kva_config.h` is the full list of switches.
 | `RADIANCE_KVA_ROWSEL` | `class`, `random`, `all` | quality mode's exact-row rule |
 | `RADIANCE_KVA_SHARE` | (0, 1], default 0.25 | share of a window's class matches kept exact |
 | `RADIANCE_KVA_PROJECTOR` | a directory | the projector folder, ahead of `projector/` beside the model |
-| `RADIANCE_KVA_PROJ_PLACE` | `vram` (default), `host` | where the projector maps live: `vram` costs ~1.2 GiB of each card (fewer resident experts); `host` costs no VRAM and reads the maps over the link on every approximated chunk (R148 has the numbers) |
+| `RADIANCE_KVA_PROJ_PLACE` | `vram` (default), `host` | where the projector maps live. `vram` costs 1.2 GiB of each card (~970 fewer resident expert slots a rank); `host` keeps them in host-mapped memory and copies each late layer's map into one of two VRAM slots (100 MiB a card) ahead of its GEMM, so approximated chunks run slower: measured quality TTFT +6% at 16K and +10% at 32K against `vram`, which at 16K is level with exact (+2.5%, CI includes 0), at 32K still 25% faster than exact (notes/aprime.md, R148) |
+| `RADIANCE_KVA_PROJ_RING` | `1` (default), `0` | gate-only: `0` lets the GEMM read the host maps in place -- measured 2.7x SLOWER than exact (every M tile re-reads the map over the link); do not serve with it |
 | `RADIANCE_KVA_ROWSEL_TABLE` | `class`/`none`/`all` | which of the folder's row tables quality mode uses (`none`/`all` are controls) |
 | `RADIANCE_KVA_STAGE` | `auto` (default), `stock` | the expert-stager lever: `auto` lets the late layers stream only their routed experts on an approximate pass (notes/impl.md §2); `stock` leaves staging as it is |
 | `RADIANCE_KVA_STAGE_ROWS` | rows | `auto` streams only when the pass has at most this many exact rows (default: always; R96 measures the crossover) |

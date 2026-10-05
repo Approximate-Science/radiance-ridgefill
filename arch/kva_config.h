@@ -45,7 +45,9 @@
  *   env RADIANCE_KVA_PROJ_RING    1 | 0: with host placement, copy each late layer's map into one of
  *                                 two VRAM slots on the second lane ahead of its GEMM (Dylan's DD-L,
  *                                 2 x 50 MiB a card), or let the GEMM read host memory directly
- *                                 (0: every M tile re-reads the map over the link, R148)   default 1
+ *                                 (0: every M tile re-reads the map over the link -- measured
+ *                                 2.7x slower than exact at 16K/32K; the ring +6%/+10% over
+ *                                 vram, notes/aprime.md R148)                             default 1
  *   env RADIANCE_KVA_ROWSEL_TABLE class -> score   none -> score_none (R41)
  *                                 all   -> score_all (every id a match: R35')
  *
