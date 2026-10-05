@@ -279,3 +279,37 @@ copy counters / RADIANCE_LOG_STEPS on a slow vs fast server, and whether a stock
   corpora stay in evidence/stagee/ and data/stagee/ for a later pass). R85 (production wire wht6) kept minimal: plumb
   byte identity + quality T2560 KL vs stock under wht6, batched into S3's lock.
 - 9K in the int8-ring vs bf16-ring TTFT: 16K and 32K only.
+
+## 14. The held cost is the plugin's VRAM -- reduced (6a68dde); S4 re-measures (orchestrator's decision ~18:00Z)
+**S3's front controls** (17:58Z-, home bc7e742, evidence/stagee/s3/session.log; settle.py from /health, settled 2K):
+stock at headroom 3200 (= the ring's 128 MiB taken away) 1,377.7 → **1,270.4** (+1.6% over S2's stock 1,250); stock at
+4300 (1,228 MiB, the old vram maps) stuck slow (1,562); quality held int8 stuck slow (1,584); **plumb held (masked
+declare, nothing uploaded) 1,367.5 → 1,251.7 = stock**. So the held +2.6% is VRAM taken from resident experts, not
+declarations or per-pass work: ring 2 × 50 MiB (+ correction 27 + row table 1) + arena h_S 40 + x_P ~16 ≈ 212 MiB bf16.
+**Not accepted as a cost** (Dylan: requests that do not use KVA lose nothing). Built in **6a68dde**:
+- (a) the ring's slot follows the loaded folder's row block: 50 MiB bf16, 25.4 MiB int8 (a bf16 block with the MTP map).
+- (b) each rank's correction heads and the row table live in the host block (zero-copy reads, approximate passes only).
+- (c) instead of half-layer blocks: **one slot**. Layer l+1's copy is issued right after layer l's GEMM (and the int8
+  bias add), its last reader, and overlaps the rest of layer l (attention or delta net + MoE); same VRAM as half
+  blocks, no GEMM split, and the copy loses only the GEMM's own time to overlap (< 1 ms at 2,048 rows).
+- int8 maps without the MTP map declare no h_S: the codes are made from b_h at layer S, before any late layer writes it.
+- VRAM a rank now: **bf16 ≈ 106 MiB** (slot 50 + h_S 40 + x_P 16), **int8 ≈ 62 MiB** (slot 25.4 + codes 20 + x_P 16);
+  was ≈ 212 / ≈ 156.
+- (d) **NOT achievable plugin-side** (read rad_bufplan.cpp:80-85, rad_builder.cpp:1427-1471, rad_buf_concurrent
+  rad_builder.cpp:835): a transient's lifetime is [first_def, last_use] over op indices in DECLARATION order, and the
+  planner packs non-overlapping intervals. The plugin's ops are declared after the in-tree graph but issued
+  interleaved with it, so any narrow plugin lifetime lies after every in-tree op's index: the planner would alias it
+  with in-tree transients that are live at the same time on the device -- unsafe. Lane-1 buffers (the ring slot) must
+  be whole-program (rad_buf_concurrent). Getting the remaining ~60-100 MiB to zero needs the in-tree graph re-declared in
+  issue order around the plugin's ops (an engine change; not proposed) -- the remaining cost is what S4 measures.
+- Option C's earlier objection (§11: zero-copy correction reads ~54 MiB a chunk over the link) is what S4's ON TTFT
+  tests; if it costs, the correction can ride the ring with its layer's block (+1.5 MiB slot) instead.
+- Static tests follow (ring order wait → GEMM → copy next; one slot; host-placed correction/row table; int8 slot 1,301
+  rows and no h_S). Mutants: evidence/stagee/scripts/mutate_slot.py S1-S10 (new), mutate_final F4 now drops
+  `ring_wait`, mutate_ring R6 retired (two slots).
+- Predictions registered before S4 (labbook seq 428-429): **HE-held-1slot** (held vs stock 2K settled: int8 +0.3..+1.0%,
+  bf16 +0.8..+1.6%; kill int8 > +1.5% or bf16 not below +2.6%), **HE-1slot-ttft** (one slot within ±1.5% of S3's two
+  slots per dtype; int8 ≤ bf16 + 1%; kill > +3%).
+- **S4** (evidence/stagee/scripts/s4.sh, queued 18:45Z on gpu.lock, `HOME_E=6a68dde`): frozen home + host tests;
+  correctness (off ident = R3, bf16 rows = A′ R144, int8 rows = S1's, B's 8192/10 starts); held settle vs stock and ON
+  TTFT 16K/32K bf16/int8/stock, two rounds interleaved; --profile-ops copy time per rank; mutants last.
