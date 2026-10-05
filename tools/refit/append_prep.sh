@@ -14,10 +14,13 @@ set -eu
 
 [ "$#" -eq 1 ] || { echo "usage: tools/refit/append_prep.sh projr|full" >&2; exit 1; }
 which=$1
-here=$(CDPATH= cd "$(dirname "$0")" && pwd)
-repo=$(CDPATH= cd "$here/../.." && pwd)
+# Physical paths throughout: the stub's shard symlinks are relative, and a relative path computed between a
+# symlinked spelling (/home/...) and a resolved one (/var/home/...) points nowhere inside the /kva mount.
+here=$(CDPATH= cd "$(dirname "$0")" && pwd -P)
+repo=$(CDPATH= cd "$here/../.." && pwd -P)
 : "${RK_MODEL:?the .rad container}" "${RK_PLUGIN_HOME:?the plugin home}" "${RK_PYTHON:?python with torch + safetensors}"
 : "${RK_REFIT_DATA:=$repo/data/refit}"
+RK_REFIT_DATA=$(readlink -f "$RK_REFIT_DATA")
 models=$(dirname "$(readlink -f "$RK_MODEL")")
 rad=$(basename "$RK_MODEL")
 : "${RK_RECIPE:=$models/qwen4exp-w4nl64-i8-hc8m.recipe}"
@@ -32,7 +35,7 @@ side=$RK_REFIT_DATA/sidecar-$which
 stub=$RK_REFIT_DATA/stub-$which
 ev=$RK_REFIT_DATA/append-$which
 mkdir -p "$ev"
-rel() { printf '%s' "${1#"$repo"/}"; }         # repo-relative path: the repo is mounted at /kva
+rel() { r=$(readlink -f "$1"); printf '%s' "${r#"$repo"/}"; }   # repo-relative path: the repo is mounted at /kva
 
 # shellcheck disable=SC2086  # st_args is empty or two paths without spaces
 "$RK_PYTHON" "$repo/tools/kva_sidecar.py" build --names refit --proj "$proj" $st_args --out "$side"

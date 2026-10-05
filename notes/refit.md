@@ -11,10 +11,10 @@ KERNELS `kva_state_read`); refit code = commits in §9; container `~/models/rad/
 |---|---|
 | 1 inputs | **done**: 151 training docs (raw + chat = 302 prompts, 3,984,554 tokens), 5 held docs (10 prompts, 60,214 tokens), 14 +st prompts (134,081 tokens, 55 chunk ends at tail 512); overlap re-checked (§1) |
 | 2 capture format | **implemented + tested** on synthetic captures in the plugin's layout (`tests/test_refit_capture.py`, 7 pass); Sums fed directly (§2) |
-| 3 capture driver | **implemented + tested** (synthetic); GPU session queued on the lock (§6) |
-| 4 projector solve | **implemented + tested** end to end on synthetic linear data (`tests/test_refit_projector.py`); real fit: pending captures |
-| 5 correction fit | **implemented + tested** (`tests/test_refit_correction.py`, 3 pass); needs the projr append, then the speed state run |
-| 7 append prep | pending the projector |
+| 3 capture driver | **ran**: 312 projector prompts (4,044,768 tokens) + 14 exact +st prompts, 48 min under the lock, every chunk captured (§6) |
+| 4 projector solve | **measured**: lambda 0.03, 248,892 raw + 249,312 chat rows; held-out bi refit 0.7536 vs shipped 0.7501 on the same radiance rows (§4) |
+| 5 correction fit | **implemented + tested**; exact states captured; needs the projr append, then `session.sh speed` |
+| 7 append prep | **append #1 (projr) prepared**: shard verify PASS, plan diff PASS (48 new, 0 dropped, 0 changed); command in §7 |
 
 ## 1. Inputs (step 1) — `tools/refit/docs.py build` → `data/refit/prompts/` (git-ignored)
 
@@ -69,7 +69,14 @@ written as `capture_NNNNN.pt`** (`convert.write_pt`) because `qfn.fit.Held` / `f
 HC identity check (`convert.py check`, and `hc_identity_check` in the fit report): `qfn.hc.mix(boundary_24,
 layer 24's read weights from tcc's bf16 HC file)` vs radiance's `block_input_24`. tcc's own captures gave
 0.9999978. Radiance's connection weights are E4M3 per group (served recipe), so < 1 measures the read-weight
-numerics difference. Result: §4.
+numerics difference. **Measured on the first filed capture** (held0-rust raw, 537 rows):
+`{"split": 24, "hc_identity_cos": 0.99996543}` (`data/refit/hc-check-held0-rust.json`) — the captured tensors are
+the boundary and the layer-24 block input; the 3.5e-5 gap is radiance's stored connection weights vs tcc's bf16 ones.
+
+**Engine shift, same tokens** (one-off diagnostic, radiance capture vs tcc's capture of held0-rust, 512 matched rows,
+ids equal): raw — boundary_24 cos 0.9866, block_input_24 0.9716, block_input_31 0.9241, block_input_47 0.9109;
+chat — 0.9896 / 0.9798 / 0.9552 / 0.9431. The late block inputs the shipped map was fitted to differ from
+radiance's by ~0.06–0.09 in cosine, which is the room the refit has.
 
 ## 3. Capture driver (step 3) — `tools/refit/capture.py`
 
@@ -95,7 +102,33 @@ the shipped grid) → lambda by held-out mean block-input cosine → `kva-radian
 [2560,10241] bf16, bias last; no `final`) → `report-radiance-s24.json`. The shipped projector is scored by
 `fit.his_metrics` on the SAME radiance held rows; both cosines are recomputed from the bf16 files.
 
-(results: pending the captures)
+```
+$ fit_projector.py --sums data/refit/sums --held data/refit/store/held --ckpt <tcc checkpoint> \
+    --shipped ~/AI-Work/kva/qfn/proj/kva-big-s24.safetensors --out data/refit/proj --threads 10
+20:27:42 held rows 7532; HC identity at layer 24: cos 0.999961
+20:27:51 shipped projector on radiance held rows: {'bi': 0.75014, 'bi_gdn': 0.74993, 'bi_attn': 0.75077, 'kdir': 0.88927, 'ikdir': 0.90957, 'vrel': 0.15808}
+20:32:24 lambda 0.001: {'bi': 0.75295, ...}   lambda 0.003: 0.75305   lambda 0.01: 0.75333
+20:32:24 lambda 0.03:  {'bi': 0.75363, 'bi_gdn': 0.75352, 'bi_attn': 0.75395, 'kdir': 0.89088, 'ikdir': 0.91085, 'vrel': 0.15580}
+20:32:24 lambda 0.1: 0.75240   lambda 0.3: 0.74573
+20:33:05 solved in 310s; lambda 0.03; refit file on held rows: {'bi': 0.75363, 'bi_gdn': 0.75352, 'bi_attn': 0.75394, 'kdir': 0.89088, 'ikdir': 0.91085, 'vrel': 0.15580}
+```
+| | shipped (tcc fit) | refit (radiance) |
+|---|---|---|
+| held-out bi, radiance captures (7,532 rows) | **0.7501** | **0.7536** (+0.0035) |
+| held-out bi, tcc captures (shipped report, 7,479 rows) | 0.7525 | — |
+| kdir / ikdir / vrel (radiance rows) | 0.8893 / 0.9096 / 0.1581 | 0.8909 / 0.9109 / 0.1558 |
+| lambda; rows raw / chat (weighted) | 0.03; 248,923 / 176,866 (497,846) | 0.03; 248,892 / 249,312 (497,784; chat weight 0.998) |
+| HC identity at 24 (instrument) | 0.9999978 (tcc) | 0.9999608 (radiance) |
+
+Per layer (refit − shipped, bi): every one of the 24 layers improves, +0.0012 (L24) … +0.0079 (L32); paired over layers
+**+0.00349 [0.00292, 0.00410]** (`labbook compare heldout-bi-shipped-radiance heldout-bi-refit-radiance --paired`;
+records seq after H6-refit-cos). Registered prediction H6-refit-cos was a gain in [+0.005, +0.04]: the direction holds,
+the size is below the band (verdict is the orchestrator's). Reading: the shipped map loses only 0.0024 of held-out
+cosine moving from tcc's activations to radiance's (0.7525 → 0.7501) even though radiance's late block inputs differ
+from tcc's by 0.06–0.09 cosine on the same tokens (§2) — the map is near the S24 ceiling of a linear predictor on
+either engine. So the refit is not expected to close most of R18's +6.4% vs +4.3% gap; R44's paired NLL decides.
+Output `data/refit/proj/kva-radiance-s24.safetensors` sha256 `bedf9d77…f1b5` (1,258,416,408 B), report
+`report-radiance-s24.json` (lambda grid scores, per-layer bi both files, doc keys, rows, checkpoint fingerprint).
 
 ## 5. Correction fit (step 5) — `tools/refit/fit_correction.py`
 
@@ -112,11 +145,66 @@ constant removes, cosine with the shipped C.
 Frozen home `data/refit/home-3af4eaa` (git archive 3af4eaa, built in `radiance-build`; ctest 2/2 host tests pass):
 `qwen4exp_fp8.so` c408596e…9e35, `kva.so` 34062e78…000d. Serve = `scripts/serve.sh off|speed` (RK_FLAGS unchanged:
 `--gpu-headroom-mib 3072` etc.), capture dir mounted rw via `RK_DOCKER_EXTRA`, kernel log checked before, between and
-after (window from the lock). Started 18:32 local; waiting on the GATES worker's lock.
+after (window from the lock). Recording off via `RADIANCE_DEBUG_ARGSHA=1` (§3).
+
+`session.sh exact`, lock held 00:39:13Z → released 01:27:20Z (48 min), log `data/refit/session-exact-20261004T233238Z.log`:
+- preflight OK (03:00.0 144 MiB / 13:00.0 70 MiB before serve); kernel log clean before, between and after.
+- tokenizer probe: 2 texts tokenise identically through the served `/tokenize`.
+- activations: 312 prompts, 4,044,768 tokens in 45.2 min (~1,490 tok/s incl. the capture's syncs and ~280 MiB
+  device→host per chunk; exact TTFT alone is ~1,640 tok/s), **every chunk's record present** (count + key check per
+  prompt, no replay). acc kept pace (40-doc checkpoints, ~15 s each); final sums: raw 151 docs 248,892 rows, chat
+  151 docs 249,312 rows; all training capture dirs deleted after checkpoints.
+- exact states: 14 +st prompts, 134,081 tokens, 1.5 min; records = chunks × 2 ranks for every prompt
+  (`data/refit/state-exact/`, 3.7 GiB, f32 [18, 24, 128, 128] per chunk per rank).
+
+Disk now (`data/refit`, /var/home): sums 11.0 GiB, proj 2.2 GiB (incl. held .pt), sidecar-projr 1.2 GiB, held
+captures 1.0 GiB, exact states 3.7 GiB, stub 23 MiB real (335 GiB apparent, sparse) — ~19.5 GiB in all.
 
 ## 7. Appends (step 7) — prepared, NOT run
 
-(pending the projector)
+`tools/refit/append_prep.sh projr` (no GPU, container mounted read-only; outputs in `data/refit/append-projr/`):
+```
+verify .../sidecar-projr/kva-sidecar-refit.safetensors: PASS          (kva.src.projr.sha256 bedf9d77… OK)
+wrote data/refit/stub-projr: 131 header-only shards (335.3 GiB apparent), extra tensors
+      {'kva-sidecar.safetensors': 87, 'kva-sidecar-refit.safetensors': 48}   (revision de4b8e4d…, as data/stub)
+I plugin .../qwen4exp_fp8.so is shadowed by /kva/data/refit/home-3af4eaa/architectures/qwen4exp_fp8.so
+I plan     51624 weight(s): 50603 quantised by the recipe, 1021 kept as the checkpoint holds them
+D rad_convert.cpp:659    kva.projr.24.weight    bf16    50.00 MiB  as is
+new                  48  kva.projr.24.bias, kva.projr.24.weight, kva.projr.25.bias, ...
+dropped 0   changed 0   unexpected_new 0   expected_missing 0
+planned 51624, held 51576: PASS
+```
+Refit shard `data/refit/sidecar-projr/kva-sidecar-refit.safetensors` sha256 `575149a9…5297` (48 tensors, 1.17 GiB);
+`set.txt` = the shipped set file ∪ the refit one (13 keys, `kva.format` shared, no conflicts).
+
+**The real append #1 — orchestrator only.** Preconditions: no engine container (`docker ps`, `pgrep -af
+'radiance|rad-'`: rad-convert's open-file check cannot see another container); the container is still
+123,364,379,720 B (= `rad-info-v-before.txt`'s state; else rerun append_prep); model SSD ≥ 2 GB free;
+**save the Stage 2 restore record first** — the writer renames its new `.pre-append` over the old one
+(`core/format/radfile.cpp:1321-1336`), and the Stage 2 record is the way back to the pristine container:
+```
+cd ~/projects/inference/radiance-kva
+cp -p ~/models/rad/qwen3.8-next-flash-fp8-iq4r-moe.rad.pre-append evidence/stage6/pre-append.stage2   # 256 B
+docker run --rm --security-opt label=disable -e RADIANCE_KVA_DECLARE=all -e CALIB=calib/w4nl-calib \
+  -v "$(readlink -f ~/models/rad)":/models -v "$(pwd -P)":/kva:ro \
+  radiance-build /stage/opt/radiance/bin/rad-convert /kva/data/refit/stub-projr \
+    --reuse /models/qwen3.8-next-flash-fp8-iq4r-moe.rad --in-place \
+    --recipe /models/qwen4exp-w4nl64-i8-hc8m.recipe \
+    --home /kva/data/refit/home-3af4eaa:/stage/opt/radiance/share/radiance \
+    $(sed 's/^/--set /' data/refit/append-projr/set.txt | tr '\n' ' ') --set kva.mode=quality --set kva.tail=2048 \
+    -v > data/refit/append-projr/append.log 2>&1; echo "exit $?"
+```
+(= the plan-only run minus `--plan-only`, `/models` writable.) Expect `--in-place: 51576 weight(s), …, kept where they
+were …; 48 added past its end`. After, in `data/refit/append-projr/`:
+1. `rad-info -v` → `rad-info-v-after.txt`; `tools/plan_diff.py --plan plan-only.log --container rad-info-v-after.txt`
+   (no `--expect-new`) must PASS (planned 51,624 = held 51,624).
+2. `rad-info --meta` → `rad-info-meta-after.txt`; `diff` with `rad-info-meta-before.txt` shows only
+   `kva.src.projr.sha256` added; `tools/kva_sidecar.py verify rad-info-meta-after.txt --names refit --proj
+   data/refit/proj/kva-radiance-s24.safetensors` PASS (R13, refit) and the shipped verify (sidecar notes §7.6 2.) PASS.
+3. Restore to post-Stage-2: the new `.pre-append`; to pristine: `evidence/stage6/pre-append.stage2` (same procedure,
+   notes/sidecar.md §7.7 — both stay valid: an append writes only past the old end, plus the header).
+Then REFIT resumes: `tools/refit/session.sh speed` (refit projector, `RADIANCE_KVA_ST=refit` with no `kva.str.*` =
+no correction, tail 512, state capture) → `fit_correction.py` → `append_prep.sh full` (append #2: kva.str.* only new).
 
 ## 8. Decisions and their cost
 
@@ -138,6 +226,8 @@ after (window from the lock). Started 18:32 local; waiting on the GATES worker's
 
 - `270b6ba` tools/refit (docs, convert, capture, fit_projector, fit_correction, session.sh), tests/test_refit_*,
   kva_sidecar `--st` optional for refit.
+- `60919e9` append_prep.sh + these notes; later commit: append_prep physical paths (a stub symlink computed between
+  /home and /var/home spellings pointed nowhere inside the /kva mount; fixed with `pwd -P` / `readlink -f`).
 
 ## Appendix — prompt list (text sha256, first 16 hex; tokens after any cut)
 
