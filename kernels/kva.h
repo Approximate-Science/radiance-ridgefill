@@ -95,8 +95,8 @@ KVA_HD inline float kva_bf16_to_f32(uint16_t h) {
 /* ---------------------------------------------------------------- parsed operands
  *
  * Each op's operands, checked and reduced to pointers, extents and element strides. Passed BY
- * VALUE as the device kernel's argument, so every field is a plain scalar or pointer (all three
- * structs are well under the 768-byte argument limit). */
+ * VALUE as the device kernel's argument, so every field is a plain scalar, pointer or array of
+ * them (the largest, KvaCorrect, is 248 bytes of the 768-byte argument limit). */
 
 typedef struct KvaMask {
     const int32_t* cu_last;                  /* [2] {s, e}; device memory on the device row */
