@@ -2740,10 +2740,12 @@ void hold_kva_final(RadBuilder& b) {
 
 /* With MTP (max_spec > 0) the final map is declared, uploaded as hc row blocks of [n + 1, hc*n] -- block i holds
  * rows i*n .. i*n + n of the map and that slice of the bias -- and ridden by the ring after the last late layer;
- * without MTP, or with RADIANCE_KVA_FINAL=off, nothing of it is declared or held. */
+ * without MTP, with RADIANCE_KVA_FINAL=off, or with the switch unset -- THE SHIPPED DEFAULT (Dylan, 2026-10-05:
+ * the map is not in the release) -- nothing of it is declared, held or streamed, even from a folder that holds it. */
 TEST(the_final_map_is_held_and_declared_only_with_mtp) {
     RadModelMeta meta = flash_next_meta();
-    for (auto [spec, sw, want] : {std::tuple<int, const char*, bool>{3, "on", true}, {0, "on", false}, {3, "off", false}}) {
+    for (auto [spec, sw, want] : {std::tuple<int, const char*, bool>{3, "on", true}, {0, "on", false}, {3, "off", false},
+                                  {3, nullptr, false}}) {
         RadBuildCtx c = served_ctx();
         c.max_spec = spec;
         Env env({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_FINAL", sw}});
@@ -2757,6 +2759,7 @@ TEST(the_final_map_is_held_and_declared_only_with_mtp) {
         CHECK_EQ(k.b_final != 0, want);
         CHECK_EQ(k.ring_end, (int64_t)(8 + (want ? 4 : 0)));
         CHECK_EQ(k.final_w.size(), (size_t)(want ? 4 : 0));
+        CHECK_EQ(qwen4exp_kva::g_upload[0].final_w.size(), (size_t)(want ? 4 : 0));   /* not uploaded either */
         if (!want) continue;
         CHECK_EQ(kva.ops[k.op_final - 1].op, std::string("kva_gemm_nt_bias"));
         CHECK(kva.concurrent.count(k.b_final));

@@ -13,9 +13,9 @@
  * device mask (kva_select, mask 1 rows only -- exact rows, decode rows and other sequences keep their own
  * stream) on the masked and straddle paths, by a plain row copy on the lean path, where every row is bulk.
  *
- * Declared only with MTP on (max_spec > 0), in a projecting mode, with the folder holding the map and
- * RADIANCE_KVA_FINAL not off. Cost: hc more ring copies and GEMMs an approximate pass -- +210 MB a pass a rank
- * over the link (the bf16 projector moves 1.26 GB, int8 0.64 GB) and +17% of the projector's MACs -- 200 MiB
+ * Declared only with RADIANCE_KVA_FINAL=on (default off: not in the release, R70's +1.8% drafted tokens a step is
+ * not worth its VRAM), MTP on (max_spec > 0), a projecting mode and the folder holding the map. Cost: hc more
+ * ring copies and GEMMs an approximate pass -- +210 MB a pass a rank over the link (the bf16 projector moves 1.26 GB, int8 0.64 GB) and +17% of the projector's MACs -- 200 MiB
  * more host-mapped memory a rank, the ring's one slot sized for a bf16 block even with an int8 folder (50 MiB),
  * h_S kept even with an int8 folder, and `kva_final` [max_tok, hc*n] in the arena.
  */

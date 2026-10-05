@@ -19,7 +19,8 @@ lines in `docker logs NAME` since the request was sent are the prompt's last row
 
 compare: per prompt, top-1 agreement and the top-K KL(P_ref || Q_cand) over the reference's top 20, both renormalised
 over that set (a reference id missing from the candidate's 20 takes the candidate's 20th logit, so the KL is a lower
-bound there); means split by picture / text-only. R75's question is whether the picture rows' gap to the reference
+bound there); means split by picture / text-only. The planes hold only what survived the request's top-p (the
+container's default 0.95 applies; ids past the cut are -1), so the KL is over that surviving set. R75's question is whether the picture rows' gap to the reference
 is within the text-only rows' gap (the band) -- the same 20 texts with and without a picture before them.
 
 Standard library only.
@@ -86,11 +87,18 @@ def run(a):
     Path(a.out).write_text(json.dumps(rows, indent=1))
 
 
+def finite(row):
+    """The row's real candidates: the sampler pads past its top-p cut with id -1 and -inf."""
+    return [(i, v) for i, v in zip(row["idx"], row["val"]) if i >= 0 and math.isfinite(v)]
+
+
 def kl_top(ref, cand):
-    """KL(P_ref || Q_cand) over the reference's candidate ids, both renormalised over them."""
-    floor = min(cand["val"])
-    q_of = dict(zip(cand["idx"], cand["val"]))
-    lp, lq = ref["val"], [q_of.get(i, floor) for i in ref["idx"]]
+    """KL(P_ref || Q_cand) over the reference's candidate ids, both renormalised over them. The planes hold what
+    survived the request's top-p (0.95 by the container's default), so this is over that set."""
+    r, c = finite(ref), finite(cand)
+    floor = min(v for _, v in c)
+    q_of = dict(c)
+    lp, lq = [v for _, v in r], [q_of.get(i, floor) for i, _ in r]
     zp, zq = max(lp), max(lq)
     sp = math.log(sum(math.exp(x - zp) for x in lp)) + zp
     sq = math.log(sum(math.exp(x - zq) for x in lq)) + zq

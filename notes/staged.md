@@ -50,4 +50,19 @@ evidence/staged/d1/session.log; int8 only)
 - **R97 -- not isolated by this instrument.** /stats link h2d a request (mover + stager): stock 125-137 GiB, KVA 43-83
   GiB (approximate passes skip the late layers' experts), so the +213 MiB of a first exact pass after an approximate one
   is inside the per-request totals' spread. Decode after the first request: ~7 ms/token in all three arms.
-- R75: D2 (queued).
+- (mutant paths above: the scripts are `evidence/stagee/scripts/mutant_*.py` since the GPU-time audit renamed them)
+
+## 4. Results -- D2 (2026-10-05 21:02-21:15Z, home 406e746; evidence/staged/d2/; int8 only, quality-bf16 skipped)
+- **R75 -- no sign that text after a picture is approximated worse; the instrument is coarse.** tools/media_corpus.py
+  (seed 75: bar/line/flow/table/pie, quick docs 3-7), 4 cuts each (44-56K characters, 11.6-15.0K tokens): 20 picture +
+  20 text-only twin prompts, last-row candidates through the engine's buffer probe (`-vv`, RADIANCE_DUMP_BUF
+  sampler.cand_idx/cand_val), quality int8 vs exact: **top-1 agreement 14/20 picture, 14/20 text-only; top-20 KL
+  over the surviving candidates 0.052 (picture) vs 0.297 (text-only), max 0.37 / 2.65.** 190 approximate passes.
+  Limits, stated: in 15 of 20 rows of each kind stock's top-1 is the same special token (id 248046), so most
+  agreement is template-driven (where it is not: 1/5 picture, 1/5 text); and the container's default top-p 0.95 left a
+  single candidate in 22 of 40 reference rows (the planes hold only what survives the request's top-p). A sharper
+  run would send top_p 1.0 and a prompt whose first answer token is content. HD-R75-media-band: picture within the
+  text-only band on top-1 (equal) and below it on KL -- not killed; weak evidence.
+- **Mutants: 34/34 caught** (beside D2, on src-406e746): mutant_slot S1-S10 (one slot, host correction, int8 slot and
+  h_S), mutant_final F1-F8, mutant_ring R1-R5 + R7, mutant_media M1-M6 + X1-X4 (straddle line, the merge's two fixes);
+  X5 (final map on by default) caught on the working tree after 6cc3f5e.

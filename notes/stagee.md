@@ -419,3 +419,17 @@ rank (the ring's one 25.4 MiB slot + 41 MiB of activation buffers) displaces ~63
 is unchanged (R77). The intermittent extra 29.3 MiB the engine sometimes reads as "already held" at startup is not
 the plugin's (a stock boot shows it too) and cannot be removed plugin-side; a boot that reads it serves with ~26 fewer
 slots whatever the mode. README "What a request that does not use KVA pays" carries this paragraph's numbers.
+
+## 20. Merge-readiness (2026-10-05 ~21:25Z) -- stage-e HEAD merges into main (7bbf161) with no conflict
+- Verified builds: 5a3115b (S4: ctest -LE gpu 3/3), 406e746 (= + main with Stage C; D1: 3/3), working tree at 6cc3f5e
+  (63 static cases, 1,125,472 checks). Engine on 5a3115b/406e746: off ident = R3; KL rows byte-identical (bf16 = A′,
+  int8 = S1); B's 8192/10 starts and serves; R76 green. Mutants 34/34 (+ X5).
+- **For the core/adapter split worker:** the shipped projector is the plain int8 folder (`data/projector-qwen38fn-int8`,
+  kva.json sha256 5b699e27…, §18); `RADIANCE_KVA_FINAL` defaults OFF (6cc3f5e) -- the MTP final map is not in the
+  release, nothing of it is declared/held/streamed unless `=on`; the ring is one slot sized to the folder's block
+  (25.4 MiB int8); correction + row table live in the host block; int8 without the final map declares no h_S;
+  `RADIANCE_KVA_MIN_BULK_ROWS` defaults to 1,024 unconditionally (host is the only placement); retired switches
+  (PROJ_PLACE, PROJ_RING) are refused by name. The static suite runs with the min-bulk gate off (tests/arch_static_test.cpp
+  `g_min_bulk_off`) and `Env` restores what it overwrote.
+- Residual accepted (Dylan): +0.9-1.2% held prefill (§18-§19, README). Dropped by decision: R86-R90, R87 TP1 (§13);
+  every bf16 arm after 20:31Z (int8 only). R97 not isolated (staged.md). R75 weak but not killed (staged.md §4).
