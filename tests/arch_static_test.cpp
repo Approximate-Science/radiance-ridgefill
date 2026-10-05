@@ -482,7 +482,7 @@ void check_same_graph(const RadBuilder& a, const RadBuilder& b) {
  * TP2 deployment, with the MTP head declared, for a bf16 container and for the served formats. */
 TEST(off_declares_exactly_the_in_tree_graph) {
     RadModelMeta meta = flash_next_meta();
-    for (int world : {1, 2})
+    for (int world : {1, 2, 4})   /* TP4 too (R87): a world this box cannot run */
         for (int rank = 0; rank < world; ++rank)
             for (int spec : {0, 3})
                 for (bool fmt : {false, true}) {
@@ -742,7 +742,7 @@ TEST(speed_takes_the_folder_and_declares_its_kernel_ops) {
  * aligned in one block. At TP2, each rank its own block. */
 TEST(the_raw_operands_point_at_their_tensors_copies) {
     RadModelMeta meta = flash_next_meta();
-    for (int world : {1, 2})
+    for (int world : {1, 2, 4})   /* TP4 (R87): each rank 12 of the 48 value heads */
         for (int rank = 0; rank < world; ++rank) {
             RadBuildCtx c = served_ctx(rank, world);
             Env env({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_ROWSEL_TABLE", "all"}});
@@ -1445,7 +1445,7 @@ std::vector<RecIssue> straddle_expected(const std::vector<RecIssue>& seg, const 
  * the tail-only issues above; the epilogue stock. TP1 and rank 0 of TP2 (writes carry the
  * all-reduce). */
 TEST(a_speed_straddle_runs_its_late_blocks_over_the_tail_rows_only) {
-    for (int world : {1, 2}) {
+    for (int world : {1, 2, 4}) {
         Pair p;
         declare_pair(p, "speed", 0, world);
         REQUIRE_EQ(p.st, RAD_OK);
