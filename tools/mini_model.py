@@ -174,7 +174,7 @@ def tensors(m: Mini) -> dict:
             gain(f"{ix}.k_layernorm.weight", 128, one=True)
         else:
             la = f"{pre}.linear_attn"
-            w(f"{la}.in_proj_qkv.weight", m.conv_dim + m.v_dim, m.n)
+            w(f"{la}.in_proj_qkv.weight", m.conv_dim, m.n)
             w(f"{la}.in_proj_z.weight", m.v_dim, m.n)
             w(f"{la}.in_proj_a.weight", m.nv, m.n)
             w(f"{la}.in_proj_b.weight", m.nv, m.n)

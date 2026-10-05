@@ -1,0 +1,33 @@
+# mini-qwen4exp.recipe -- the published container's recipe (radiance data/recipes/
+# qwen4exp-w4nl64-i8-hc8m.recipe, the one /var/home/dylan/models/rad/README.md documents for
+# qwen3.8-next-flash-fp8-iq4r-moe.rad) with ONE deviation: the routed experts are quantised by
+# `rtn`, not `gptq`. The published rule needs $CALIB -- ten million tokens of Grams recorded from
+# the real model -- and a random-weights mini model has none, so this keeps the rule's GRID exactly
+# (the w4nl codebook, the 128-point Walsh-Hadamard rotation, an E4M3 scale a group of 64 under the
+# fixed f32 2^-13) and only gives up the code SEARCH. The encoding the container holds -- what
+# rad-info -v prints and what the projector folder's `encodings` fingerprint compares -- is the same
+# w4nl64a8h either way. Everything else is the published rule set verbatim, minus the
+# protected-expert lines (layers 34/44/46/47 do not exist at 8 layers).
+
+blk.*.ffn_*_exps.*.weight            rtn  table=w4nl group=64 scale=fp8_e4m3 scale2=f32 block2=*x* scale2_value=0.0001220703125 transform=fwht128 rule=search
+
+*_hc_down.weight                     rtn  codes=fp8_e4m3 group=128 scale=f32
+*_hc_up.weight                       rtn  codes=fp8_e4m3 group=80 scale=f32
+
+mtp.fc_hidden.weight                 rtn  codes=fp8_e4m3 group=128 scale=f32
+mtp.fc_embedding.weight              rtn  codes=fp8_e4m3 group=128 scale=f32
+
+blk.*.attn_qg.weight                 rtn  codes=i8 group=128 scale=bf16 clamp=sym rule=search
+blk.*.attn_k.weight                  rtn  codes=i8 group=128 scale=bf16 clamp=sym rule=search
+blk.*.attn_v.weight                  rtn  codes=i8 group=128 scale=bf16 clamp=sym rule=search
+blk.*.attn_output.weight             rtn  codes=i8 group=128 scale=bf16 clamp=sym rule=search
+blk.*.ssm_inz.weight                 rtn  codes=i8 group=128 scale=bf16 clamp=sym rule=search
+blk.*.ssm_out.weight                 rtn  codes=i8 group=128 scale=bf16 clamp=sym rule=search
+blk.*.ffn_gate_up_shexp.weight       rtn  codes=i8 group=128 scale=bf16 clamp=sym rule=search
+blk.*.ffn_down_shexp.weight          rtn  codes=i8 group=128 scale=bf16 clamp=sym rule=search
+
+output.weight                        rtn  codes=i8 group=128 scale=bf16 clamp=sym rule=search
+
+blk.*.ple_ngram.weight               rtn  codes=fp8_e4m3 block=*x* scale=bf16 rule=fixed scale_value=1.99317932128906e-4
+
+mtp.draft_head.weight                rtn  codes=u2 zero=u8 group=128 scale=f16
