@@ -18,7 +18,9 @@
  *                             auto lets the late layers STREAM their routed experts on an
  *                             approximate pass whose exact rows are at most RADIANCE_KVA_STAGE_ROWS;
  *                             stock leaves the stager as it is (the tested fallback, R96)  default auto
- *   env RADIANCE_KVA_STAGE_ROWS  that row threshold                    default: every pass (R96)
+ *   env RADIANCE_KVA_STAGE_ROWS  the exact rows a masked pass may carry and still stream; past it
+ *                             the pass runs exact (speed straddles take the tail-only path) --
+ *                             streaming many rows reads every expert over the link (A.1)  default 64
  *   env RADIANCE_KVA_SCORE_BULK  1: approximate in KL mode too, whose logits on bulk rows are then
  *                             not the model's -- score only the exact tail (PLAN-FIX §6.2, R73)
  *
@@ -28,6 +30,8 @@
  *   RADIANCE_KVA_FORCE_SPLIT  N: the bulk ends N rows before every approximate chunk's end (R47)
  *   RADIANCE_KVA_SHIFT_B      +-N rows added to every bulk end (R51)
  *   RADIANCE_KVA_FORCE_STREAM 1: the late layers stream on every masked pass (R94)
+ *   RADIANCE_KVA_TAIL_ONLY    0: speed straddles take the masked path instead of the tail-only one
+ *                             (the oracle the tail-only path is compared with, A.1)
  *
  * WHICH COPY OF EACH FITTED TENSOR (the controls and the Stage 6 refit live in the same container
  * under suffixed names, because the disk has no room for a second 114 GiB container and
@@ -84,12 +88,13 @@ struct Config {
     const char* score       = "kva.rowsel.score";
     bool        declare_all = false;
     int         stage       = STAGE_AUTO;
-    int64_t     stage_rows  = INT64_MAX;   /* R96 has not measured the crossover yet */
+    int64_t     stage_rows  = 64;          /* one tile: A.1's profile, notes/impl.md §6 */
     bool        score_bulk  = false;
     int         straddle    = STRADDLE_SPLIT;
     int64_t     force_split = 0;
     int64_t     shift_b     = 0;
     bool        force_stream = false;
+    bool        tail_only   = true;
     const char* meta_mode   = nullptr;     /* the container's kva.mode, if it has one: ignored */
 };
 
@@ -184,6 +189,8 @@ inline int read_switches(Config* c) {
                           &c->shift_b));
     RAD_ARCH_TRY(read_choice("RADIANCE_KVA_FORCE_STREAM", { "0", "1" }, "1 or unset", &v));
     c->force_stream = v == 1;
+    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_TAIL_ONLY", { "1", "0" }, "0 or unset", &v));
+    c->tail_only = v == 0;
     return RAD_OK;
 }
 

@@ -136,12 +136,13 @@ inline void moe_pass(RadCtx* c, const MoeFP8& e, const MoeArm& arm, int64_t T, i
                     brow_slice(w.x, r0, rows, n));
 }
 
-/* MoeFP8::step (rad_block_moe_fp8.h:1529-1576): the passes and the routing report the heat engine
- * reads -- with dropped slots, the counts are the exact rows' alone, so bulk rows no longer
- * register as heat. */
-inline void moe_layer(RadCtx* c, const MoeFP8& e, const MoeArm& arm, const RadBatch* batch) {
+/* MoeFP8::step (rad_block_moe_fp8.h:1529-1576) over rows [from, T): the passes and the routing
+ * report the heat engine reads -- with dropped slots or a tail-only range, the counts are the exact
+ * rows' alone, so bulk rows no longer register as heat. */
+inline void moe_layer(RadCtx* c, const MoeFP8& e, const MoeArm& arm, const RadBatch* batch,
+                      int64_t from = 0) {
     const int64_t T = batch->n_tok;
-    for (int64_t r0 = 0; r0 < T; r0 += e.c.rows)
+    for (int64_t r0 = from; r0 < T; r0 += e.c.rows)
         moe_pass(c, e, arm, T, r0, (T - r0 < e.c.rows) ? (T - r0) : e.c.rows);
     moe_debug_weights(c, e.layer, e.c.top_k, e.w.ids, e.w.ew);
     RadRouting r{};

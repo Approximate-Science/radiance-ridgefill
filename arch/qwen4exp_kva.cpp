@@ -29,6 +29,7 @@
 #endif
 #include <qwen4exp_fp8/qwen4exp_fp8.cpp>
 
+#include "kva_plan.h"
 #include "kva_declare.h"
 #include "kva_dump.h"
 #include "kva_fill.h"
@@ -39,6 +40,9 @@
 namespace qwen4exp_kva {
 
 using namespace rad::arch;
+
+static_assert(MODE_OFF == PLAN_OFF && MODE_PLUMB == PLAN_PLUMB && MODE_SPEED == PLAN_SPEED &&
+              MODE_QUALITY == PLAN_QUALITY, "kva_config.h's Mode and kva_plan.h's PlanMode share one order");
 
 /* The container's kva.mode is not a switch (PLAN-FIX §6.5): said once, by the real declare of
  * rank 0, so an operator who converted with --set kva.mode=... learns why nothing changed. */
@@ -94,46 +98,37 @@ static int declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* c
 
 /* ================================================================== step */
 
-/* WHAT THIS PASS IS (PLAN-FIX §2): a function of keyed batch fields (radiance
- * core/runtime/ctx.cpp:989-995) and declare-time config only, so a replayed pass issues what a
- * fresh one would (R15/R99). The host never needs the last sequence's first row s, which is device
- * data: computing a row exactly is always correct, so every op runs over all rows and only the
- * device mask decides which rows use the projection; the host knows the bulk END b and a lower
- * bound s_lb of s, which bound the projector's rows. Media steps, encoder and draft passes and the
- * last chunks of a prompt run stock; KL mode too unless SCORE_BULK says the tail alone is scored. */
+/* WHAT THIS PASS IS: kva_plan.h's rule over this pass's keyed fields (radiance core/runtime/ctx.cpp:
+ * 989-995) and the declare's config, so a replayed pass issues what a fresh one would (R15/R99).
+ * The host never needs the last sequence's first row s (device data); it knows the bulk END b and a
+ * lower bound s_lb. Media steps, encoder and draft passes and the last chunks of a prompt run stock;
+ * KL mode too unless SCORE_BULK says the tail alone is scored. */
 static Pass derive(const Kva& k, const RadBatch* batch) {
-    Pass p;
     const Config& c = k.cfg;
-    if (c.mode == MODE_OFF || !k.have_proj || !k.out_rows_ok) return p;
-    if (batch->enc || batch->draft_pass != 0 || batch->n_mm_rows > 0 || rope_mixed(batch) ||
-        batch->n_ahead <= 0)
-        return p;
-    int64_t D = 0, DT = 0;
-    batch_split(batch, &D, &DT);
-    const int64_t n_tok = batch->n_tok, Pn = batch->n_seq - D;
-    if (Pn <= 0) return p;
-    /* b - s = 0 mod G: a non-final chunk starts and ends on the scheduler's quantum, a multiple of
-     * the delta net's chunk (scheduler.cpp:666-688, geometry.cpp:62-108), and n_tok - b is rounded
-     * to G here -- so the split scan's two halves keep the single conv-prep/kkt pass's tiles. The
-     * exact tail is therefore T .. T+G-1 rows. */
-    const int64_t G = k.tile;
-    int64_t b = batch->n_ahead >= c.tail ? n_tok
-                                         : n_tok - (c.tail - batch->n_ahead + G - 1) / G * G;
-    if (c.force_split) b = n_tok - c.force_split;
-    b = std::min(std::max<int64_t>(b + c.shift_b, 0), n_tok);
-    const int64_t q_prefill = batch->phase == RAD_PHASE_MIXED ? batch->max_q_len_prefill
-                                                              : batch->max_q_len;
-    const int64_t s_lb = std::max(DT, n_tok - q_prefill);
-    if (b <= s_lb) return p;
-    p.b = b;
-    p.s_lb = s_lb;
-    p.split = b < n_tok;
-    p.path = c.mode == MODE_SPEED && D == 0 && Pn == 1 && b == n_tok ? PATH_LEAN : PATH_MASKED;
+    PlanIn in;
+    in.mode = c.mode;   /* Mode and PlanMode share their order: off, plumb, speed, quality */
+    in.eligible = k.have_proj && k.out_rows_ok && !batch->enc && batch->draft_pass == 0 &&
+                  batch->n_mm_rows <= 0 && !rope_mixed(batch);
+    batch_split(batch, &in.n_seq_decode, &in.n_tok_decode);
+    in.n_tok = batch->n_tok;
+    in.n_seq = batch->n_seq;
+    in.q_prefill = batch->phase == RAD_PHASE_MIXED ? batch->max_q_len_prefill : batch->max_q_len;
+    in.n_ahead = batch->n_ahead;
     /* The probes ride in layer S-3's MoE (approximate_step), so the lever needs three routed layers
-     * below S; the threshold is on the pass's exact-row count, a keyed number (R96). */
-    p.stream = p.path == PATH_MASKED && k.split >= 3 &&
-               (c.force_stream || (c.stage == STAGE_AUTO && n_tok - (b - s_lb) <= c.stage_rows));
-    return p;
+     * below S. */
+    in.stream_ok = k.split >= 3 && (c.stage == STAGE_AUTO || c.force_stream);
+    /* rad_block_attn_gated_fp8.h:502-504: past the exactness bound every late attention layer takes
+     * its per-row sparse form, whose rows the straddle can restrict. */
+    const int64_t reach = (int64_t)batch->max_ctx_len + batch->max_q_len;
+    in.straddle_ok = k.straddle_layers && (k.qsa_exact_to <= 0 || reach > k.qsa_exact_to);
+    PlanConfig pc;
+    pc.tail = c.tail;
+    pc.tile = k.tile;
+    pc.force_split = c.force_split;
+    pc.shift_b = c.shift_b;
+    pc.stage_rows = c.stage_rows;
+    pc.force_stream = c.force_stream;
+    return plan_pass(in, pc);
 }
 
 /* qwen4exp_fp8.cpp:1391-1404, verbatim: embedding, media rows, PLE hash, the stream's first value,
@@ -218,7 +213,7 @@ static void approximate_step(RadCtx* c, const Kva& k, const RadBatch* batch, con
     const int rank = rad_rank(c);
     qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
     prologue(c, m, batch);
-    if (p.path == PATH_MASKED) mask_rows(c, k, batch, p);
+    if (p.path == PATH_MASKED || p.path == PATH_STRADDLE) mask_rows(c, k, batch, p);
     const MoeArm probes = probe_arm(c, k, m);
     for (int64_t li = 0; li < k.split; ++li)
         layer(c, m, li, batch, p.stream && li == k.split - 3 ? &probes : nullptr);
@@ -230,8 +225,9 @@ static void approximate_step(RadCtx* c, const Kva& k, const RadBatch* batch, con
             dump_mask(c, k.dump_dir, k.b_mask, k.b_bounds, batch, p.b, p.s_lb);
     }
     for (int64_t li = k.split; li < m.g.n_layer; ++li) {
-        if (p.path == PATH_LEAN) fill_layer(c, k, m, li, batch, sd);
-        else                     masked_layer(c, k, m, li, batch, p, sd);
+        if (p.path == PATH_LEAN)          fill_layer(c, k, m, li, batch, sd);
+        else if (p.path == PATH_STRADDLE) straddle_layer(c, k, m, li, batch, p, sd);
+        else                              masked_layer(c, k, m, li, batch, p, sd);
     }
     epilogue(c, m, batch);
 }
@@ -309,8 +305,8 @@ static void finish_state(RadCtx* c, const Kva& k, const RadBatch* batch, StateDu
 static bool misaligned(const Kva& k, const RadBatch* batch, const Pass& p) {
     int64_t D = 0, DT = 0;
     batch_split(batch, &D, &DT);
-    return p.path == PATH_MASKED && batch->n_seq - D == 1 && !k.cfg.force_split &&
-           (p.b - DT) % k.tile != 0;
+    return (p.path == PATH_MASKED || p.path == PATH_STRADDLE) && batch->n_seq - D == 1 &&
+           !k.cfg.force_split && (p.b - DT) % k.tile != 0;
 }
 
 static void step(RadCtx* c, const RadBatch* batch) {

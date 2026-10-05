@@ -76,6 +76,13 @@ static const char* decl_masked(RadBuilder* b, const qwen4exp_fp8::Model& m, cons
     if (!k.op_mask) return "kva_mask";
     if (project && (!k.op_select || !k.op_drop)) return !k.op_select ? "kva_select" : "kva_drop_rows";
     if (project && !k.op_cast) return "cast";
+    k.straddle_layers = c.tail_only && c.mode == MODE_SPEED;
+    for (int64_t l = k.split; l < m.g.n_layer; ++l) {
+        const AttnGatedFP8& a = m.layers[(size_t)l].attn;
+        if (!m.layers[(size_t)l].full) continue;
+        k.straddle_layers = k.straddle_layers && a.qsa_sel && a.qsa_sequ && a.op_attn_gq;
+        k.qsa_exact_to = std::max(k.qsa_exact_to, a.qsa_exact_to);
+    }
     return decl_probes(b, m, k) < 0 ? "a buffer" : nullptr;
 }
 

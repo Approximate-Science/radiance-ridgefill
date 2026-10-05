@@ -14,18 +14,6 @@ namespace qwen4exp_kva {
 
 using namespace rad::arch;
 
-enum Path { PATH_STOCK = 0, PATH_LEAN, PATH_MASKED };
-static const char* const kPathNames[] = { "stock", "lean", "masked" };
-
-/* What step() decided for this pass, from keyed batch fields and declare-time config only (R99). */
-struct Pass {
-    int     path  = PATH_STOCK;
-    int64_t b     = 0;       /* the bulk END, an absolute row of the step (PLAN-FIX §2) */
-    int64_t s_lb  = 0;       /* a host LOWER bound of the last sequence's first row */
-    bool    split = false;   /* b < n_tok: the last sequence's chunk straddles the bulk end */
-    bool    stream = false;  /* the late layers stream their routed experts (notes/impl.md §2) */
-};
-
 /* This rank's value heads of the replicated correction (kva_declare.h's decl_correction): a row
  * slice of the weight, which the issue path narrows and bounds-checks like a buffer slice
  * (radiance core/runtime/issue.cpp:661-698). */
@@ -244,6 +232,98 @@ inline void masked_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int64_
     l.hc_ffn.read(c, T, 0, T);
     moe_layer(c, l.mlp, MoeArm{ k.op_drop, k.b_mask, {} }, batch);
     l.hc_ffn.write(c, T, 0, T);
+    dbg_resid(c, (int)li, "ffn", m.g.n_embd, m.b_h, m.a_x.x);
+}
+
+/* ---------------------------------------------------------------- the straddle: tail-only blocks */
+
+/* The bulk rows' block input, lean style: the projector over the layer-S stream rows [0, b) -- b_h's
+ * bulk rows stay that stream, since only the tail rows are written from here on -- into `x` and its
+ * codes. */
+inline void project_bulk(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li, int64_t b) {
+    const int64_t n = m.g.n_embd;
+    RAD_ISSUE_N(c, k.op_proj[(size_t)li], b, brows(m.b_h, b), RAD_W(k.proj_w[(size_t)li]),
+                RAD_W(k.proj_b[(size_t)li]), RAD_NONE, brows(m.a_x.x, b));
+    if (k.quant.op)
+        RAD_ISSUE_N(c, k.quant.op, b, brows(m.a_x.x, b), brows(m.a_x.cq(), b),
+                    brow_slice(m.a_x.cs(), 0, b, n / RAD_FP8_BLOCK));
+}
+
+/* rad_block_gdn_fp8.h:497-513 over the tail rows [r0, T): the delta net's output for them alone. */
+inline void gdn_tail_rows(RadCtx* c, const GdnFP8& d, int64_t T, int64_t r0) {
+    const int64_t rows = T - r0, n = d.g.n_embd, conv_dim = d.cfg.conv_dim(), v_dim = d.cfg.v_dim();
+    RAD_ISSUE_N(c, d.op_gnorm, rows, brow_slice(d.w.o.x, r0, rows, v_dim),
+                bcol_at(d.w.in.x, r0, conv_dim + v_dim, conv_dim, v_dim, rows), RAD_W(d.w_out_norm),
+                brow_slice(d.w.o.x, r0, rows, v_dim));
+    d.q_o.step(c, T, r0, rows);
+    d.out.step(c, d.w.o, d.w.h.x, T, r0, rows);
+    if (d.op_ar && !ar_taken(d.g, T, d.ar_out, d.ar_out_take))
+        RAD_ISSUE_N(c, d.op_ar, rows * n, brow_slice(d.w.h.x, r0, rows, n), RAD_NONE);
+    if (d.op_add)
+        RAD_ISSUE_N(c, d.op_add, rows, brow_slice(d.w.x, r0, rows, n), brow_slice(d.w.h.x, r0, rows, n),
+                    brow_slice(d.w.x, r0, rows, n));
+}
+
+/* The delta net of a straddling chunk: projections, conv window and the scans over every row (the
+ * state needs them all), split at b around the correction; the output for the tail rows only. */
+inline void gdn_straddle(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li,
+                         const RadBatch* batch, const Pass& p, StateDump* sd) {
+    const GdnFP8& d = m.layers[(size_t)li].gdn;
+    gdn_project(c, d, batch->n_tok);
+    correct(c, k, m, li, k.op_undo[(size_t)li], batch, true);
+    gdn_prefill_front(c, d, batch, 0);
+    gdn_prefill_scans(c, k, m, li, batch, p, sd, 0);
+    gdn_tail_rows(c, d, batch->n_tok, p.b);
+}
+
+/* The attention of a straddling chunk (rad_block_attn_gated_fp8.h:442-563): the indexer whole (block
+ * keys AND every row's selection -- both cheap), K/V of every row, the query path over every row (an
+ * M-RoPE position plane cannot be column-sliced), then the attention, gate and output projection
+ * for the tail rows only, through the per-row sparse gated form, whose rows are independent
+ * queries (:487-519; the plan admits this path only when every late layer takes that form). */
+inline void attn_straddle(RadCtx* c, const qwen4exp_fp8::Layer& l, const RadBatch* batch, int64_t r0) {
+    const AttnGatedFP8& a = l.attn;
+    const int64_t T = batch->n_tok, rows = T - r0, n = a.g.n_embd, qw = a.g.q_dim(), hd = a.g.head_dim;
+    l.qsa.step(c, a.w.h, batch);
+    attn_kv(c, a, batch);
+    a.qg.step(c, a.w.h, a.w.qg, T);
+    RAD_ISSUE_N(c, a.op_q_norm, T * a.g.n_head, bcol(a.w.qg, 0, hd, T), RAD_W(a.w_q_norm), brows(a.w.q, T));
+    RAD_ISSUE(c, a.op_rope_q, brows(a.w.q, T), rope_posmc(a.g, batch, T));
+    const int64_t chunk = a.qsa_gq_rows();
+    for (int64_t off = r0; off < T; off += chunk) {
+        const int64_t r = (T - off) < chunk ? (T - off) : chunk;
+        RAD_ISSUE_N(c, a.op_attn_gq, 1, brow_slice(a.w.q, off, r, qw), kv_cache(a.kv, a.layer),
+                    brow_slice(a.qsa_sel, off, r, a.qsa_topk + 1), brow_slice(a.qsa_sequ, off, r, 1),
+                    RAD_NONE, RAD_NONE, RAD_NONE, brow_slice(a.w.attn.x, off, r, qw),
+                    bcol_at(a.w.qg, off, a.g.n_head * 2 * hd, hd, hd, r),
+                    brow_slice(a.w.attn.cq(), off, r, qw), brow_slice(a.w.attn.cs(), off, r, fp8_blocks(qw)));
+    }
+    a.o.step(c, a.w.attn, a.w.h.x, T, r0, rows);
+    if (a.op_ar && !ar_taken(a.g, T, a.ar_out, a.ar_out_take))
+        RAD_ISSUE_N(c, a.op_ar, rows * n, brow_slice(a.w.h.x, r0, rows, n), RAD_NONE);
+    if (a.op_add)
+        RAD_ISSUE_N(c, a.op_add, rows, brow_slice(a.w.x, r0, rows, n), brow_slice(a.w.h.x, r0, rows, n),
+                    brow_slice(a.w.x, r0, rows, n));
+}
+
+/* A STRADDLING LATE LAYER (A.1, speed): the bulk rows [0, b) get the lean pieces (projection, K/V,
+ * indexer keys, the delta net's recurrence), the tail rows [b, n) the whole in-tree layer -- their
+ * connection read, block output, connection write, feed-forward read, MoE and write -- issued over
+ * that row range with the in-tree helpers' own r0/rows (rad_block_hc.h:360-397, rad_fp8.h:915,
+ * MoeFP8::pass). Nothing reads a bulk row's late block output, so none is computed. */
+inline void straddle_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int64_t li,
+                           const RadBatch* batch, const Pass& p, StateDump* sd) {
+    const qwen4exp_fp8::Layer& l = m.layers[(size_t)li];
+    const int64_t T = batch->n_tok, r0 = p.b, rows = T - p.b;
+    l.hc_mix.read(c, T, r0, rows);
+    project_bulk(c, k, m, li, p.b);
+    if (l.full) attn_straddle(c, l, batch, r0);
+    else        gdn_straddle(c, k, m, li, batch, p, sd);
+    l.hc_mix.write(c, T, r0, rows);
+    dbg_resid(c, (int)li, "mix", m.g.n_embd, m.b_h, m.a_x.x);
+    l.hc_ffn.read(c, T, r0, rows);
+    moe_layer(c, l.mlp, MoeArm{}, batch, r0);
+    l.hc_ffn.write(c, T, r0, rows);
     dbg_resid(c, (int)li, "ffn", m.g.n_embd, m.b_h, m.a_x.x);
 }
 

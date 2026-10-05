@@ -55,6 +55,11 @@ struct Kva {
      * layers' gate-up probes read and write. */
     rad_buf b_zeros = 0, b_probe = 0;
     int64_t n_zeros = 0;
+    /* THE TAIL-ONLY STRADDLE (A.1) needs every late attention layer on its per-row sparse gated form
+     * (rad_block_attn_gated_fp8.h:503-519): declared here, decided per pass from the keyed context
+     * against the largest exactness bound. */
+    bool    straddle_layers = false;
+    int64_t qsa_exact_to = 0;
     std::string dump_dir;                     /* RADIANCE_KVA_DUMP, empty when unset */
     /* Stage 6 captures (debug; notes/arch.md "Capture"): RADIANCE_KVA_CAPTURE and
      * RADIANCE_KVA_CAPTURE_STATE, and the copy op the state capture needs. */

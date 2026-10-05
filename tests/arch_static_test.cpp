@@ -182,6 +182,9 @@ using rad::arch::praw2;
 using rad::arch::praw;
 using rad::arch::brow_slice;
 using rad::arch::MoeFP8;
+using rad::arch::AttnGatedFP8;
+using rad::arch::GdnFP8;
+using rad::arch::bcol_at;
 
 /* ==================================================================== fixtures */
 namespace {
@@ -700,15 +703,20 @@ TEST(the_approximate_decision_truth_table) {
     using qwen4exp_kva::PATH_STOCK;
     using qwen4exp_kva::PATH_LEAN;
     using qwen4exp_kva::PATH_MASKED;
+    using qwen4exp_kva::PATH_STRADDLE;
     const auto none = [](RadBatch&) {};
     const std::vector<Row> rows = {
         {"whole bulk chunk, speed", "speed", {{2048}, 0, 2048}, none, PATH_LEAN, 2048, 0, false},
         {"whole bulk chunk, quality", "quality", {{2048}, 0, 2048}, none, PATH_MASKED, 2048, 0, true},
         {"whole bulk chunk, plumb", "plumb", {{2048}, 0, 2048}, none, PATH_MASKED, 2048, 0, true},
         {"more than T ahead", "speed", {{2048}, 0, 4096}, none, PATH_LEAN, 2048, 0, false},
-        {"T-1 ahead: one tile exact", "speed", {{2048}, 0, 2047}, none, PATH_MASKED, 1984, 0, true},
-        {"half ahead", "speed", {{2048}, 0, 1024}, none, PATH_MASKED, 1024, 0, true},
-        {"64 ahead", "quality", {{2048}, 0, 64}, none, PATH_MASKED, 64, 0, true},
+        {"T-1 ahead, speed: tail-only straddle", "speed", {{2048}, 0, 2047}, none, PATH_STRADDLE, 1984, 0, false},
+        {"half ahead, speed: tail-only straddle", "speed", {{2048}, 0, 1024}, none, PATH_STRADDLE, 1024, 0, false},
+        {"T-1 ahead, quality: one tile exact streams", "quality", {{2048}, 0, 2047}, none, PATH_MASKED, 1984, 0, true},
+        {"half ahead, quality: 1024 exact rows run exact", "quality", {{2048}, 0, 1024}, none, PATH_STOCK, 0, 0, false},
+        {"64 ahead, quality", "quality", {{2048}, 0, 64}, none, PATH_STOCK, 0, 0, false},
+        {"straddle at short context, speed: dense attention", "speed", {{2048}, 0, 1024, 0}, none, PATH_STOCK, 0, 0, false},
+        {"straddle at short context, one tile", "speed", {{2048}, 0, 2047, 0}, none, PATH_MASKED, 1984, 0, true},
         {"1 ahead: no bulk", "speed", {{2048}, 0, 1}, none, PATH_STOCK, 0, 0, false},
         {"final chunk", "speed", {{2048}, 0, 0}, none, PATH_STOCK, 0, 0, false},
         {"mode off", "off", {{2048}, 0, 2048}, none, PATH_STOCK, 0, 0, false},
@@ -719,11 +727,11 @@ TEST(the_approximate_decision_truth_table) {
          [](RadBatch& b) { static int32_t rp[3]; b.rope_pos = rp; b.rope_mixed = 1; }, PATH_STOCK, 0, 0, false},
         {"one decoder beside", "speed", {{1, 1984}, 1, 2048}, none, PATH_MASKED, 1985, 1, true},
         {"eight decoders beside", "speed", {{1, 1, 1, 1, 1, 1, 1, 1, 1984}, 8, 2048}, none, PATH_MASKED, 1992, 8, true},
-        {"eight decoders, straddle", "quality", {{1, 1, 1, 1, 1, 1, 1, 1, 1984}, 8, 1000}, none, PATH_MASKED, 904, 8, true},
+        {"eight decoders, straddle: 1096 exact rows run exact", "quality", {{1, 1, 1, 1, 1, 1, 1, 1, 1984}, 8, 1000}, none, PATH_STOCK, 0, 0, false},
         {"two prefills, last long", "speed", {{64, 1984}, 0, 2048}, none, PATH_MASKED, 2048, 64, true},
         {"two prefills, last short", "speed", {{1984, 64}, 0, 2048}, none, PATH_MASKED, 2048, 64, true},
         {"two prefills, no bulk above s_lb", "speed", {{1984, 64}, 0, 100}, none, PATH_STOCK, 0, 0, false},
-        {"three prefills and a decoder", "quality", {{1, 1024, 512, 448}, 1, 2048}, none, PATH_MASKED, 1985, 961, true},
+        {"three prefills and a decoder: 961 exact rows", "quality", {{1, 1024, 512, 448}, 1, 2048}, none, PATH_STOCK, 0, 0, false},
         {"pure decode", "speed", {{1, 1}, 2, 0}, none, PATH_STOCK, 0, 0, false},
     };
     for (const Row& r : rows) {
@@ -1036,12 +1044,14 @@ TEST(quality_masks_rows_in_place_through_the_in_tree_layer) {
     }
 }
 
-/* #6 -- THE STRADDLING CHUNK (PLAN-FIX §4, DD-C): 64 tokens ahead of a 128-row chunk with T = 2048,
- * so the bulk ends at row 64. split: scan [s, b), decay sums over [s, b), apply, scan [b, e); end:
- * one scan, decay sums over the whole chunk, apply after. Speed mode on the same shape is masked
- * too (the lean fill has no exact rows) and applies without decay sums. */
+/* #6 -- THE STRADDLING CHUNK, masked (PLAN-FIX §4, DD-C): 64 tokens ahead of a 128-row chunk with
+ * T = 2048, so the bulk ends at row 64 and 64 rows are exact (one tile: the pass still streams).
+ * split: scan [s, b), decay sums over [s, b), apply, scan [b, e); end: one scan, decay sums over the
+ * whole chunk, apply after. Speed on the same shape with the tail-only path off (TAIL_ONLY=0) is
+ * masked too and applies without decay sums. */
 TEST(a_straddling_chunk_splits_the_last_scan_at_the_bulk_end) {
     struct Case { const char* mode; const char* straddle; bool split, rho; int64_t rho_rows; };
+    Env tail_only_off({{"RADIANCE_KVA_TAIL_ONLY", "0"}});
     for (const Case& c : {Case{"quality", "split", true, true, 64}, Case{"quality", "end", false, true, 128},
                           Case{"speed", "split", true, false, 0}}) {
         Env e({{"RADIANCE_KVA_STRADDLE", c.straddle}});
@@ -1061,11 +1071,138 @@ TEST(a_straddling_chunk_splits_the_last_scan_at_the_bulk_end) {
     }
 }
 
+/* What an in-tree helper issues, on a scratch context: the oracle for the hand-issued pieces. */
+template <class F>
+std::vector<RecIssue> issues_by(F f) {
+    RadCtx cx;
+    f(&cx);
+    return cx.issues;
+}
+
+void add_linear(std::set<rad_op>& s, const rad::arch::LinearFP8& l) {
+    for (rad_op h : {l.op, l.op_q, l.op_m1}) if (h) s.insert(h);
+}
+
+/* The stock issues of one late layer segment whose handle is in `ops`, in stock order. */
+std::vector<RecIssue> pick(const std::vector<RecIssue>& seg, const std::set<rad_op>& ops) {
+    std::vector<RecIssue> out;
+    for (const RecIssue& r : seg) if (ops.count(r.op)) out.push_back(r);
+    return out;
+}
+
+void append(std::vector<RecIssue>& out, const std::vector<RecIssue>& more) {
+    out.insert(out.end(), more.begin(), more.end());
+}
+
+/* A TAIL-ONLY STRADDLE LAYER as the oracle sees it (A.1): the in-tree helpers called with the tail's
+ * row range (connection read/write, the MoE pass, the output linears), the stock K/V, indexer, query
+ * and delta-net front issues over every row, and the split scan around the correction. */
+std::vector<RecIssue> straddle_expected(const std::vector<RecIssue>& seg, const Batch& x, int l, int64_t b,
+                                        int rank) {
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
+    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    const qwen4exp_fp8::Layer& lay = m.layers[(size_t)l];
+    const RadBatch& bt = x.b;
+    const int64_t T = bt.n_tok, rows = T - b, n = m.g.n_embd;
+    std::vector<RecIssue> out = issues_by([&](RadCtx* cx) { lay.hc_mix.read(cx, T, b, rows); });
+    out.push_back({k.op_proj[(size_t)l], {brows(m.b_h, b), RAD_W(k.proj_w[(size_t)l]), RAD_W(k.proj_b[(size_t)l]),
+                   RAD_NONE, brows(m.a_x.x, b)}, b});
+    out.push_back({k.quant.op, {brows(m.a_x.x, b), brows(m.a_x.q8, b), brow_slice(m.a_x.s8, 0, b, n / 128)}, b});
+    if (lay.full) {
+        const AttnGatedFP8& a = lay.attn;
+        const int64_t qw = a.g.q_dim(), hd = a.g.head_dim;
+        append(out, issues_by([&](RadCtx* cx) { lay.qsa.step(cx, a.w.h, &bt); }));
+        std::set<rad_op> kv, q;
+        add_linear(kv, a.kp);
+        add_linear(kv, a.vp);
+        for (rad_op h : {a.op_k_norm, a.op_rope_k, a.op_kv_store}) kv.insert(h);
+        add_linear(q, a.qg);
+        for (rad_op h : {a.op_q_norm, a.op_rope_q}) q.insert(h);
+        append(out, pick(seg, kv));
+        append(out, pick(seg, q));
+        out.push_back({a.op_attn_gq, {brow_slice(a.w.q, b, rows, qw), kv_cache(a.kv, a.layer),
+                       brow_slice(a.qsa_sel, b, rows, a.qsa_topk + 1), brow_slice(a.qsa_sequ, b, rows, 1),
+                       RAD_NONE, RAD_NONE, RAD_NONE, brow_slice(a.w.attn.x, b, rows, qw),
+                       bcol_at(a.w.qg, b, a.g.n_head * 2 * hd, hd, hd, rows),
+                       brow_slice(a.w.attn.cq(), b, rows, qw), brow_slice(a.w.attn.cs(), b, rows, qw / 128)}, 1});
+        append(out, issues_by([&](RadCtx* cx) { a.o.step(cx, a.w.attn, a.w.h.x, T, b, rows); }));
+        if (a.op_ar && !rad::arch::ar_taken(a.g, T, a.ar_out, a.ar_out_take))
+            out.push_back({a.op_ar, {brow_slice(a.w.h.x, b, rows, n), RAD_NONE}, rows * n});
+    } else {
+        const GdnFP8& d = lay.gdn;
+        std::set<rad_op> front;
+        add_linear(front, d.in);
+        front.insert(d.op_ab);
+        append(out, pick(seg, front));
+        Want w;
+        w.b = b; w.correct = true; w.split = true;
+        for (const RecIssue& r : seg) {
+            if (r.op == d.op_conv_prep) out.push_back({k.op_undo[(size_t)l], correction_operands(x, l, rank), 1});
+            if (r.op == d.op_conv_prep || r.op == d.op_kkt) out.push_back(r);
+            if (r.op == d.op_scan) push_scans(out, r, x, l, w, rank);
+        }
+        const int64_t cd = d.cfg.conv_dim(), vd = d.cfg.v_dim();
+        out.push_back({d.op_gnorm, {brow_slice(d.w.o.x, b, rows, vd), bcol_at(d.w.in.x, b, cd + vd, cd, vd, rows),
+                       RAD_W(d.w_out_norm), brow_slice(d.w.o.x, b, rows, vd)}, rows});
+        append(out, issues_by([&](RadCtx* cx) { d.q_o.step(cx, T, b, rows); }));
+        append(out, issues_by([&](RadCtx* cx) { d.out.step(cx, d.w.o, d.w.h.x, T, b, rows); }));
+        if (d.op_ar && !rad::arch::ar_taken(d.g, T, d.ar_out, d.ar_out_take))
+            out.push_back({d.op_ar, {brow_slice(d.w.h.x, b, rows, n), RAD_NONE}, rows * n});
+    }
+    append(out, issues_by([&](RadCtx* cx) { lay.hc_mix.write(cx, T, b, rows); }));
+    append(out, issues_by([&](RadCtx* cx) { lay.hc_ffn.read(cx, T, b, rows); }));
+    append(out, issues_by([&](RadCtx* cx) { lay.mlp.pass(cx, T, b, rows); }));
+    append(out, issues_by([&](RadCtx* cx) { lay.hc_ffn.write(cx, T, b, rows); }));
+    return out;
+}
+
+/* A.1 -- A SPEED STRADDLE RUNS ITS LATE BLOCKS OVER THE TAIL ROWS ONLY: 64 tokens ahead of a 128-row
+ * chunk (b = 64). The mask (for the split scan's bounds) ahead of layer 0, layers 0..S-1 stock with
+ * no probes (a tile of exact rows already reads most experts: the pass stages), then per late layer
+ * the tail-only issues above; the epilogue stock. TP1 and rank 0 of TP2 (writes carry the
+ * all-reduce). */
+TEST(a_speed_straddle_runs_its_late_blocks_over_the_tail_rows_only) {
+    for (int world : {1, 2}) {
+        Pair p;
+        declare_pair(p, "speed", 0, world);
+        REQUIRE_EQ(p.st, RAD_OK);
+        const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
+        const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+        REQUIRE(k.straddle_layers);
+        Batch x = make_step(p.kva, {{128}, 0, 1984});
+        const qwen4exp_kva::Pass pass = qwen4exp_kva::derive(k, &x.b);
+        REQUIRE_EQ(pass.path, qwen4exp_kva::PATH_STRADDLE);
+        CHECK_EQ(pass.b, 64);
+        CHECK(!pass.stream);
+        const std::vector<RecIssue> stock = run_step(qwen4exp_fp8::step, x.b).issues;
+        std::vector<rad_op> reads;
+        for (int l = kSplit; l < 8; ++l) reads.push_back(m.layers[(size_t)l].hc_mix.op_read);
+        const std::vector<size_t> at = starts(stock, reads, m.mixer.op_read);
+        std::vector<RecIssue> want;
+        for (size_t i = 0; i < at[0]; ++i) {
+            if (stock[i].op == m.layers[0].hc_mix.op_read)
+                want.push_back({k.op_mask, {praw(x.b.cu_seqlens, RAD_I32, 2), praw(x.b.token_ids, RAD_I32, 64),
+                                praw(x.b.positions, RAD_I32, 64), RAD_NONE, brows(k.b_mask, 128),
+                                brows(k.b_bounds, 4), brows(k.b_zeros, k.n_zeros)}, 64});
+            want.push_back(stock[i]);
+        }
+        for (int l = kSplit; l < 8; ++l)
+            append(want, straddle_expected(slice(stock, at[(size_t)(l - kSplit)], at[(size_t)(l - kSplit + 1)]),
+                                           x, l, 64, 0));
+        for (size_t i = at.back(); i < stock.size(); ++i) want.push_back(stock[i]);
+        const Run got = run_step(qwen4exp_kva::step, x.b);
+        CHECK_EQ(differ_at(got.issues, want), 0);
+        CHECK(has(got.log, "straddle, stage stock, split)"));
+        CHECK_EQ(got.device_calls, 0);
+    }
+}
+
 /* R53' SUBSET -- DECODERS AND OTHER PREFILLS BESIDE THE APPROXIMATED CHUNK: the in-tree decode half
  * and the other prefill sequences' scan are issued as stock; only the last sequence is corrected
  * (M = 1 on its own index row), and its bulk superset starts at s_lb. */
 TEST(a_mixed_step_corrects_only_the_last_sequence) {
     struct Case { Shape s; int64_t b, s_lb; };
+    Env stream_rows({{"RADIANCE_KVA_STAGE_ROWS", "4096"}});   /* the issue shape, not the guard */
     for (const Case& c : {Case{{{1, 1, 128}, 2, 2048}, 130, 2}, Case{{{64, 128}, 0, 2048}, 192, 64},
                           Case{{{1, 64, 128}, 1, 2048}, 193, 65}}) {
         Pair p;
@@ -1108,9 +1245,6 @@ TEST(a_chunk_off_the_tile_fails_the_step_by_name) {
 
 /* ==================================================================== the lean fill */
 
-void add_linear(std::set<rad_op>& s, const rad::arch::LinearFP8& l) {
-    for (rad_op h : {l.op, l.op_q, l.op_m1}) if (h) s.insert(h);
-}
 
 /* The handles of the pieces the lean fill issues for late layer `l`: the delta net's projections
  * and recurrence, or the indexer's block-key half (`keys`) and the attention's K/V path (`kv`). */
@@ -1586,19 +1720,21 @@ TEST(a_tail_of_two_steps_less_a_tile_or_more_is_refused) {
 /* R100 -- A TAIL PAST THE STEP (T = 2560, C = 2048): a capped n_ahead proves only C tokens ahead, so a
  * full chunk's first n_tok - ceil_64(T - C) = n_tok - 512 rows are bulk and the rest exact; with
  * fewer than T - C + 64 ahead nothing is provable and the pass is stock. Never the lean fill (some
- * rows of every chunk are exact). */
+ * rows of every chunk are exact): speed takes the tail-only straddle, quality the masked path when its
+ * exact rows may stream (here forced by a high row threshold) and the exact step otherwise. */
 TEST(a_tail_past_the_step_approximates_the_provable_rows) {
     using qwen4exp_kva::PATH_STOCK;
     using qwen4exp_kva::PATH_MASKED;
-    struct Case { const char* mode; Shape s; int path; int64_t b, s_lb; };
-    for (const Case& c : {Case{"quality", {{2048}, 0, 2048}, PATH_MASKED, 1536, 0},
-                          Case{"speed", {{2048}, 0, 2048}, PATH_MASKED, 1536, 0},
-                          Case{"quality", {{2048}, 0, 1024}, PATH_MASKED, 512, 0},
-                          Case{"quality", {{2048}, 0, 576}, PATH_MASKED, 64, 0},
-                          Case{"quality", {{2048}, 0, 575}, PATH_STOCK, 0, 0},
-                          Case{"quality", {{2048}, 0, 512}, PATH_STOCK, 0, 0},
-                          Case{"speed", {{1, 1, 1, 1, 1, 1, 1, 1, 1984}, 8, 2048}, PATH_MASKED, 1480, 8}}) {
-        Env e({{"RADIANCE_KVA_TAIL", "2560"}});
+    using qwen4exp_kva::PATH_STRADDLE;
+    struct Case { const char* mode; const char* rows; Shape s; int path; int64_t b, s_lb; };
+    for (const Case& c : {Case{"speed", "64", {{2048}, 0, 2048}, PATH_STRADDLE, 1536, 0},
+                          Case{"speed", "64", {{2048}, 0, 1024}, PATH_STRADDLE, 512, 0},
+                          Case{"speed", "64", {{2048}, 0, 576}, PATH_STRADDLE, 64, 0},
+                          Case{"speed", "64", {{2048}, 0, 575}, PATH_STOCK, 0, 0},
+                          Case{"quality", "64", {{2048}, 0, 2048}, PATH_STOCK, 0, 0},
+                          Case{"quality", "4096", {{2048}, 0, 2048}, PATH_MASKED, 1536, 0},
+                          Case{"speed", "4096", {{1, 1, 1, 1, 1, 1, 1, 1, 1984}, 8, 2048}, PATH_MASKED, 1480, 8}}) {
+        Env e({{"RADIANCE_KVA_TAIL", "2560"}, {"RADIANCE_KVA_STAGE_ROWS", c.rows}});
         Pair p;
         declare_pair(p, c.mode);
         REQUIRE_EQ(p.st, RAD_OK);
