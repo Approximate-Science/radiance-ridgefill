@@ -14,17 +14,6 @@ namespace qwen4exp_kva {
 
 using namespace rad::arch;
 
-/* This rank's value heads of the replicated correction (kva_declare.h's decl_correction): a row
- * slice of the weight, which the issue path narrows and bounds-checks like a buffer slice
- * (radiance core/runtime/issue.cpp:661-698). */
-inline RadOperand correction_heads(const qwen4exp_fp8::Model& m, rad_weight w) {
-    const GdnFP8::Config& g = m.gcfg;
-    RadOperand o = RAD_W(w);
-    o.offset = (int64_t)m.g.rank * g.n_head_v * g.head_v * g.head_k;
-    o.rows   = g.n_head_v;
-    return o;
-}
-
 /* A group's slot row for the step's LAST sequence (index row n_seq-1, one row): its own
  * state_index at its own pitch. The approximated sequence is always the last entry (n_ahead > 0
  * means it is a non-final prefill chunk, radiance core/sched/batch.cpp:1066-1080). */
@@ -46,7 +35,7 @@ inline void correct(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64
     RAD_ISSUE_N(c, op, 1,
                 kv_cache(m.kv_state, L), last_slot(batch, m.kv_state),
                 kv_cache(k.kv_applied, L), last_slot(batch, k.kv_applied),
-                correction_heads(m, k.st[(size_t)li]),
+                k.st[(size_t)li],   /* this rank's value heads, copied at declare */
                 k.kv_rho ? kv_cache(k.kv_rho, L) : RAD_NONE,
                 k.kv_rho ? last_slot(batch, k.kv_rho) : RAD_NONE,
                 masked ? brows(k.b_bounds, 2) : RAD_NONE);
@@ -204,7 +193,7 @@ inline void project_masked(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m
     const int64_t r0 = p.s_lb, rows = p.b - p.s_lb, n = m.g.n_embd, wide = m.hccfg.hc * n;
     const ActFP8& x = m.a_x;
     RAD_ISSUE_N(c, k.op_proj[(size_t)li], rows, brow_slice(k.b_hs, r0, rows, wide),
-                RAD_W(k.proj_w[(size_t)li]), RAD_W(k.proj_b[(size_t)li]), RAD_NONE,
+                k.proj_w[(size_t)li], k.proj_b[(size_t)li], RAD_NONE,
                 brow_slice(k.xp.x, r0, rows, n));
     if (k.quant.op)
         RAD_ISSUE_N(c, k.quant.op, rows, brow_slice(k.xp.x, r0, rows, n),
@@ -242,8 +231,8 @@ inline void masked_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int64_
  * codes. */
 inline void project_bulk(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li, int64_t b) {
     const int64_t n = m.g.n_embd;
-    RAD_ISSUE_N(c, k.op_proj[(size_t)li], b, brows(m.b_h, b), RAD_W(k.proj_w[(size_t)li]),
-                RAD_W(k.proj_b[(size_t)li]), RAD_NONE, brows(m.a_x.x, b));
+    RAD_ISSUE_N(c, k.op_proj[(size_t)li], b, brows(m.b_h, b), k.proj_w[(size_t)li],
+                k.proj_b[(size_t)li], RAD_NONE, brows(m.a_x.x, b));
     if (k.quant.op)
         RAD_ISSUE_N(c, k.quant.op, b, brows(m.a_x.x, b), brows(m.a_x.cq(), b),
                     brow_slice(m.a_x.cs(), 0, b, n / RAD_FP8_BLOCK));
@@ -331,8 +320,8 @@ inline void straddle_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int6
 
 /* The projector writes the block input `x` from the stream entering layer S, for every row. */
 inline void project(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li, int64_t T) {
-    RAD_ISSUE_N(c, k.op_proj[(size_t)li], T, brows(m.b_h, T), RAD_W(k.proj_w[(size_t)li]),
-                RAD_W(k.proj_b[(size_t)li]), RAD_NONE, brows(m.a_x.x, T));
+    RAD_ISSUE_N(c, k.op_proj[(size_t)li], T, brows(m.b_h, T), k.proj_w[(size_t)li],
+                k.proj_b[(size_t)li], RAD_NONE, brows(m.a_x.x, T));
 }
 
 /* x's codes, as the connection read would have written them: QuantFP8::step without its
