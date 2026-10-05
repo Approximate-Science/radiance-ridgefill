@@ -80,18 +80,17 @@ static int declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* c
         return RAD_E_INVAL;
     }
     const bool capturing = !k.capture_dir.empty() || !k.state_dir.empty();
-    if (!k.cfg.declare_all && k.cfg.mode == MODE_OFF && !capturing) return RAD_OK;
+    if (k.cfg.mode == MODE_OFF && !capturing) return RAD_OK;
 
     k.nm = Names(ctx->scope ? ctx->scope : "");
     k.tile = m.gcfg.chunk;
     k.out_rows_ok = ctx->max_out_rows == 0 || k.cfg.score_bulk;
     for (auto* v : { &k.proj_w, &k.proj_b, &k.st })
-        v->assign(m.layers.size(), 0);
+        v->assign(m.layers.size(), RAD_NONE);
     for (auto* v : { &k.op_undo, &k.op_apply, &k.op_rho, &k.op_proj })
         v->assign(m.layers.size(), 0);
-    if (k.cfg.declare_all) return decl_every_copy(b, m, k);
     if (k.cfg.mode == MODE_OFF) RAD_ARCH_TRY(capture_split(b, m, meta, k));
-    else                        RAD_ARCH_TRY(decl_selected(b, m, ctx, k));
+    else                        RAD_ARCH_TRY(decl_selected(b, meta, m, ctx, k));
     if (!k.state_dir.empty()) RAD_ARCH_TRY(decl_state_read(b, m, ctx, k));
     return RAD_OK;
 }
@@ -180,7 +179,7 @@ static void epilogue(RadCtx* c, qwen4exp_fp8::Model& m, const RadBatch* batch) {
 static void mask_rows(RadCtx* c, const Kva& k, const RadBatch* batch, const Pass& p) {
     RAD_ISSUE_N(c, k.op_mask, p.b, praw(batch->cu_seqlens + batch->n_seq - 1, RAD_I32, 2),
                 praw(batch->token_ids, RAD_I32, p.b), praw(batch->positions, RAD_I32, p.b),
-                k.mask_scored ? RAD_W(k.score) : RAD_NONE, brows(k.b_mask, batch->n_tok),
+                k.mask_scored ? k.score : RAD_NONE, brows(k.b_mask, batch->n_tok),
                 brows(k.b_bounds, 4), brows(k.b_zeros, k.n_zeros));
 }
 
@@ -213,6 +212,7 @@ static void approximate_step(RadCtx* c, const Kva& k, const RadBatch* batch, con
     const int rank = rad_rank(c);
     qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
     prologue(c, m, batch);
+    if (k.op_ring) ring_copy(c, k, k.split);   /* layer S's map lands during layers 0 .. S-1 */
     if (p.path == PATH_MASKED || p.path == PATH_STRADDLE) mask_rows(c, k, batch, p);
     const MoeArm probes = probe_arm(c, k, m);
     for (int64_t li = 0; li < k.split; ++li)
@@ -341,6 +341,7 @@ static int probe(const RadModelMeta* meta, RadArchProbe* out) {
 
 #ifdef QWEN4EXP_KVA_EXPORTS
 extern "C" int rad_plugin_open(void) { return qwen4exp_kva::open_guard(); }
+extern "C" void rad_plugin_close(void) { qwen4exp_kva::free_uploads(); }
 RAD_ARCH_PROBE(qwen4exp_kva)
 RAD_ARCH_PLUGIN(qwen4exp_kva, "qwen4exp", "", "0.2.0",
                 "Qwen4-Exp (Qwen3.8-Flash-Next) with KVA / RidgeFill prefill: the in-tree "

@@ -1,5 +1,6 @@
-/* kva_declare.h -- the KVA plugin's declare side: its state, the fitted tensors, the ops it adds
- * to the in-tree graph, and every refusal a mode makes before anything runs (R31).
+/* kva_declare.h -- the KVA plugin's declare side: its state, the ops it adds to the in-tree graph,
+ * and every refusal a mode makes before anything runs (R31). The fitted tensors come from the
+ * projector folder (kva_projector.h), as RAW operands.
  *
  * Everything here runs at declare only. step() reads the Kva a rank's real declare filled and
  * nothing else that can change (R15/R99).
@@ -30,9 +31,14 @@ struct Kva {
     /* KL mode (max_out_rows > 0) asks for logits on bulk rows, which are not the model's there:
      * it serves stock unless RADIANCE_KVA_SCORE_BULK says the caller scores the tail only (R73). */
     bool    out_rows_ok = true;
-    std::vector<rad_weight> proj_w, proj_b;   /* [n_layer]: 0 below S */
-    std::vector<rad_weight> st;               /* [n_layer]: 0 below S and on attention layers */
-    rad_weight score = 0;
+    /* The folder's tensors on this rank (kva_projector.h): RAW operands, RAD_NONE where absent. */
+    std::vector<RadOperand> proj_w, proj_b;   /* [n_layer]: none below S */
+    std::vector<RadOperand> st;               /* [n_layer]: this rank's heads; none below S and on attention */
+    RadOperand score = RAD_NONE;
+    /* The staging ring (host placement, kva_projector.h plan_maps): per late layer the host map's
+     * row block and the VRAM slot it is copied into, and the copy op. */
+    std::vector<RadOperand> ring_src, ring_dst;
+    rad_op op_ring = 0;
     /* kva_state_correct per late delta-net layer (undo, apply) and kva_rho_update (quality). */
     std::vector<rad_op> op_undo, op_apply, op_rho;
     /* What each sequence's late delta-net layer had added to its state at its last approximate
@@ -69,110 +75,6 @@ struct Kva {
 };
 
 static Kva g_kva[MAX_RANKS];
-
-/* `name` declared when the model holds it; 0 when it does not. The name map comes first because a
- * checkpoint is searched through it (rad_weight_encoding); a container is searched by the declared
- * name, which is the same string. A map for an absent tensor is inert: name maps are read only for
- * declared weights (radiance core/format/checkpoint.cpp:525-541). */
-static rad_weight decl_held(RadBuilder* b, Names& nm, const char* name, uint32_t dtype,
-                            std::initializer_list<int64_t> shape, int shard, RadWeightGroup grp) {
-    const char* d = nm.f("%s", name);
-    if (map_copy(b, d, nm.ckpt("%s", name)) < 0) return 0;
-    RadEncoding e{};
-    if (!weight_enc(b, name, &e)) return 0;
-    return decl_w(b, d, dtype, shape, RAD_ACCESS_PER_TOKEN, shard, grp, 1);
-}
-
-/* One projector copy (`kva.proj` or `kva.projr`): [n_embd, hc*n_embd] bf16 and its bias, replicated
- * on every rank (PLAN D5), PER_TOKEN so the planner keeps it resident (HANDOVER Stage 2.2). S is
- * the lowest layer held, and every layer from S up must be held with its bias -- a projector with
- * a hole is refused rather than run with one layer computed exactly by accident. */
-static int decl_projector(RadBuilder* b, Names& nm, const qwen4exp_fp8::Model& m,
-                          const char* base, Kva& k) {
-    const int64_t n = m.g.n_embd, wide = m.hccfg.hc * m.g.n_embd;
-    for (int64_t l = 0; l < m.g.n_layer; ++l) {
-        char wn[96], bn[96];
-        std::snprintf(wn, sizeof wn, "%s.%lld.weight", base, (long long)l);
-        std::snprintf(bn, sizeof bn, "%s.%lld.bias", base, (long long)l);
-        const rad_weight w = decl_held(b, nm, wn, RAD_BF16, {n, wide}, RAD_SHARD_NONE, grp_layer((int)l));
-        const rad_weight bias = decl_held(b, nm, bn, RAD_BF16, {n}, RAD_SHARD_NONE, grp_layer((int)l));
-        if (k.split < 0 && (w || bias)) k.split = l;
-        if (k.split < 0) continue;
-        if (!w || !bias) {
-            std::fprintf(stderr, "radiance: qwen4exp_kva: the projector '%s' starts at layer %lld "
-                                 "and has no %s; every layer from S to the last needs its weight "
-                                 "and bias\n", base, (long long)k.split, w ? bn : wn);
-            return RAD_E_INVAL;
-        }
-        k.proj_w[(size_t)l] = w;
-        k.proj_b[(size_t)l] = bias;
-    }
-    k.have_proj = k.split >= 0;
-    return RAD_OK;
-}
-
-/* One correction copy (`kva.st`, `kva.stswap` or `kva.str`): [value heads, head_v, head_k] f32 a
- * late delta-net layer -- the state's own layout, kv_gdn_state -- for ALL of the model's value heads.
- * REPLICATED, NOT ROW-SHARDED (deviation from PLAN D6, found at the first TP2 load): the loader
- * defines no ROW share of a rank-3 weight (radiance core/format/share.cpp:56), so each rank holds
- * the whole tensor (3 MiB a layer, 54 MiB a rank over 18 layers) and hands kva_state_correct its
- * own heads as a row slice of it at issue (correction_heads in kva_layer.h): rank r's value heads
- * are [r*H, (r+1)*H), the contiguous split the delta net's own weights take.
- * All of the late delta-net layers or none. */
-static int decl_correction(RadBuilder* b, Names& nm, const qwen4exp_fp8::Model& m,
-                           const char* base, int64_t from, Kva& k) {
-    int held = 0, want = 0;
-    for (int64_t l = from; l < m.g.n_layer; ++l) {
-        if (m.layers[(size_t)l].full) continue;
-        char sn[96];
-        std::snprintf(sn, sizeof sn, "%s.%lld", base, (long long)l);
-        k.st[(size_t)l] = decl_held(b, nm, sn, RAD_F32,
-                                    {m.gcfg.n_head_v * m.g.world, m.gcfg.head_v, m.gcfg.head_k},
-                                    RAD_SHARD_NONE, grp_layer((int)l));
-        held += k.st[(size_t)l] != 0;
-        ++want;
-    }
-    if (held && held != want) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: the correction '%s' covers %d of the %d "
-                             "delta-net layers from %lld up; it is all of them or none\n",
-                     base, held, want, (long long)from);
-        return RAD_E_INVAL;
-    }
-    k.have_st = held > 0;
-    return RAD_OK;
-}
-
-static rad_weight decl_score(RadBuilder* b, Names& nm, const qwen4exp_fp8::Model& m,
-                             const char* name) {
-    return decl_held(b, nm, name, RAD_F32, {m.g.n_vocab_all}, RAD_SHARD_NONE, grp_model());
-}
-
-/* rad-convert's view (RADIANCE_KVA_DECLARE=all): every copy the model holds, and nothing else --
- * no ops, no completeness checks, no refusals, because converting is not serving; the serving
- * declare checks what it selects. */
-static int decl_every_copy(RadBuilder* b, const qwen4exp_fp8::Model& m, Kva& k) {
-    const int64_t n = m.g.n_embd, wide = m.hccfg.hc * m.g.n_embd;
-    char name[96];
-    for (int64_t l = 0; l < m.g.n_layer; ++l) {
-        const RadWeightGroup grp = grp_layer((int)l);
-        for (const char* p : { "kva.proj", "kva.projr" }) {
-            std::snprintf(name, sizeof name, "%s.%lld.weight", p, (long long)l);
-            decl_held(b, k.nm, name, RAD_BF16, {n, wide}, RAD_SHARD_NONE, grp);
-            std::snprintf(name, sizeof name, "%s.%lld.bias", p, (long long)l);
-            decl_held(b, k.nm, name, RAD_BF16, {n}, RAD_SHARD_NONE, grp);
-        }
-        if (m.layers[(size_t)l].full) continue;
-        for (const char* s : { "kva.st", "kva.stswap", "kva.str" }) {
-            std::snprintf(name, sizeof name, "%s.%lld", s, (long long)l);
-            decl_held(b, k.nm, name, RAD_F32,
-                      {m.gcfg.n_head_v * m.g.world, m.gcfg.head_v, m.gcfg.head_k},
-                      RAD_SHARD_NONE, grp);
-        }
-    }
-    for (const char* t : { "kva.rowsel.score", "kva.rowsel.score_none", "kva.rowsel.score_all" })
-        decl_score(b, k.nm, m, t);
-    return RAD_OK;
-}
 
 /* A LINEAR group of [heads, 1, inner] f32 a sequence, bound to every late delta-net layer: one
  * slot per sequence the engine zeroes at admission, keeps for the sequence's life and snapshots
@@ -214,7 +116,7 @@ static const char* decl_kernel_ops(RadBuilder* b, const qwen4exp_fp8::Model& m,
                 RAD_PARAMS(RAD_RANGE("M", 1, m.g.max_seqs), RAD_STR("mode", apply ? "apply" : "undo"),
                            RAD_F64("alpha", c.alpha), RAD_INT("n_head", m.gcfg.n_head_v),
                            RAD_INT("sd0", m.gcfg.head_v), RAD_INT("sd1", m.gcfg.head_k)),
-                RAD_WEIGHTS(k.st[(size_t)l]));
+                RAD_NOWEIGHTS);
             (apply ? k.op_apply : k.op_undo)[(size_t)l] = h;
             if (!h) missing = "kva_state_correct";
         }
@@ -237,11 +139,6 @@ static int check_mode(const Kva& k, const qwen4exp_fp8::Model& m) {
     const Config& c = k.cfg;
     const char* mode = kModeNames[c.mode];
     const int64_t max_tok = m.g.max_tok;
-    if (!k.have_proj) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: mode %s needs the projector '%s.L.weight' "
-                             "and the model holds none of it\n", mode, c.proj);
-        return RAD_E_UNSUPPORTED;
-    }
     /* A TAIL LONGER THAN A STEP (REFUTATION §4, R100). n_ahead is capped at the step C =
      * max_tok (radiance core/sched/batch.cpp:1066-1080), so a full chunk only PROVES that row i
      * has (n_tok-1-i) + C tokens after it: rows [0, n_tok - ceil_G(T - C)) are bulk and the rest run
@@ -267,11 +164,6 @@ static int check_mode(const Kva& k, const qwen4exp_fp8::Model& m) {
                              "tail this method was measured at is %lld\n",
                      (long long)c.tail, (long long)kMinTail);
         return RAD_E_INVAL;
-    }
-    if (c.mode == MODE_QUALITY && !k.have_rowsel) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: mode quality selects exact rows from the "
-                             "table '%s' and the model does not hold it\n", c.score);
-        return RAD_E_UNSUPPORTED;
     }
     return RAD_OK;
 }
@@ -317,24 +209,35 @@ static int decl_fill(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuild
     RAD_ARCH_TRY(k.quant.declare(b, g, m.a_x, g.n_embd));
     const int64_t wide = m.hccfg.hc * g.n_embd;
     for (int64_t l = k.split; l < g.n_layer; ++l) {
-        const rad_op h = rw(b, RAD_OP(b, "gemm_nt_bias",
+        /* kva.so's forward of the engine's gemm_nt_bias row (kernels/forward.cpp): the projector is
+         * plugin memory, not a weight, so it rides as an IN operand. */
+        const rad_op h = rw(b, RAD_OP(b, "kva_gemm_nt_bias",
                                 RAD_PARAMS(RAD_RANGE("M", 1, g.max_tok), RAD_INT("N", g.n_embd),
                                            RAD_INT("K", wide), RAD_STR("dtype", g.dtype)),
-                                RAD_WEIGHTS(k.proj_w[(size_t)l], k.proj_b[(size_t)l])),
+                                RAD_NOWEIGHTS),
                             {m.b_h}, {m.a_x.x});
         if (!h && !ctx->shape_probe) {
             std::fprintf(stderr, "radiance: qwen4exp_kva: no kernel serves the projector "
-                                 "(gemm_nt_bias, N %lld, K %lld, %s)\n",
+                                 "(kva_gemm_nt_bias, N %lld, K %lld, %s): kva.so offers it only "
+                                 "when libr4d (device) or libref (host) is loaded\n",
                          (long long)g.n_embd, (long long)wide, g.dtype);
             return RAD_E_UNSUPPORTED;
         }
         k.op_proj[(size_t)l] = h;
     }
-    return RAD_OK;
+    if (k.cfg.place != PLACE_HOST || !k.cfg.ring) return RAD_OK;
+    /* libr4d's strided row copy (cast bf16 -> bf16), one [n + 1, hc*n] row block a layer. */
+    k.op_ring = RAD_OP(b, "cast", RAD_PARAMS(RAD_RANGE("M", 1, g.n_embd + 1), RAD_INT("n", wide),
+                                             RAD_STR("from", "bf16"), RAD_STR("to", "bf16")), RAD_NOWEIGHTS);
+    if (k.op_ring || ctx->shape_probe) return RAD_OK;
+    std::fprintf(stderr, "radiance: qwen4exp_kva: no kernel serves the staging ring's copy (cast bf16, "
+                         "n %lld); RADIANCE_KVA_PROJ_RING=0 reads the host maps directly\n", (long long)wide);
+    return RAD_E_UNSUPPORTED;
 }
 
 }  /* namespace qwen4exp_kva */
 
+#include "kva_projector.h"
 #include "kva_declare_masked.h"
 
 #endif /* QWEN4EXP_KVA_DECLARE_H */

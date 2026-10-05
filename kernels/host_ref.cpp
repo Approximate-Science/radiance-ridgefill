@@ -167,7 +167,7 @@ extern "C" int kva_correct_parse(const RadArgs* a, KvaCorrect* g) {
     if (rc != RAD_OK) return rc;
     if (ap_rows != g->n_seq || (nidx && nd_rows != g->n_seq)) return RAD_E_SHAPE;
     if (st->rank != 4 || st->shape[1] != heads || st->shape[2] != sd0 || st->shape[3] != sd1 ||
-        c->rank != 3 || c->shape[0] != heads || c->shape[1] != sd0 || c->shape[2] != sd1 ||
+        !dense(c) || rad_tensor_numel(c) != heads * sd0 * sd1 ||
         ap->rank < 2 || ap->shape[1] != heads || per_head(ap) != 1 ||
         (nd && (nd->shape[1] != heads || pair_stride(nd) == 0))) return RAD_E_SHAPE;
     g->state = (float*)st->data;
@@ -176,7 +176,9 @@ extern "C" int kva_correct_parse(const RadArgs* a, KvaCorrect* g) {
     g->applied = (float*)ap->data;
     g->ap_slot = ap->stride[0]; g->ap_head = ap->stride[1];
     g->c = (const float*)c->data;
-    g->c_head = c->stride[0]; g->c_row = c->stride[1]; g->c_col = c->stride[2];
+    /* C is read as [heads, sd0, sd1], packed: an IN operand from the projector folder arrives as
+     * whatever rank the caller gave its pointer (RAD_P_T2), so its element count is the contract. */
+    g->c_head = sd0 * sd1; g->c_row = sd1; g->c_col = 1;
     g->nd = nd ? (const float*)nd->data : nullptr;
     g->nd_slot = nd ? nd->stride[0] : 0;
     g->nd_head = nd ? nd->stride[1] : 0;

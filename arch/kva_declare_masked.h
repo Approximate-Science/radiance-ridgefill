@@ -68,11 +68,10 @@ static const char* decl_masked(RadBuilder* b, const qwen4exp_fp8::Model& m, cons
                                                      : kRowselNames[c.rowsel];
     const bool scored = !std::strcmp(rule, "class") || !std::strcmp(rule, "random");
     k.mask_scored = scored;
-    const rad_weight w[1] = { k.score };
-    k.op_mask = rad_decl_op(b, "kva_mask",
-                            RAD_PARAMS(RAD_RANGE("M", 1, ctx->max_tok), RAD_F64("share", c.share),
-                                       RAD_INT("seed", c.seed), RAD_STR("mode", rule)),
-                            scored ? w : nullptr, scored ? 1 : 0);
+    k.op_mask = RAD_OP(b, "kva_mask",
+                       RAD_PARAMS(RAD_RANGE("M", 1, ctx->max_tok), RAD_F64("share", c.share),
+                                  RAD_INT("seed", c.seed), RAD_STR("mode", rule)),
+                       RAD_NOWEIGHTS);
     if (!k.op_mask) return "kva_mask";
     if (project && (!k.op_select || !k.op_drop)) return !k.op_select ? "kva_select" : "kva_drop_rows";
     if (project && !k.op_cast) return "cast";
@@ -88,11 +87,12 @@ static const char* decl_masked(RadBuilder* b, const qwen4exp_fp8::Model& m, cons
 
 static void note_config(RadBuilder* b, const Kva& k) {
     const Config& c = k.cfg;
-    rad_note(b, "KVA: mode %s from layer %lld, tail %lld, tile %lld; projector %s, correction %s "
+    rad_note(b, "KVA: mode %s from layer %lld, tail %lld, tile %lld; projector %s (%s), correction %s "
                 "(alpha %g), row table %s, rows %s share %g seed %lld; stage %s (exact rows <= %lld), "
                 "straddle %s%s%s",
-             kModeNames[c.mode], (long long)k.split, (long long)c.tail, (long long)k.tile, c.proj,
-             k.have_st ? c.st : "absent", c.alpha, k.have_rowsel ? c.score : "absent",
+             kModeNames[c.mode], (long long)k.split, (long long)c.tail, (long long)k.tile,
+             g_loaded.folder.place.dir.c_str(), kPlaceNames[c.place], k.have_st ? "held" : "absent",
+             c.alpha, k.have_rowsel ? kScoreNames[c.rowsel_table] : "absent",
              kRowselNames[c.rowsel], c.share, (long long)c.seed, kStageNames[c.stage],
              (long long)c.stage_rows, kStraddleNames[c.straddle],
              k.out_rows_ok ? "" : "; KL mode serves stock (RADIANCE_KVA_SCORE_BULK unset)",
@@ -115,19 +115,49 @@ static void note_debug(const Kva& k) {
         std::fprintf(stderr, "radiance: qwen4exp_kva: DEBUG RADIANCE_KVA_FORCE_STREAM=1\n");
 }
 
-/* The selected set, its ops and its refusals. Under a sizing declare nothing is refused: the real
- * declare already decided. */
-static int decl_selected(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx,
-                         Kva& k) {
+/* What the folder lets this mode run (kva_projector.h): false = serve stock, already said. Plumb
+ * reads no fitted tensor (its mask keeps every row exact) and so holds none. */
+static bool take_folder(RadBuilder* b, const RadModelMeta* meta, const qwen4exp_fp8::Model& m, Kva& k) {
+    const Loaded& l = load_folder(meta, b, m);
+    const Config& c = k.cfg;
+    if (!l.usable) return false;
+    if (c.mode == MODE_QUALITY && !tensor(l.folder, kScoreNames[c.rowsel_table])) {
+        std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: mode quality selects exact rows from the "
+                             "table '%s', and the projector %s holds none; serving stock\n",
+                     kScoreNames[c.rowsel_table], l.folder.place.dir.c_str());
+        return false;
+    }
+    k.split = l.split;
+    k.have_proj = true;
+    k.have_st = l.has_st && c.mode != MODE_PLUMB;
+    k.have_rowsel = c.mode == MODE_QUALITY;
+    return true;
+}
+
+/* This rank's copies (the real declare only) handed to the issue sites. */
+static int take_upload(const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva& k) {
+    if (!upload_rank(g_loaded, m, k.cfg, ctx->rank)) return RAD_E_DEVICE;
+    const Upload& u = g_upload[ctx->rank];
+    if (k.cfg.mode == MODE_PLUMB) return RAD_OK;
+    k.proj_w = u.proj_w;
+    k.proj_b = u.proj_b;
+    k.st = u.st;
+    k.score = u.score;
+    k.ring_src = u.ring_src;
+    k.ring_dst = u.ring_dst;
+    return RAD_OK;
+}
+
+/* The selected set, its ops and its refusals. Under a sizing declare nothing is refused or copied:
+ * the real declare already decided, and its handles are the ones issued. With no usable projector
+ * nothing at all is declared: the engine serves the in-tree graph. */
+static int decl_selected(RadBuilder* b, const RadModelMeta* meta, const qwen4exp_fp8::Model& m,
+                         const RadBuildCtx* ctx, Kva& k) {
     const bool probe = ctx->shape_probe != 0;
-    RAD_ARCH_TRY(decl_projector(b, k.nm, m, k.cfg.proj, k));
-    /* plumb issues no correction, so it does not place one */
-    if (k.have_proj && k.cfg.mode != MODE_PLUMB)
-        RAD_ARCH_TRY(decl_correction(b, k.nm, m, k.cfg.st, k.split, k));
-    if (k.cfg.mode == MODE_QUALITY) k.score = decl_score(b, k.nm, m, k.cfg.score);
-    k.have_rowsel = k.score != 0;
+    if (!take_folder(b, meta, m, k)) return RAD_OK;
     if (!probe) RAD_ARCH_TRY(check_mode(k, m));
     if (!probe) RAD_ARCH_TRY(check_fill(m, k));
+    if (!probe) RAD_ARCH_TRY(take_upload(m, ctx, k));
     if (k.cfg.mode != MODE_PLUMB) RAD_ARCH_TRY(decl_fill(b, m, ctx, k));
     const char* missing = decl_masked(b, m, ctx, k);
     if (!missing) missing = decl_kernel_ops(b, m, ctx, k);
@@ -143,21 +173,16 @@ static int decl_selected(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadB
     return RAD_OK;
 }
 
-/* WHERE THE LATE LAYERS START FOR A CAPTURE, which in `off` mode nothing else has asked: the lowest
- * projector layer the container holds -- what every other mode calls S -- else its `kva.split`
- * metadata. Probing adds only name maps, which are inert. */
+/* WHERE THE LATE LAYERS START FOR A CAPTURE, which in `off` mode nothing else has asked: the
+ * projector folder's split -- what every other mode calls S -- else the container's `kva.split`
+ * metadata (a capture fits a projector, so there may be no folder yet). Declares nothing. */
 static int capture_split(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadModelMeta* meta, Kva& k) {
-    for (int64_t l = 0; l < m.g.n_layer && k.split < 0; ++l) {
-        char name[96];
-        std::snprintf(name, sizeof name, "kva.proj.%lld.weight", (long long)l);
-        if (map_copy(b, k.nm.f("%s", name), k.nm.ckpt("%s", name)) < 0) return RAD_E_INVAL;
-        RadEncoding e{};
-        if (weight_enc(b, name, &e)) k.split = l;
-    }
-    if (k.split < 0) k.split = rad_meta_geti(meta, "kva.split", -1);
+    const Loaded& l = load_folder(meta, b, m);
+    k.split = l.usable ? l.split : rad_meta_geti(meta, "kva.split", -1);
     if (k.split <= m.ple_layer || k.split >= m.g.n_layer) {
-        std::fprintf(stderr, "radiance: qwen4exp_kva: a capture needs the split layer S: the container "
-                             "holds no kva.proj.* and its kva.split is %lld\n", (long long)k.split);
+        std::fprintf(stderr, "radiance: qwen4exp_kva: a capture needs the split layer S: there is no "
+                             "usable projector folder and the container's kva.split is %lld\n",
+                     (long long)k.split);
         return RAD_E_UNSUPPORTED;
     }
     return RAD_OK;

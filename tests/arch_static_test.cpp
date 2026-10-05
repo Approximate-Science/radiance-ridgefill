@@ -147,6 +147,10 @@ int rad_issue(RadCtx* c, rad_op op, const RadOperand* opd, int n_opd, int64_t n)
     c->issues.push_back({op, std::vector<RadOperand>(opd, opd + n_opd), n});
     return RAD_OK;
 }
+/* The second lane, recorded in the issue list as pseudo-ops (only the staging ring switches lanes). */
+constexpr rad_op kLane = 0xFFFF0000u, kJoin = 0xFFFF1000u;
+int rad_lane(RadCtx* c, int lane) { c->issues.push_back({kLane, {}, lane}); return RAD_OK; }
+int rad_lane_join(RadCtx* c, int from, int to) { c->issues.push_back({kJoin, {}, from * 16 + to}); return RAD_OK; }
 int rad_step_fail(RadCtx* c, const char* what) { c->step_fail = what ? what : ""; return RAD_E_SHAPE; }
 int rad_rank(RadCtx* c) { return c->rank; }
 RadStream rad_stream(RadCtx*) { return nullptr; }
@@ -154,13 +158,41 @@ int rad_route_report(RadCtx*, int, const RadRouting*) { return RAD_OK; }
 int32_t* rad_route_counts(RadCtx*, int, int64_t) { return nullptr; }
 void* rad_buf_ptr(RadCtx*, rad_buf b) { return (void*)(uintptr_t)(b * 64 + 16); }
 
-void* rad_dev_alloc(int64_t, int) { ++g_ctx->device_calls; return nullptr; }
-void  rad_dev_free(void*, int) { ++g_ctx->device_calls; }
+/* THE PROJECTOR'S DEVICE MEMORY (kva_projector.h). VRAM is a fake address range nothing reads: a
+ * copy into it is recorded, not made. Host-mapped memory is real (the plugin writes it on the
+ * host), and its device view is a different fake address, as a real device view is. Declare runs
+ * with no RadCtx, so only a step's device calls are counted against the step. */
+constexpr uintptr_t kFakeVram = 0x7e0000000000ull, kFakeVramEnd = 0x7f0000000000ull;
+constexpr uintptr_t kDeviceView = 0x10000000000ull;
+struct Upload { void* dst; const void* src; int64_t bytes; };
+struct FakeMem { int vram = 0, host = 0; std::vector<Upload> copies; } g_mem;
+void* rad_dev_alloc(int64_t n, int kind) {
+    if (g_ctx) ++g_ctx->device_calls;
+    if (kind == RAD_MEM_HOST_MAPPED) { ++g_mem.host; return std::calloc(1, (size_t)n); }
+    static uintptr_t next = kFakeVram;
+    ++g_mem.vram;
+    void* p = (void*)next;
+    next += ((uintptr_t)n + (1u << 20)) & ~(uintptr_t)0xFFFF;
+    return p;
+}
+void  rad_dev_free(void* p, int kind) {
+    if (g_ctx) ++g_ctx->device_calls;
+    if (kind == RAD_MEM_HOST_MAPPED) std::free(p);
+}
+void* rad_dev_host_ptr(void* p) { return p; }
+void* rad_dev_device_ptr(void* p) { return (unsigned char*)p + kDeviceView; }
+int   rad_stream_create(RadStream* s, int) { *s = (RadStream)&g_mem; return RAD_OK; }
+void  rad_stream_destroy(RadStream) {}
+const char* rad_dev_last_error(void) { return "(fake)"; }
 /* The debug paths' device reads. rad_buf_ptr hands out small fake addresses (below), which read as
  * zeros; a batch field is real host memory here and is copied, so a capture sees the batch's own
  * ids and positions. */
-int   rad_stream_sync(RadStream) { ++g_ctx->device_calls; return RAD_OK; }
+int   rad_stream_sync(RadStream) { if (g_ctx) ++g_ctx->device_calls; return RAD_OK; }
 int   rad_memcpy_async(void* dst, const void* src, int64_t n, RadStream) {
+    if ((uintptr_t)dst >= kFakeVram && (uintptr_t)dst < kFakeVramEnd) {
+        g_mem.copies.push_back({dst, src, n});
+        return RAD_OK;
+    }
     ++g_ctx->device_calls;
     g_ctx->reads.push_back({src, g_ctx->issues.size()});
     if ((uintptr_t)src < (1u << 20)) std::memset(dst, 0, (size_t)n);
@@ -236,15 +268,131 @@ RadBuildCtx served_ctx(int rank = 0, int world = 1) {
     return c;
 }
 
-/* Every kva.* tensor the sidecar writes, for layers kSplit..7. */
-void hold_kva(RadBuilder& b, std::initializer_list<const char*> bases) {
+/* ==================================================================== the projector folder */
+
+/* A container of a few KiB (abi/rad_format.h): three tokens (the third with empty text), one merge
+ * and one 16-byte entry. tools/kva_projector.py's test builds the same bytes and expects the same
+ * two hashes (kTinyVocab, kTinyAnchor), which is what ties the two canonical forms together. */
+const char* kTinyVocab  = "3988fb447f719ad3fc2c75e5a0fa3daeb2b6a5e10e964744619d1dfbc6e95ff6";
+const char* kTinyAnchor = "be45cb2605bf36bebde684841a28f0fd43c69850a3dce5fedba69928ee3a8991";
+
+std::vector<unsigned char> tiny_container_bytes() {
+    std::vector<unsigned char> f(4096, 0);
+    auto put = [&](size_t at, const void* p, size_t n) { std::memcpy(f.data() + at, p, n); };
+    RadFileHeader h{};
+    h.magic = RAD_MAGIC; h.version = RAD_FORMAT_VER; h.file_bytes = 4096;
+    const char blob[] = "\0tok_a\0tok_b\0anchor.weight";   /* offsets 0, 1, 7, 13 */
+    h.str_off = 256; h.str_bytes = sizeof blob;
+    h.vocab_off = 512; h.vocab_bytes = 168;
+    h.dir_off = 1024; h.dir_count = 1;
+    h.plane_off = 1280; h.plane_count = 1;
+    h.data_off = 2048; h.data_bytes = 2048;
+    put(0, &h, sizeof h);
+    put(256, blob, sizeof blob);
+    RadVocabHeader v{};
+    v.kind = RAD_TOK_BPE; v.n_tokens = 3; v.n_merges = 1;
+    v.tok_text_off = 640; v.tok_type_off = 664; v.merge_off = 672;
+    put(512, &v, sizeof v);
+    const uint64_t text[3] = { 1, 7, 0 };
+    const uint8_t type[3] = { 1, 1, 3 };
+    const uint32_t merge[2] = { 0, 1 };
+    put(640, text, sizeof text); put(664, type, sizeof type); put(672, merge, sizeof merge);
+    RadFileEntry e{};
+    e.name = 13; e.rank = 1; e.shape[0] = 16; e.layer = -1; e.expert = -1; e.n_planes = 1;
+    e.offset = 2048; e.bytes = 16;
+    put(1024, &e, sizeof e);
+    const RadFilePlane pl{ 2048, 16 };
+    put(1280, &pl, sizeof pl);
+    for (int i = 0; i < 16; ++i) f[2048 + (size_t)i] = (unsigned char)i;
+    return f;
+}
+
+/* The tiny container on disk, once per process; its path. */
+const std::string& tiny_container() {
+    static std::string path;
+    if (path.empty()) {
+        char t[] = "/tmp/kva_tiny_XXXXXX";
+        const int fd = mkstemp(t);
+        const std::vector<unsigned char> f = tiny_container_bytes();
+        if (fd >= 0 && write(fd, f.data(), f.size()) == (ssize_t)f.size()) path = t;
+        if (fd >= 0) close(fd);
+    }
+    return path;
+}
+
+/* Bytes every test tensor points at (zeros, one projector map's worth): the uploads copy from them. */
+const unsigned char* tensor_bytes() {
+    static std::vector<unsigned char> z((size_t)2560 * 10240 * 2, 0);
+    return z.data();
+}
+
+/* The manifest the test folder carries: this test model's name, a few of its metadata keys, the
+ * tiny container's tokenizer hash; `model` may add members to the model block. */
+qwen4exp_kva::Json test_manifest(const std::string& model = "") {
+    const std::string text = std::string(R"({"format": 1, "adapter": "qwen4exp", "split": 4,
+        "model": {"arch_id": "qwen4exp", "name": "test-q38-flashnext",
+                  "meta": {"hc_count": "4", "linear_num_value_heads": "48"},
+                  "vocab_sha256": ")") + kTinyVocab + "\"" + model + R"(},
+        "files": {"proj.L4.safetensors": "unused by the test folder"}})";
+    qwen4exp_kva::Json j;
+    qwen4exp_kva::json_parse(text.data(), text.size(), &j);
+    return j;
+}
+
+qwen4exp_kva::Folder g_test_folder;
+
+/* The plugin forgets every folder and copy; the next declare looks again (every case starts so). */
+void reset_projector() {
+    qwen4exp_kva::g_folder_for_test = nullptr;
+    qwen4exp_kva::g_loaded = qwen4exp_kva::Loaded{};
+    qwen4exp_kva::free_uploads();
+    g_mem.copies.clear();
+}
+
+void add_tensor(const std::string& name, uint32_t dtype, std::vector<int64_t> shape) {
+    qwen4exp_kva::FolderTensor t;
+    t.data = tensor_bytes();
+    t.dtype = dtype;
+    t.shape = shape;
+    int64_t n = 1;
+    for (int64_t e : shape) n *= e;
+    t.bytes = rad_dtype_bytes(dtype, n);
+    g_test_folder.tensors[name] = t;
+}
+
+/* A fresh projector folder holding, for layers kSplit..7, what `bases` name: "kva.proj" the maps
+ * and biases, "kva.st" the delta-net layers' corrections (layers 4, 5, 6). The builder argument is
+ * the old container-weight call's and is not read: nothing comes from the container now. */
+void hold_kva(RadBuilder&, std::initializer_list<const char*> bases, const std::string& model = "") {
+    reset_projector();
+    g_test_folder = qwen4exp_kva::Folder{};
+    g_test_folder.place = { "/test/projector", "the test", tiny_container() };
+    g_test_folder.manifest = test_manifest(model);
     for (const char* base : bases)
+        for (int l = kSplit; l < 8; ++l) {
+            const std::string L = std::to_string(l);
+            if (!std::strcmp(base, "kva.proj")) {
+                add_tensor("proj." + L + ".weight", RAD_BF16, {2560, 4 * 2560});
+                add_tensor("proj." + L + ".bias", RAD_BF16, {2560});
+            } else if (l != 7) {
+                add_tensor("st." + L, RAD_F32, {48, 128, 128});
+            }
+        }
+    qwen4exp_kva::g_folder_for_test = &g_test_folder;
+}
+
+/* What an appended container still holds (the retired route): the plugin declares none of it. */
+void hold_appended_weights(RadBuilder& b) {
+    for (const char* base : {"kva.proj", "kva.st"})
         for (int l = kSplit; l < 8; ++l)
             b.encs.push_back({std::string(base) + "." + std::to_string(l),
                               rad_enc_plain(std::strstr(base, ".st") ? RAD_F32 : RAD_BF16)});
+    b.encs.push_back({"kva.rowsel.score", rad_enc_plain(RAD_F32)});
 }
-void hold_score(RadBuilder& b, const char* name) {
-    b.encs.push_back({name, rad_enc_plain(RAD_F32)});
+
+/* Adds a row table to the folder hold_kva made: "kva.rowsel.score[_none|_all]" -> score[...]. */
+void hold_score(RadBuilder&, const char* name) {
+    add_tensor(std::string(name).substr(std::strlen("kva.rowsel.")), RAD_F32, {248320});
 }
 
 /* The SERVED container's formats (data/recipes/qwen4exp-w4nl64-i8-hc8m.recipe): four-bit rotated
@@ -348,9 +496,9 @@ TEST(off_declares_exactly_the_in_tree_graph) {
             }
 }
 
-/* The container HOLDS every kva.* tensor and the mode is off: still the in-tree graph. Declaring
- * the projector anyway would place 1.26 GiB a rank and move experts between tiers. */
-TEST(off_with_kva_weights_held_still_declares_the_in_tree_graph) {
+/* A projector folder is THERE and the mode is off: still the in-tree graph, and the folder is not
+ * even looked for -- nothing read, nothing copied (placing it would cost 1.26 GiB a rank). */
+TEST(off_with_a_projector_folder_still_declares_the_in_tree_graph) {
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
     Env env({{"RADIANCE_KVA", "off"}});
@@ -360,6 +508,81 @@ TEST(off_with_kva_weights_held_still_declares_the_in_tree_graph) {
     REQUIRE_EQ(qwen4exp_fp8::declare(&stock, &meta, &c), RAD_OK);
     REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
     check_same_graph(stock, kva);
+    CHECK(!qwen4exp_kva::g_loaded.tried);
+    CHECK_EQ(g_mem.copies.size(), (size_t)0);
+}
+
+/* A mode is asked and the folder is missing, or not this model's, or misshapen: the folder is
+ * refused by name and the declare is the in-tree graph exactly (DD-K: refuse only what cannot run,
+ * and serve stock). Also when the container still holds appended kva.* weights: none is declared. */
+TEST(a_mode_without_a_usable_projector_serves_the_in_tree_graph) {
+    RadModelMeta meta = flash_next_meta();
+    RadBuildCtx c = served_ctx();
+    struct Case { const char* what; std::function<void(RadBuilder&)> setup; const char* said; };
+    const Case cases[] = {
+        { "no folder", [](RadBuilder&) { reset_projector(); }, "no projector folder" },
+        { "another arch", [](RadBuilder& b) {
+              hold_kva(b, {"kva.proj", "kva.st"});
+              g_test_folder.manifest.obj[1].second.str = "llama"; }, "is for adapter 'llama'" },
+        { "other dims", [](RadBuilder& b) {
+              hold_kva(b, {"kva.proj", "kva.st"}, R"(, "meta": {"hc_count": "8"})"); }, "metadata 'hc_count' is '4'" },
+        { "another tokenizer", [](RadBuilder& b) {
+              hold_kva(b, {"kva.proj", "kva.st"}, R"(, "vocab_sha256": "00")"); }, "the tokenizer differs" },
+        { "a misshapen map", [](RadBuilder& b) {
+              hold_kva(b, {"kva.proj", "kva.st"});
+              add_tensor("proj.6.weight", RAD_BF16, {2560, 2560}); }, "proj.6.weight" },
+        { "a hole in the maps", [](RadBuilder& b) {
+              hold_kva(b, {"kva.proj", "kva.st"});
+              g_test_folder.tensors.erase("proj.6.weight"); }, "proj.6.weight" },
+        { "a split at the n-gram layer", [](RadBuilder& b) {
+              hold_kva(b, {"kva.proj", "kva.st"});
+              g_test_folder.manifest.obj[2].second.num = 1; }, "its split 1 is not a late layer" },
+        { "half a correction", [](RadBuilder& b) {
+              hold_kva(b, {"kva.proj", "kva.st"});
+              g_test_folder.tensors.erase("st.5"); }, "covers 2 of the 3" },
+        { "quality without a row table", [](RadBuilder& b) { hold_kva(b, {"kva.proj", "kva.st"}); },
+          "holds none; serving stock" },
+    };
+    for (const Case& k : cases) {
+        RadBuilder stock, kva;
+        served(stock); served(kva);
+        k.setup(kva);
+        hold_appended_weights(kva);
+        REQUIRE_EQ(qwen4exp_fp8::declare(&stock, &meta, &c), RAD_OK);
+        Env env({{"RADIANCE_KVA", "quality"}});
+        int st = -1;
+        const std::string log = stderr_of([&] { st = qwen4exp_kva::declare(&kva, &meta, &c); });
+        CHECK_EQ(st, RAD_OK);
+        check_same_graph(stock, kva);
+        CHECK(has(log, k.said));
+        CHECK(has(log, "serving stock"));
+        CHECK_EQ(g_mem.copies.size(), (size_t)0);
+        if (!has(log, k.said)) std::fprintf(stderr, "    case '%s' said: %s\n", k.what, log.c_str());
+    }
+}
+
+/* The same model fitted on another variant -- another trunk encoding, other base weights, another
+ * name: a WARNING naming both sides, and KVA runs (DD-K). */
+TEST(a_projector_fitted_on_another_variant_warns_and_runs) {
+    RadModelMeta meta = flash_next_meta();
+    RadBuildCtx c = served_ctx();
+    RadBuilder kva;
+    served(kva);
+    hold_kva(kva, {"kva.proj", "kva.st"}, R"(, "encodings": {"blk.5.ssm_inz.weight": "bf16",
+             "blk.5.attn_hc_down.weight": "fp8_e4m3*f32[1x128]"}, "anchors": {"anchor.weight": "11"})");
+    g_test_folder.manifest.obj[3].second.obj[1].second.str = "another-quant";
+    Env env({{"RADIANCE_KVA", "speed"}});
+    int st = -1;
+    const std::string log = stderr_of([&] { st = qwen4exp_kva::declare(&kva, &meta, &c); });
+    CHECK_EQ(st, RAD_OK);
+    CHECK(qwen4exp_kva::g_kva[0].have_proj);
+    CHECK(has(log, "WARNING: projector /test/projector: weight blk.5.ssm_inz.weight is i8*bf16[1x128] "
+                   "here; the projector was fitted on bf16"));
+    CHECK(has(log, "blk.5.attn_hc_down.weight is fp8_e4m3*f32[1x128]") == false);
+    CHECK(has(log, ("tensor anchor.weight hashes " + std::string(kTinyAnchor) + " here and 11").c_str()));
+    CHECK(has(log, "named 'test-q38-flashnext' and the projector was fitted on 'another-quant'"));
+    CHECK(has(log, "encodings 1/2, anchors 0/1"));
+    CHECK(has(log, "3 warning(s)"));
 }
 
 /* A batch's KV entries for every group the builder declared, with distinct fake device pointers:
@@ -452,127 +675,140 @@ TEST(off_step_issues_the_in_tree_sequence) {
 
 /* ==================================================================== the fitted tensors */
 
-/* rad-convert's view: every copy the model holds is declared, with the shapes, dtypes, shards,
- * access class and group the plan states, and nothing is issued that the in-tree graph does not. */
-TEST(declare_all_declares_every_held_copy_and_no_op) {
-    RadModelMeta meta = flash_next_meta();
-    RadBuildCtx c = served_ctx(1, 2);   /* rank 1 of 2: per-rank extents show */
-    Env env({{"RADIANCE_KVA_DECLARE", "all"}});
-    RadBuilder stock, kva;
-    hold_kva(kva, {"kva.proj", "kva.projr", "kva.st", "kva.stswap", "kva.str"});
-    hold_score(kva, "kva.rowsel.score");
-    hold_score(kva, "kva.rowsel.score_all");
-    REQUIRE_EQ(qwen4exp_fp8::declare(&stock, &meta, &c), RAD_OK);
-    REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
-    CHECK_EQ(kva.ops.size(), stock.ops.size());
-    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[1];
-    int proj = 0, st = 0;
-    for (int l = 0; l < 8; ++l) {
-        for (const char* p : {"kva.proj.", "kva.projr."}) {
-            const RadWeightDecl* w = weight(kva, p + std::to_string(l) + ".weight");
-            const RadWeightDecl* bias = weight(kva, p + std::to_string(l) + ".bias");
-            CHECK_EQ(w != nullptr, l >= kSplit);
-            CHECK_EQ(bias != nullptr, l >= kSplit);
-            if (!w || !bias) continue;
-            ++proj;
-            CHECK_EQ(w->dtype, (uint32_t)RAD_BF16);
-            CHECK_EQ(w->shape[0], m.g.n_embd);
-            CHECK_EQ(w->shape[1], m.hccfg.hc * m.g.n_embd);
-            CHECK_EQ(bias->shape[0], m.g.n_embd);
-            CHECK_EQ(w->shard, RAD_SHARD_NONE);
-            CHECK_EQ(w->access, RAD_ACCESS_PER_TOKEN);
-            CHECK_EQ(w->optional, 1);
-            CHECK_EQ(w->group.layer, l);
-        }
-        for (const char* s : {"kva.st.", "kva.stswap.", "kva.str."}) {
-            const RadWeightDecl* w = weight(kva, s + std::to_string(l));
-            CHECK_EQ(w != nullptr, l >= kSplit && !m.layers[(size_t)l].full);
-            if (!w) continue;
-            ++st;
-            CHECK_EQ(w->dtype, (uint32_t)RAD_F32);
-            CHECK_EQ(w->shape[0], m.gcfg.n_head_v * 2);   /* every head: replicated */
-            CHECK_EQ(w->shape[1], m.gcfg.head_v);
-            CHECK_EQ(w->shape[2], m.gcfg.head_k);
-            CHECK_EQ(w->shard, RAD_SHARD_NONE);   /* the loader has no ROW share of rank 3 */
-            CHECK_EQ(w->optional, 1);
-        }
-    }
-    CHECK_EQ(proj, 2 * (8 - kSplit));
-    CHECK_EQ(st, 3 * 3);
-    const RadWeightDecl* sc = weight(kva, "kva.rowsel.score");
-    REQUIRE(sc != nullptr);
-    CHECK_EQ(sc->shape[0], meta.n_vocab);
-    CHECK_EQ(sc->shard, RAD_SHARD_NONE);
-    CHECK(weight(kva, "kva.rowsel.score_all") != nullptr);
-    CHECK(weight(kva, "kva.rowsel.score_none") == nullptr);   /* not held, not declared */
-}
-
-/* A serving mode declares the SELECTED copy only -- the controls stay off the card -- and the
- * kernel ops it will issue. */
-TEST(speed_declares_the_selected_copy_and_its_kernel_ops) {
+/* The container route's switches are retired with it (A'): refused by name, so an old command line
+ * cannot silently serve something else. */
+TEST(the_container_routes_switches_are_refused_by_name) {
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
-    for (const char* which : {"shipped", "swap"}) {
-        Env env({{"RADIANCE_KVA", "speed"}, {"RADIANCE_KVA_ST", which}});
+    for (const char* name : {"RADIANCE_KVA_DECLARE", "RADIANCE_KVA_PROJ", "RADIANCE_KVA_ST"}) {
         RadBuilder kva;
-        hold_kva(kva, {"kva.proj", "kva.projr", "kva.st", "kva.stswap"});
-        CHECK_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
-        const bool swap = !std::strcmp(which, "swap");
-        CHECK(weight(kva, "kva.proj.4.weight") != nullptr);
-        CHECK(weight(kva, "kva.projr.4.weight") == nullptr);
-        CHECK_EQ(weight(kva, "kva.st.4") != nullptr, !swap);
-        CHECK_EQ(weight(kva, "kva.stswap.4") != nullptr, swap);
-        CHECK(weight(kva, "kva.rowsel.score") == nullptr);
-        const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
-        CHECK_EQ(k.split, (int64_t)kSplit);
-        CHECK(k.have_proj && k.have_st && !k.have_rowsel);
-        int undo = 0, apply = 0;
-        for (const RecOp& o : kva.ops) {
-            if (o.op != "kva_state_correct") continue;
-            REQUIRE_EQ(o.w.size(), (size_t)1);
-            const std::string& wn = kva.weights[o.w[0] - 1].first;
-            CHECK(wn.rfind(swap ? "kva.stswap." : "kva.st.", 0) == 0);
-            for (const RecParam& p : o.p)
-                if (p.key == "mode") { undo += p.sval == "undo"; apply += p.sval == "apply"; }
-        }
-        CHECK_EQ(undo, 3);    /* delta-net layers 4, 5, 6 */
-        CHECK_EQ(apply, 3);
+        hold_kva(kva, {"kva.proj", "kva.st"});
+        Env env({{"RADIANCE_KVA", "speed"}, {name, "all"}});
+        int st = RAD_OK;
+        const std::string log = stderr_of([&] { st = qwen4exp_kva::declare(&kva, &meta, &c); });
+        CHECK_EQ(st, RAD_E_INVAL);
+        CHECK(has(log, (std::string(name) + "=all is retired with the container append").c_str()));
     }
 }
 
 
-/* Quality declares the selected row table and the kva_mask op over it, with the rule the switch
- * names; no cap and no compacted-row buffers exist any more (PLAN-FIX DD-F). */
-TEST(quality_declares_the_selected_row_table_and_kva_mask) {
+/* A serving mode takes its tensors from the folder: no weight is declared (the graph's weights are
+ * the in-tree ones), the kernel ops take the tensors as inputs, and the real declare copies what
+ * the mode reads -- the projector maps, this rank's correction heads -- once, into one block. */
+TEST(speed_takes_the_folder_and_declares_its_kernel_ops) {
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
-    Env env({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_ROWSEL_TABLE", "none"},
-             {"RADIANCE_KVA_ROWSEL", "random"}});
-    RadBuilder kva;
+    Env env({{"RADIANCE_KVA", "speed"}});
+    RadBuilder stock, kva;
     hold_kva(kva, {"kva.proj", "kva.st"});
-    for (const char* t : {"kva.rowsel.score", "kva.rowsel.score_none", "kva.rowsel.score_all"})
-        hold_score(kva, t);
-    CHECK_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
-    CHECK(weight(kva, "kva.rowsel.score_none") != nullptr);
-    CHECK(weight(kva, "kva.rowsel.score") == nullptr);
-    CHECK(weight(kva, "kva.rowsel.score_all") == nullptr);
-    int masks = 0;
+    hold_score(kva, "kva.rowsel.score");
+    hold_appended_weights(kva);
+    REQUIRE_EQ(qwen4exp_fp8::declare(&stock, &meta, &c), RAD_OK);
+    const std::string log = stderr_of([&] { CHECK_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK); });
+    CHECK_EQ(kva.weights.size(), stock.weights.size());
+    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+    CHECK_EQ(k.split, (int64_t)kSplit);
+    CHECK(k.have_proj && k.have_st && !k.have_rowsel);
+    CHECK(has(log, "matches test-q38-flashnext: arch ok, metadata 2/2, tokenizer ok, encodings 0/0, anchors 0/0"));
+    int undo = 0, apply = 0, gemm = 0;
     for (const RecOp& o : kva.ops) {
-        CHECK(o.op != "kva_rowsel");
-        if (o.op != "kva_mask") continue;
-        ++masks;
-        REQUIRE_EQ(o.w.size(), (size_t)1);
-        CHECK_EQ(kva.weights[o.w[0] - 1].first, std::string("kva.rowsel.score_none"));
-        for (const RecParam& p : o.p) {
-            CHECK(p.key != "cap");
-            if (p.key == "mode") CHECK_EQ(p.sval, std::string("random"));
-            if (p.key == "M")    CHECK_EQ(p.ihi, 2048LL);
-            if (p.key == "share") CHECK_EQ(p.dval, 0.25);
-        }
+        if (o.op == "kva_gemm_nt_bias" || o.op == "kva_state_correct" || o.op == "kva_mask") CHECK(o.w.empty());
+        gemm += o.op == "kva_gemm_nt_bias";
+        if (o.op != "kva_state_correct") continue;
+        for (const RecParam& q : o.p)
+            if (q.key == "mode") { undo += q.sval == "undo"; apply += q.sval == "apply"; }
     }
-    CHECK_EQ(masks, 1);
-    for (const auto& [name, d] : kva.bufs)
-        CHECK(name != "kva_rows_idx" && name != "kva_h_rows" && name != "kva_x_rows" && name != "kva_y_rows");
+    CHECK_EQ(undo, 3);    /* delta-net layers 4, 5, 6 */
+    CHECK_EQ(apply, 3);
+    CHECK_EQ(gemm, 8 - kSplit);
+    /* 4 maps + 4 biases + 3 corrections, no row table (speed reads none) */
+    CHECK_EQ(g_mem.copies.size(), (size_t)(2 * (8 - kSplit) + 3));
+    for (int l = 0; l < 8; ++l) {
+        CHECK_EQ(k.proj_w[(size_t)l].kind == RAD_OPK_RAW, l >= kSplit);
+        CHECK_EQ(k.st[(size_t)l].kind == RAD_OPK_RAW, l >= kSplit && l != 7);
+    }
+    CHECK_EQ(k.score.kind, (int)RAD_OPK_NONE);
+    /* A second declare of the same configuration copies nothing again. */
+    RadBuilder again;
+    hold_appended_weights(again);
+    CHECK_EQ(qwen4exp_kva::declare(&again, &meta, &c), RAD_OK);
+    CHECK_EQ(g_mem.copies.size(), (size_t)(2 * (8 - kSplit) + 3));
+}
+
+/* What each RAW operand points at is the copy of exactly its tensor: the projector map [n, hc*n]
+ * bf16, its bias, THIS RANK's value heads of the correction (rows [rank*H, rank*H + H) of the
+ * [48, V, K] tensor, the delta net's own contiguous head split) and the selected row table; 256-byte
+ * aligned in one block. At TP2, each rank its own block. */
+TEST(the_raw_operands_point_at_their_tensors_copies) {
+    RadModelMeta meta = flash_next_meta();
+    for (int world : {1, 2})
+        for (int rank = 0; rank < world; ++rank) {
+            RadBuildCtx c = served_ctx(rank, world);
+            Env env({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_ROWSEL_TABLE", "all"}});
+            RadBuilder kva;
+            served(kva);
+            hold_kva(kva, {"kva.proj", "kva.st"});
+            for (const char* t : {"kva.rowsel.score", "kva.rowsel.score_none", "kva.rowsel.score_all"})
+                hold_score(kva, t);
+            /* distinct source bytes per tensor, so a copy can be traced to its tensor */
+            int64_t at = 0;
+            for (auto& [name, t] : g_test_folder.tensors) { t.data = tensor_bytes() + at; at += 256; }
+            REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
+            const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
+            const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+            const int64_t heads = m.gcfg.n_head_v * m.gcfg.head_v * m.gcfg.head_k;
+            auto copy_of = [&](const RadOperand& o) -> const Upload* {
+                for (const Upload& u : g_mem.copies) if (u.dst == o.raw) return &u;
+                return nullptr;
+            };
+            auto src = [&](const std::string& n) { return g_test_folder.tensors[n].data; };
+            for (int l = kSplit; l < 8; ++l) {
+                const std::string L = std::to_string(l);
+                const RadOperand& w = k.proj_w[(size_t)l];
+                const Upload* uw = copy_of(w);
+                const Upload* ub = copy_of(k.proj_b[(size_t)l]);
+                REQUIRE(uw && ub);
+                CHECK(uw->src == src("proj." + L + ".weight") && uw->bytes == 2560LL * 10240 * 2);
+                CHECK(w.dtype == RAD_BF16 && w.rows == 2560 && w.cols == 10240);
+                CHECK(ub->src == src("proj." + L + ".bias") && ub->bytes == 2560 * 2);
+                CHECK_EQ(((uintptr_t)w.raw - kFakeVram) % 256, 0u);
+                if (l == 7) continue;
+                const Upload* us = copy_of(k.st[(size_t)l]);
+                REQUIRE(us != nullptr);
+                CHECK(us->src == src("st." + L) + rank * heads * 4);
+                CHECK_EQ(us->bytes, heads * 4);
+                CHECK(k.st[(size_t)l].rows == m.gcfg.n_head_v && k.st[(size_t)l].cols == m.gcfg.head_v * m.gcfg.head_k);
+            }
+            const Upload* sc = copy_of(k.score);
+            REQUIRE(sc != nullptr);
+            CHECK(sc->src == src("score_all") && sc->bytes == 248320 * 4 && k.score.rows == 248320);
+        }
+}
+
+/* RADIANCE_KVA_PROJ_PLACE=host: the projector maps go to host-mapped memory (written on the host,
+ * read through its device view), nothing of them to VRAM; the correction and the row table stay
+ * in VRAM. */
+TEST(host_placement_puts_the_maps_in_host_mapped_memory) {
+    RadModelMeta meta = flash_next_meta();
+    RadBuildCtx c = served_ctx();
+    Env env({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_PROJ_PLACE", "host"}, {"RADIANCE_KVA_PROJ_RING", "0"}});
+    RadBuilder kva;
+    served(kva);
+    hold_kva(kva, {"kva.proj", "kva.st"});
+    hold_score(kva, "kva.rowsel.score");
+    const int hosts = g_mem.host;
+    const std::string log = stderr_of([&] { CHECK_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK); });
+    CHECK_EQ(g_mem.host, hosts + 1);
+    CHECK_EQ(g_mem.copies.size(), (size_t)(3 + 1));   /* corrections + row table */
+    const qwen4exp_kva::Upload& u = qwen4exp_kva::g_upload[0];
+    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+    for (int l = kSplit; l < 8; ++l) {
+        const uintptr_t w = (uintptr_t)k.proj_w[(size_t)l].raw;
+        CHECK(w >= (uintptr_t)u.host + kDeviceView && w < (uintptr_t)u.host + kDeviceView + (uintptr_t)u.host_bytes);
+    }
+    CHECK_EQ(u.host_bytes, (int64_t)(8 - kSplit) * (2560LL * 10240 * 2 + 2560 * 2));   /* 256-aligned already */
+    CHECK(has(log, "MiB host-mapped (RADIANCE_KVA_PROJ_PLACE=host)"));
+    CHECK((uintptr_t)k.st[kSplit].raw >= kFakeVram && (uintptr_t)k.score.raw >= kFakeVram);
 }
 
 /* ==================================================================== the masked path: declare */
@@ -866,9 +1102,7 @@ RadOperand last_row(const Batch& x, rad_kvgroup g) {
 std::vector<RadOperand> correction_operands(const Batch& x, int l, int rank = 0) {
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
     const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
-    RadOperand heads = RAD_W(k.st[(size_t)l]);
-    heads.offset = (int64_t)rank * m.gcfg.n_head_v * m.gcfg.head_v * m.gcfg.head_k;
-    heads.rows = m.gcfg.n_head_v;
+    const RadOperand heads = k.st[(size_t)l];   /* the_raw_operands_point_at_their_tensors_copies */
     return {kv_cache(m.kv_state, l), last_row(x, m.kv_state), kv_cache(k.kv_applied, l),
             last_row(x, k.kv_applied), heads, k.kv_rho ? kv_cache(k.kv_rho, l) : RAD_NONE,
             k.kv_rho ? last_row(x, k.kv_rho) : RAD_NONE, brows(k.b_bounds, 2)};
@@ -909,8 +1143,8 @@ void push_projection(std::vector<RecIssue>& out, const Batch& x, int l, const Wa
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
     const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
     const int64_t T = x.b.n_tok, rows = w.b - w.s_lb, n = m.g.n_embd, wide = m.hccfg.hc * n;
-    out.push_back({k.op_proj[(size_t)l], {brow_slice(k.b_hs, w.s_lb, rows, wide), RAD_W(k.proj_w[(size_t)l]),
-                   RAD_W(k.proj_b[(size_t)l]), RAD_NONE, brow_slice(k.xp.x, w.s_lb, rows, n)}, rows});
+    out.push_back({k.op_proj[(size_t)l], {brow_slice(k.b_hs, w.s_lb, rows, wide), k.proj_w[(size_t)l],
+                   k.proj_b[(size_t)l], RAD_NONE, brow_slice(k.xp.x, w.s_lb, rows, n)}, rows});
     out.push_back({k.quant.op, {brow_slice(k.xp.x, w.s_lb, rows, n), brow_slice(k.xp.q8, w.s_lb, rows, n),
                    brow_slice(k.xp.s8, w.s_lb, rows, n / 128)}, rows});
     out.push_back({k.op_select, {brows(k.b_mask, T), brows(k.xp.x, T), brows(k.xp.q8, T), brows(k.xp.s8, T),
@@ -987,7 +1221,7 @@ std::vector<RecIssue> masked_expected(const Batch& x, const Want& w, int rank = 
     for (size_t i = 0; i < at[0]; ++i) {
         if (stock[i].op == m.layers[0].hc_mix.op_read)
             out.push_back({k.op_mask, {praw(b.cu_seqlens + b.n_seq - 1, RAD_I32, 2), praw(b.token_ids, RAD_I32, w.b),
-                           praw(b.positions, RAD_I32, w.b), w.scored ? RAD_W(k.score) : RAD_NONE,
+                           praw(b.positions, RAD_I32, w.b), w.scored ? k.score : RAD_NONE,
                            brows(k.b_mask, T), brows(k.b_bounds, 4), brows(k.b_zeros, k.n_zeros)}, w.b});
         out.push_back(stock[i]);
         if (w.stream && stock[i].op == m.layers[kSplit - 3].mlp.op_gu)
@@ -1122,7 +1356,7 @@ std::vector<RecIssue> straddle_expected(const std::vector<RecIssue>& seg, const 
     const RadBatch& bt = x.b;
     const int64_t T = bt.n_tok, rows = T - b, n = m.g.n_embd;
     std::vector<RecIssue> out = issues_by([&](RadCtx* cx) { lay.hc_mix.read(cx, T, b, rows); });
-    out.push_back({k.op_proj[(size_t)l], {brows(m.b_h, b), RAD_W(k.proj_w[(size_t)l]), RAD_W(k.proj_b[(size_t)l]),
+    out.push_back({k.op_proj[(size_t)l], {brows(m.b_h, b), k.proj_w[(size_t)l], k.proj_b[(size_t)l],
                    RAD_NONE, brows(m.a_x.x, b)}, b});
     out.push_back({k.quant.op, {brows(m.a_x.x, b), brows(m.a_x.q8, b), brow_slice(m.a_x.s8, 0, b, n / 128)}, b});
     if (lay.full) {
@@ -1315,7 +1549,7 @@ TEST(speed_fills_late_layers_with_their_cache_writing_ops_only) {
         REQUIRE(seg.size() > 2);
         CHECK_EQ(seg[0].op, k.op_proj[(size_t)l]);
         CHECK_EQ(seg[0].opd[0].handle, m.b_h);
-        CHECK_EQ(seg[0].opd[1].handle, k.proj_w[(size_t)l]);
+        CHECK(seg[0].opd[1].kind == RAD_OPK_RAW && seg[0].opd[1].raw == k.proj_w[(size_t)l].raw);
         CHECK_EQ(seg[0].opd[4].handle, m.a_x.x);
         CHECK_EQ(seg[1].op, k.quant.op);
         CHECK_EQ(seg[1].opd[1].handle, m.a_x.q8);
@@ -1376,9 +1610,9 @@ TEST(the_correction_is_declared_and_issued_only_when_held) {
     }
 }
 
-/* AT TP2 EACH RANK HANDS THE CORRECTION ITS OWN VALUE HEADS: the weight is the whole [48, V, K]
- * tensor on every rank (no ROW share of a rank-3 weight exists), sliced at issue to rows
- * [rank*H, rank*H + H) -- the contiguous head split of the delta net's own weights. */
+/* AT TP2 EACH RANK HANDS THE CORRECTION ITS OWN VALUE HEADS: each rank copied rows [rank*H,
+ * rank*H + H) of the folder's [48, V, K] tensor at declare (the_raw_operands_point_at_their_tensors_
+ * copies), and its undo and apply issue exactly that copy. */
 TEST(at_tp2_each_rank_corrects_its_own_heads) {
     for (int rank : {0, 1}) {
         Pair p;
@@ -1386,10 +1620,6 @@ TEST(at_tp2_each_rank_corrects_its_own_heads) {
         REQUIRE_EQ(p.st, RAD_OK);
         const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
         const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
-        const RadWeightDecl* w = weight(p.kva, "kva.st.4");
-        REQUIRE(w != nullptr);
-        CHECK_EQ(w->shard, RAD_SHARD_NONE);
-        CHECK_EQ(w->shape[0], m.gcfg.n_head_v * 2);
         Batch bk = make_step(p.kva, {{128}, 0, 2048});
         const Run r = run_step(qwen4exp_kva::step, bk.b, rank);
         int seen = 0;
@@ -1397,23 +1627,23 @@ TEST(at_tp2_each_rank_corrects_its_own_heads) {
             if (i.op != k.op_undo[kSplit] && i.op != k.op_apply[kSplit]) continue;
             ++seen;
             REQUIRE_EQ(i.opd.size(), (size_t)8);
-            CHECK_EQ(i.opd[4].handle, k.st[kSplit]);
+            CHECK(i.opd[4].kind == RAD_OPK_RAW && i.opd[4].raw == k.st[kSplit].raw);
             CHECK_EQ(i.opd[4].rows, m.gcfg.n_head_v);
-            CHECK_EQ(i.opd[4].offset, (int64_t)rank * m.gcfg.n_head_v * m.gcfg.head_v * m.gcfg.head_k);
         }
         CHECK_EQ(seen, 2);
     }
 }
 
 /* plumb runs the late layers exactly and issues no correction, so it places none; it declares no
- * projector op, no select, no drop and no stream copy either (it still declares the projector's
- * weights: S is the lowest projected layer). */
+ * projector op, no select, no drop and no stream copy either, and copies nothing of the folder (it
+ * takes only S, the split, from it). */
 TEST(plumb_declares_no_correction) {
     Pair p;
     declare_pair(p, "plumb");
     REQUIRE_EQ(p.st, RAD_OK);
-    CHECK(weight(p.kva, "kva.st.4") == nullptr);
-    CHECK(weight(p.kva, "kva.proj.4.weight") != nullptr);
+    CHECK_EQ(p.kva.weights.size(), p.stock.weights.size());
+    CHECK_EQ(g_mem.copies.size(), (size_t)0);
+    CHECK_EQ(qwen4exp_kva::g_kva[0].split, (int64_t)kSplit);
     for (size_t i = p.stock.ops.size(); i < p.kva.ops.size(); ++i) {
         const std::string& op = p.kva.ops[i].op;
         CHECK(op == "kva_mask" || op == "moe_gemm_q");
@@ -1563,10 +1793,8 @@ TEST(state_capture_copies_each_late_state_before_the_apply) {
     }
     const RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
-    RadBuilder kva;
+    RadBuilder kva;   /* the same folder and copies as the plain declare's */
     served(kva);
-    hold_kva(kva, {"kva.proj", "kva.st"});
-    hold_score(kva, "kva.rowsel.score");
     Env env({{"RADIANCE_KVA", "speed"}, {"RADIANCE_KVA_CAPTURE_STATE", dir.path.c_str()}});
     REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
@@ -1631,14 +1859,14 @@ TEST(speed_adds_its_ops_after_the_in_tree_graph) {
     for (size_t i = p.stock.ops.size(); i < p.kva.ops.size(); ++i) {
         const RecOp& o = p.kva.ops[i];
         ++n[o.op];
-        if (o.op != "gemm_nt_bias") continue;
+        if (o.op != "kva_gemm_nt_bias") continue;
         for (const RecParam& q : o.p) {
             if (q.key == "N") CHECK_EQ(q.ival, 2560LL);
             if (q.key == "K") CHECK_EQ(q.ival, 10240LL);
             if (q.key == "M") CHECK_EQ(q.ihi, 2048LL);
         }
     }
-    CHECK_EQ(n["gemm_nt_bias"], 8 - kSplit);
+    CHECK_EQ(n["kva_gemm_nt_bias"], 8 - kSplit);
     CHECK_EQ(n["quant_act_i8g"], 1);
     CHECK_EQ(n["kva_state_correct"], 2 * 3);
     CHECK_EQ(n["kva_mask"], 1);
@@ -1658,6 +1886,21 @@ TEST(speed_adds_its_ops_after_the_in_tree_graph) {
  * dt_bias, the experts' tables) under a sizing declare -- and its buffers are the real ones with
  * only dim 0 smaller. */
 TEST(a_sizing_declare_matches_the_real_one) {
+    {   /* a sizing declare alone (no real one before it in this process) copies nothing */
+        RadModelMeta meta = flash_next_meta();
+        RadBuildCtx c = served_ctx();
+        RadBuilder real;
+        REQUIRE_EQ(qwen4exp_fp8::declare(&real, &meta, &c), RAD_OK);   /* the in-tree model only */
+        c.max_tok = 256;
+        c.shape_probe = 1;
+        RadBuilder small;
+        served(small);
+        hold_kva(small, {"kva.proj", "kva.st"});
+        hold_score(small, "kva.rowsel.score");
+        Env env({{"RADIANCE_KVA", "quality"}});
+        CHECK_EQ(qwen4exp_kva::declare(&small, &meta, &c), RAD_OK);
+        CHECK(g_mem.copies.empty() && !qwen4exp_kva::g_upload[0].done);
+    }
     for (const char* mode : {"plumb", "speed", "quality"}) {
         Pair p;
         declare_pair(p, mode);
@@ -1666,12 +1909,14 @@ TEST(a_sizing_declare_matches_the_real_one) {
         RadBuildCtx c = served_ctx();
         c.max_tok = 256;
         c.shape_probe = 1;
-        RadBuilder small;
+        RadBuilder small;   /* the real declare's folder and copies stay */
         served(small);
-        hold_kva(small, {"kva.proj", "kva.st"});
-        hold_score(small, "kva.rowsel.score");
         Env env({{"RADIANCE_KVA", mode}});
+        const size_t copies = g_mem.copies.size();
+        const void* block = qwen4exp_kva::g_upload[0].vram;
         REQUIRE_EQ(qwen4exp_kva::declare(&small, &meta, &c), RAD_OK);
+        CHECK_EQ(g_mem.copies.size(), copies);   /* a sizing declare copies nothing */
+        CHECK(qwen4exp_kva::g_upload[0].vram == block);
         REQUIRE_EQ(small.ops.size(), p.kva.ops.size());
         int fixed_differ = 0;
         for (size_t i = 0; i < small.ops.size(); ++i) {
@@ -1771,14 +2016,6 @@ TEST(a_tail_below_the_measured_minimum_is_refused) {
     CHECK(has(err, "256") && has(err, "512"));
 }
 
-TEST(quality_without_the_row_table_is_refused) {
-    RadBuilder b;
-    hold_kva(b, {"kva.proj", "kva.st"});
-    std::string err;
-    CHECK(refused({{"RADIANCE_KVA", "quality"}}, b, &err) < 0);
-    CHECK(has(err, "kva.rowsel.score"));
-}
-
 /* Each kva.so op a mode issues is refused by name when no kernel library serves it -- plumb's mask
  * included. (`cast` and `moe_gemm_q` are in-tree ops too: refusing them fails the in-tree declare
  * first, which is its own refusal.) */
@@ -1786,7 +2023,8 @@ TEST(a_mode_whose_kva_op_no_kernel_serves_is_refused_by_name) {
     struct Case { const char* mode; const char* op; };
     for (const Case& c : {Case{"speed", "kva_state_correct"}, Case{"quality", "kva_mask"},
                           Case{"plumb", "kva_mask"}, Case{"speed", "kva_select"},
-                          Case{"speed", "kva_drop_rows"}, Case{"quality", "kva_rho_update"}}) {
+                          Case{"speed", "kva_drop_rows"}, Case{"quality", "kva_rho_update"},
+                          Case{"speed", "kva_gemm_nt_bias"}}) {
         RadBuilder b;
         hold_kva(b, {"kva.proj", "kva.st"});
         hold_score(b, "kva.rowsel.score");
@@ -1797,26 +2035,11 @@ TEST(a_mode_whose_kva_op_no_kernel_serves_is_refused_by_name) {
     }
 }
 
-TEST(a_mode_with_no_projector_held_is_refused) {
-    RadBuilder b;
-    std::string err;
-    CHECK_EQ(refused({{"RADIANCE_KVA", "plumb"}}, b, &err), RAD_E_UNSUPPORTED);
-    CHECK(has(err, "kva.proj"));
-}
-
-TEST(a_projector_with_a_hole_is_refused) {
-    RadBuilder b;
-    for (int l : {4, 5, 7})
-        b.encs.push_back({"kva.proj." + std::to_string(l), rad_enc_plain(RAD_BF16)});
-    std::string err;
-    CHECK(refused({{"RADIANCE_KVA", "speed"}}, b, &err) < 0);
-    CHECK(has(err, "kva.proj.6.weight"));
-}
-
 TEST(a_switch_with_an_unknown_value_is_refused_naming_the_values) {
     struct Case { const char* name; const char* value; const char* allowed; };
     for (const Case& c : {Case{"RADIANCE_KVA", "fast", "off|plumb|speed|quality"},
-                          Case{"RADIANCE_KVA_ST", "flipped", "shipped|swap|refit"},
+                          Case{"RADIANCE_KVA_PROJ_PLACE", "gpu", "vram|host"},
+                          Case{"RADIANCE_KVA_ROWSEL_TABLE", "rare", "class|none|all"},
                           Case{"RADIANCE_KVA_STAGE", "never", "auto|stock"},
                           Case{"RADIANCE_KVA_STRADDLE", "middle", "split|end"},
                           Case{"RADIANCE_KVA_SCORE_BULK", "yes", "1 or unset"},
@@ -1858,17 +2081,6 @@ TEST(the_container_mode_is_ignored_and_said_so) {
         CHECK_EQ(qwen4exp_kva::g_kva[rank].cfg.mode, (int)qwen4exp_kva::MODE_OFF);
         CHECK_EQ(count(err, "kva.mode=quality is ignored"), rank == 0 ? 1 : 0);
     }
-}
-
-/* The fill feeds blocks their input already normed and skips the n-gram layer: a split at or below
- * the PLE layer is refused (the projector would predict from a stream without the PLE). */
-TEST(a_split_at_or_below_the_ple_layer_is_refused) {
-    RadBuilder b;
-    for (int l = 1; l < 8; ++l)
-        b.encs.push_back({"kva.proj." + std::to_string(l), rad_enc_plain(RAD_BF16)});
-    std::string err;
-    CHECK_EQ(refused({{"RADIANCE_KVA", "speed"}}, b, &err), RAD_E_UNSUPPORTED);
-    CHECK(has(err, "n-gram"));
 }
 
 TEST(capture_refuses_a_serving_mode) {
@@ -1942,5 +2154,205 @@ TEST(the_forward_table_starts_empty) {
           qwen4exp_kva::g_forward.probe == nullptr);
     CHECK(qwen4exp_kva::find_shadowed("").empty() || std::getenv("RADIANCE_HOME") != nullptr);
 }
+
+/* THE STAGING RING (DD-L): with host placement, each late layer's map + bias row block is copied
+ * into one of two VRAM slots on lane 1 -- layer S's at the start of the pass, layer li+1's right
+ * before layer li's GEMM, behind a join that waits for the GEMM two layers back to have been handed
+ * to lane 0 -- and lane 0 waits for a layer's copy before its GEMM, which reads that slot. */
+TEST(the_staging_ring_copies_each_map_a_layer_ahead_on_lane_1) {
+    RadModelMeta meta = flash_next_meta();
+    RadBuildCtx c = served_ctx();
+    Env env({{"RADIANCE_KVA", "speed"}, {"RADIANCE_KVA_PROJ_PLACE", "host"}});
+    RadBuilder kva;
+    served(kva);
+    hold_kva(kva, {"kva.proj", "kva.st"});
+    REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
+    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+    const qwen4exp_kva::Upload& u = qwen4exp_kva::g_upload[0];
+    REQUIRE(k.op_ring != 0);
+    CHECK_EQ(kva.ops[k.op_ring - 1].op, std::string("cast"));
+    const int64_t block = 2561LL * 10240 * 2;
+    CHECK_EQ(u.host_bytes, (8 - kSplit) * block);
+    for (int l = kSplit; l < 8; ++l) {
+        const uintptr_t slot = (uintptr_t)k.proj_w[(size_t)l].raw, other = (uintptr_t)k.proj_w[(size_t)(l ^ 1)].raw;
+        CHECK(slot >= kFakeVram && slot != other);
+        CHECK_EQ((uintptr_t)k.proj_b[(size_t)l].raw, slot + 2560u * 10240 * 2);
+        CHECK_EQ((uintptr_t)k.ring_dst[(size_t)l].raw, slot);
+        CHECK_EQ(k.ring_src[(size_t)l].rows, 2561);
+        CHECK((uintptr_t)k.ring_src[(size_t)l].raw >= (uintptr_t)u.host + kDeviceView);
+    }
+    Batch bk = make_step(kva, {{2048}, 0, 2048});   /* a lean speed pass */
+    const Run r = run_step(qwen4exp_kva::step, bk.b);
+    std::vector<std::string> seq;   /* the ring's events and the projector GEMMs, in issue order */
+    for (const RecIssue& i : r.issues) {
+        if (i.op == kLane) seq.push_back("lane" + std::to_string(i.n));
+        else if (i.op == kJoin) seq.push_back("join" + std::to_string(i.n / 16) + std::to_string(i.n % 16));
+        else if (i.op == k.op_ring) {
+            int l = -1;
+            for (int x = kSplit; x < 8; ++x) if (i.opd[0].raw == k.ring_src[(size_t)x].raw) l = x;
+            seq.push_back("copy" + std::to_string(l));
+            CHECK(i.opd[1].raw == k.ring_dst[(size_t)l].raw && i.n == 2561);
+        } else if (i.op && i.op == k.op_proj[(size_t)kSplit]) seq.push_back("gemm4");
+        else for (int x = kSplit + 1; x < 8; ++x) if (i.op == k.op_proj[(size_t)x]) seq.push_back("gemm" + std::to_string(x));
+    }
+    const std::vector<std::string> want = {
+        "join01", "lane1", "copy4", "lane0",
+        "join10", "join01", "lane1", "copy5", "lane0", "gemm4",
+        "join10", "join01", "lane1", "copy6", "lane0", "gemm5",
+        "join10", "join01", "lane1", "copy7", "lane0", "gemm6",
+        "join10", "gemm7" };
+    CHECK(seq == want);
+    if (seq != want) for (const std::string& e : seq) std::fprintf(stderr, " %s", e.c_str());
+}
+
+/* ==================================================================== the folder on disk */
+
+/* A safetensors file of the given tensors (all zeros), as safetensors writes one. */
+std::string safetensors(const std::vector<std::tuple<std::string, std::string, std::vector<int64_t>, int>>& ts) {
+    std::string header = "{", data;
+    for (const auto& [name, dtype, shape, esize] : ts) {
+        int64_t n = 1;
+        std::string dims;
+        for (int64_t e : shape) { n *= e; dims += (dims.empty() ? "" : ",") + std::to_string(e); }
+        header += (header.size() > 1 ? "," : "") + std::string("\"") + name + "\":{\"dtype\":\"" + dtype +
+                  "\",\"shape\":[" + dims + "],\"data_offsets\":[" + std::to_string(data.size()) + "," +
+                  std::to_string(data.size() + (size_t)(n * esize)) + "]}";
+        data.append((size_t)(n * esize), '\0');
+    }
+    header += ",\"__metadata__\":{\"x\":\"y\"}}";
+    std::string out(8, '\0');
+    const uint64_t len = header.size();
+    std::memcpy(out.data(), &len, 8);
+    return out + header + data;
+}
+
+std::string sha_of(const std::string& bytes) {
+    return qwen4exp_kva::sha256_bytes((const unsigned char*)bytes.data(), bytes.size());
+}
+
+/* A folder of two files, one tensor each; its manifest lists both with their hashes. */
+void write_folder(const std::filesystem::path& dir, const std::string& files_override = "") {
+    const std::string a = safetensors({{"proj.4.weight", "BF16", {2, 8}, 2}, {"proj.4.bias", "BF16", {2}, 2}});
+    const std::string b = safetensors({{"score", "F32", {5}, 4}});
+    std::ofstream(dir / "proj.L4.safetensors", std::ios::binary) << a;
+    std::ofstream(dir / "rowsel.safetensors", std::ios::binary) << b;
+    std::ofstream(dir / "README.md") << "hello";
+    const std::string files = files_override.empty()
+        ? "{\"proj.L4.safetensors\": \"" + sha_of(a) + "\", \"rowsel.safetensors\": \"" + sha_of(b) +
+              "\", \"README.md\": \"" + sha_of("hello") + "\"}"
+        : files_override;
+    std::ofstream(dir / "kva.json") << "{\"format\": 1, \"files\": " << files << "}";
+}
+
+/* The folder's files are mapped, hashed and their tensors named; what a partial or damaged download
+ * looks like is refused naming the file. */
+TEST(a_folder_is_read_and_a_damaged_one_refused_by_name) {
+    TempDir dir;
+    REQUIRE(!dir.path.empty());
+    write_folder(dir.path);
+    qwen4exp_kva::Folder f;
+    f.place.dir = dir.path.string();
+    std::string why;
+    REQUIRE(qwen4exp_kva::read_folder(&f, &why));
+    CHECK_EQ(f.tensors.size(), (size_t)3);
+    CHECK(f.tensors["proj.4.weight"].dtype == RAD_BF16 && f.tensors["proj.4.weight"].shape == std::vector<int64_t>({2, 8}));
+    CHECK_EQ(f.tensors["score"].bytes, 20);
+    struct Case { std::function<void()> damage; const char* said; };
+    const Case cases[] = {
+        { [&] { std::filesystem::remove(dir.path / "rowsel.safetensors"); }, "lists rowsel.safetensors, which is missing" },
+        { [&] { std::ofstream(dir.path / "README.md") << "hullo"; }, "README.md is corrupt" },
+        { [&] { std::ofstream(dir.path / "kva.json") << "{\"format\": 2, \"files\": {}}"; }, "format-1" },
+        { [&] { write_folder(dir.path, "{\"../x\": \"00\"}"); }, "lists ../x" },
+        { [&] { const std::string a = safetensors({{"score", "F32", {5}, 4}});
+                std::ofstream(dir.path / "proj.L4.safetensors", std::ios::binary) << a;
+                write_folder(dir.path, "{\"proj.L4.safetensors\": \"" + sha_of(a) + "\", \"rowsel.safetensors\": \"" +
+                                       sha_of(safetensors({{"score", "F32", {5}, 4}})) + "\"}");
+                std::ofstream(dir.path / "proj.L4.safetensors", std::ios::binary) << a; }, "'score' is in two files" },
+    };
+    for (const Case& c : cases) {
+        write_folder(dir.path);
+        c.damage();
+        qwen4exp_kva::Folder g;
+        g.place.dir = dir.path.string();
+        why.clear();
+        CHECK(!qwen4exp_kva::read_folder(&g, &why));
+        CHECK(has(why, c.said));
+        if (!has(why, c.said)) std::fprintf(stderr, "    said: %s\n", why.c_str());
+    }
+}
+
+/* Discovery: RADIANCE_KVA_PROJECTOR wins and names itself; otherwise projector/ beside the model
+ * file this process has MAPPED (the test maps the tiny container, as the engine maps its model);
+ * with neither there is no folder, and the places looked at are said. */
+TEST(the_folder_is_found_by_the_env_then_beside_the_mapped_model) {
+    TempDir dir;
+    REQUIRE(!dir.path.empty());
+    const std::filesystem::path model = dir.path / "model.rad", proj = dir.path / "projector";
+    std::filesystem::copy_file(tiny_container(), model);
+    {
+        const qwen4exp_kva::FolderPlace none = qwen4exp_kva::find_folder();
+        CHECK(none.dir.empty());
+        CHECK(has(none.how, "no model file is mapped"));
+    }
+    size_t size = 0;
+    const unsigned char* mapped = qwen4exp_kva::map_file(model.string(), &size);
+    REQUIRE(mapped != nullptr);
+    qwen4exp_kva::FolderPlace at = qwen4exp_kva::find_folder();
+    CHECK_EQ(at.container, model.string());
+    CHECK(at.dir.empty() && has(at.how, (proj).string().c_str()));
+    std::filesystem::create_directory(proj);
+    write_folder(proj);
+    at = qwen4exp_kva::find_folder();
+    CHECK_EQ(at.dir, proj.string());
+    CHECK(has(at.how, "beside the resolved model file"));
+    {
+        TempDir other;
+        write_folder(other.path);
+        Env env({{"RADIANCE_KVA_PROJECTOR", other.path.c_str()}});
+        at = qwen4exp_kva::find_folder();
+        CHECK_EQ(at.dir, other.path.string());
+        CHECK(has(at.how, "$RADIANCE_KVA_PROJECTOR="));
+    }
+    {
+        Env env({{"RADIANCE_KVA_PROJECTOR", (dir.path / "nowhere").c_str()}});
+        at = qwen4exp_kva::find_folder();
+        CHECK(at.dir.empty() && has(at.how, "(no kva.json there)"));
+    }
+    munmap((void*)mapped, size);
+}
+
+/* The container is read through the public format: an entry's planes and the tokenizer's canonical
+ * form hash to the values tools/kva_projector.py's test expects of the same bytes. */
+TEST(the_container_hashes_are_the_builders) {
+    qwen4exp_kva::Container c;
+    REQUIRE(qwen4exp_kva::open_container(tiny_container(), &c));
+    CHECK_EQ(qwen4exp_kva::vocab_sha256(c), std::string(kTinyVocab));
+    CHECK_EQ(qwen4exp_kva::entry_sha256(c, "anchor.weight"), std::string(kTinyAnchor));
+    CHECK(qwen4exp_kva::entry_sha256(c, "absent.weight").empty());
+    munmap((void*)c.base, c.size);
+    qwen4exp_kva::Container bad;
+    CHECK(!qwen4exp_kva::open_container("/proc/self/cmdline", &bad));
+}
+
+/* The JSON reader: what the manifest and safetensors headers use, and what it refuses. */
+TEST(the_json_reader_reads_the_manifest_forms) {
+    qwen4exp_kva::Json j;
+    const std::string ok = R"({"a": [1, -2.5e3, true, false, null], "s": "x\"\\\/\n\u00e9\ud83d\ude00", "a": {"b": 3}})";
+    REQUIRE(qwen4exp_kva::json_parse(ok.data(), ok.size(), &j));
+    CHECK_EQ(j.get("a")->integer("b", 0), 3);   /* a repeated key reads as its last */
+    CHECK_EQ(j.text("s"), std::string("x\"\\/\n\xc3\xa9\xf0\x9f\x98\x80"));
+    for (const char* bad : {"{", "{\"a\":}", "[1,]", "{\"a\":1} x", "\"\\q\"", "nul"})
+        CHECK(!qwen4exp_kva::json_parse(bad, std::strlen(bad), &j));
+}
+
+/* Every case starts with no folder and no copies: a folder one case hands the plugin must not leak
+ * into the next. (Static, after every registration in this file.) */
+static const int g_reset_each_case = [] {
+    for (auto& c : ::radtest::cases()) {
+        auto fn = c.fn;
+        c.fn = [fn] { reset_projector(); fn(); };
+    }
+    return 0;
+}();
 
 RAD_TEST_MAIN()

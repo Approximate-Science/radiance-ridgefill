@@ -40,7 +40,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # tools/: kva_rules
 import kva_rules as R  # noqa: E402
 
 SET_FILE = "rad-convert-set.txt"

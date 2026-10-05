@@ -40,7 +40,8 @@ if(KVA_HIP)
   set(KVA_HIP_SOURCES mask.hip rho.hip state_correct.hip select.hip)
 endif()
 
-rad_add_plugin(kva kernels SOURCES rows.cpp host_ref.cpp HIP_SOURCES ${KVA_HIP_SOURCES})
+rad_add_plugin(kva kernels SOURCES rows.cpp host_ref.cpp forward.cpp HIP_SOURCES ${KVA_HIP_SOURCES})
+target_link_libraries(kva PRIVATE ${CMAKE_DL_LIBS})   # forward.cpp finds libr4d / libref (dlopen NOLOAD)
 
 # -ffp-contract=off on the HOST rows too (rad_add_plugin sets it for device code only): the oracle
 # has to round `a*b + c` twice exactly as the device rows do, or "host == device, max diff 0"
@@ -70,8 +71,17 @@ add_dependencies(kernel_test kva)
 set(KVA_TEST_ENV
   "KVA_RHO_FIXTURE=${KVA_TEST_DIR}/fixtures/rho_numpy.txt"
   "KVA_ROWSEL_FIXTURE=${KVA_TEST_DIR}/fixtures/rowsel_quick9.json")
-add_test(NAME kva_kernels_host COMMAND kernel_test $<TARGET_FILE:kva> host)
-add_test(NAME kva_kernels_gpu COMMAND kernel_test $<TARGET_FILE:kva> gpu)
-set_tests_properties(kva_kernels_host kva_kernels_gpu PROPERTIES
+# kva_gemm_nt_bias forwards to the installed engine's own gemm rows: the runs load those libraries
+# first, as the engine does; `kva_kernels_alone` loads none and checks the op then has no row.
+set(KVA_GEMM_SOURCES "")
+foreach(lib libr4d libref)
+  if(DEFINED RADIANCE_KERNELS_DIR AND EXISTS "${RADIANCE_KERNELS_DIR}/${lib}.so")
+    list(APPEND KVA_GEMM_SOURCES "${RADIANCE_KERNELS_DIR}/${lib}.so")
+  endif()
+endforeach()
+add_test(NAME kva_kernels_host COMMAND kernel_test $<TARGET_FILE:kva> host ${KVA_GEMM_SOURCES})
+add_test(NAME kva_kernels_alone COMMAND kernel_test $<TARGET_FILE:kva> host)
+add_test(NAME kva_kernels_gpu COMMAND kernel_test $<TARGET_FILE:kva> gpu ${KVA_GEMM_SOURCES})
+set_tests_properties(kva_kernels_host kva_kernels_alone kva_kernels_gpu PROPERTIES
   SKIP_RETURN_CODE 77 ENVIRONMENT "${KVA_TEST_ENV}")
 set_tests_properties(kva_kernels_gpu PROPERTIES LABELS gpu)

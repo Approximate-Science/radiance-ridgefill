@@ -8,12 +8,12 @@
  * mode in it can never switch the trade on behind an operator's back.
  *
  *   env RADIANCE_KVA          off | plumb | speed | quality                      default off
- *   meta kva.tail             exact tail T in tokens   env RADIANCE_KVA_TAIL     default 2048
+ *                             exact tail T in tokens   env RADIANCE_KVA_TAIL     default 2048
  *                             correction strength      env RADIANCE_KVA_ALPHA    default 1
  *                             row selection rule       env RADIANCE_KVA_ROWSEL   class|random|all
- *   meta kva.rowsel.share     share of the window's class matches kept exact
+ *                             share of the window's class matches kept exact
  *                                                      env RADIANCE_KVA_SHARE    default 0.25
- *   meta kva.rowsel.seed      seed of the random control                         default 0
+ *                             seed of the random control                         default 0
  *   env RADIANCE_KVA_STAGE    auto | stock: the stager lever (PLAN-FIX §6.1, notes/impl.md §2).
  *                             auto lets the late layers STREAM their routed experts on an
  *                             approximate pass whose exact rows are at most RADIANCE_KVA_STAGE_ROWS;
@@ -33,19 +33,27 @@
  *   RADIANCE_KVA_TAIL_ONLY    0: speed straddles take the masked path instead of the tail-only one
  *                             (the oracle the tail-only path is compared with, A.1)
  *
- * WHICH COPY OF EACH FITTED TENSOR (the controls and the Stage 6 refit live in the same container
- * under suffixed names, because the disk has no room for a second 114 GiB container and
- * `rad-convert --reuse --in-place` refuses to change a weight it already holds):
+ * THE PROJECTOR FOLDER (PACKAGING.md; kva_folder.h, kva_projector.h). The fitted tensors come from
+ * `<model dir>/projector/` and never from the container -- kva.* weights and keys an earlier append
+ * left in a container are ignored:
  *
- *   env RADIANCE_KVA_PROJ         shipped -> kva.proj.L.{weight,bias}   refit -> kva.projr.L.*
- *   env RADIANCE_KVA_ST           shipped -> kva.st.L   swap -> kva.stswap.L (R24)   refit -> kva.str.L
- *   env RADIANCE_KVA_ROWSEL_TABLE class -> kva.rowsel.score   none -> kva.rowsel.score_none (R41)
- *                                 all   -> kva.rowsel.score_all (every id a match: R35')
- *   env RADIANCE_KVA_DECLARE      all: declare EVERY kva.* tensor the model holds, which is what
- *                                 rad-convert must see (it writes only declared weights, and an
- *                                 --in-place append drops any old entry the declare did not name).
- *                                 Unset when serving: only the selected set is declared, so the
- *                                 unselected copies are never placed in VRAM.
+ *   env RADIANCE_KVA_PROJECTOR    the folder, ahead of projector/ beside the model file
+ *   env RADIANCE_KVA_PROJ_PLACE   vram | host: where the projector maps live. vram costs ~1.2 GiB
+ *                                 of each card (fewer resident experts); host costs nothing on
+ *                                 the card and reads the maps over the link on every
+ *                                 approximated chunk (slower ON chunks, R148)        default vram
+ *   env RADIANCE_KVA_PROJ_RING    1 | 0: with host placement, copy each late layer's map into one of
+ *                                 two VRAM slots on the second lane ahead of its GEMM (Dylan's DD-L,
+ *                                 2 x 50 MiB a card), or let the GEMM read host memory directly
+ *                                 (0: every M tile re-reads the map over the link -- measured
+ *                                 2.7x slower than exact at 16K/32K; the ring +6%/+10% over
+ *                                 vram, notes/aprime.md R148)                             default 1
+ *   env RADIANCE_KVA_ROWSEL_TABLE class -> score   none -> score_none (R41)
+ *                                 all   -> score_all (every id a match: R35')
+ *
+ * RETIRED with the container append (A'), refused by name so an old command line cannot silently
+ * run something else: RADIANCE_KVA_PROJ and RADIANCE_KVA_ST (a variant is its own folder now:
+ * point RADIANCE_KVA_PROJECTOR at it) and RADIANCE_KVA_DECLARE (tools/dev/README.md).
  */
 #ifndef QWEN4EXP_KVA_CONFIG_H
 #define QWEN4EXP_KVA_CONFIG_H
@@ -64,11 +72,13 @@ enum Mode     { MODE_OFF = 0, MODE_PLUMB, MODE_SPEED, MODE_QUALITY };
 enum Rowsel   { ROWSEL_CLASS = 0, ROWSEL_RANDOM, ROWSEL_ALL };
 enum Stage    { STAGE_AUTO = 0, STAGE_STOCK };
 enum Straddle { STRADDLE_SPLIT = 0, STRADDLE_END };
+enum Place    { PLACE_VRAM = 0, PLACE_HOST };
 
 static const char* const kModeNames[]     = { "off", "plumb", "speed", "quality" };
 static const char* const kRowselNames[]   = { "class", "random", "all" };
 static const char* const kStageNames[]    = { "auto", "stock" };
 static const char* const kStraddleNames[] = { "split", "end" };
+static const char* const kPlaceNames[]    = { "vram", "host" };
 
 /* The shortest exact tail the method was ever run at (tcc's MIN_TAIL, KVA-FACTS §5). */
 constexpr int64_t kMinTail = 512;
@@ -83,10 +93,9 @@ struct Config {
     int         rowsel      = ROWSEL_CLASS;
     double      share       = 0.25;
     int64_t     seed        = 0;
-    const char* proj        = "kva.proj";
-    const char* st          = "kva.st";
-    const char* score       = "kva.rowsel.score";
-    bool        declare_all = false;
+    int         rowsel_table = 0;          /* kScoreNames' index: score, score_none, score_all */
+    int         place       = PLACE_VRAM;
+    bool        ring        = true;        /* host placement: stage each layer's map through VRAM */
     int         stage       = STAGE_AUTO;
     int64_t     stage_rows  = 64;          /* one tile: A.1's profile, notes/impl.md §6 */
     bool        score_bulk  = false;
@@ -158,19 +167,20 @@ inline int read_int(const char* name, int64_t lo, int64_t hi, const char* allowe
 }
 
 inline int read_variants(Config* c) {
-    int v = 0;
-    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_PROJ", { "shipped", "refit" }, "shipped|refit", &v));
-    c->proj = v == 0 ? "kva.proj" : "kva.projr";
-    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_ST", { "shipped", "swap", "refit" },
-                             "shipped|swap|refit", &v));
-    c->st = v == 0 ? "kva.st" : v == 1 ? "kva.stswap" : "kva.str";
+    for (const char* retired : { "RADIANCE_KVA_PROJ", "RADIANCE_KVA_ST", "RADIANCE_KVA_DECLARE" })
+        if (const char* v = env(retired)) {
+            std::fprintf(stderr, "radiance: qwen4exp_kva: %s=%s is retired with the container append: "
+                                 "the fitted tensors come from the projector folder (a variant is a "
+                                 "folder of its own, named by RADIANCE_KVA_PROJECTOR); unset it\n",
+                         retired, v);
+            return RAD_E_INVAL;
+        }
     RAD_ARCH_TRY(read_choice("RADIANCE_KVA_ROWSEL_TABLE", { "class", "none", "all" },
-                             "class|none|all", &v));
-    c->score = v == 0 ? "kva.rowsel.score" : v == 1 ? "kva.rowsel.score_none"
-                                                    : "kva.rowsel.score_all";
-    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_DECLARE", { "selected", "all" },
-                             "all (rad-convert) or unset (serving)", &v));
-    c->declare_all = v == 1;
+                             "class|none|all", &c->rowsel_table));
+    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_PROJ_PLACE", { "vram", "host" }, "vram|host", &c->place));
+    int ring = 1;
+    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_PROJ_RING", { "1", "0" }, "1|0", &ring));
+    c->ring = ring == 0;   /* index 0 is "1" */
     return RAD_OK;
 }
 
@@ -199,7 +209,6 @@ inline int read_config(const RadModelMeta* meta, Config* c) {
     RAD_ARCH_TRY(read_choice("RADIANCE_KVA", { "off", "plumb", "speed", "quality" },
                              "off|plumb|speed|quality", &c->mode));
     c->meta_mode = rad_meta_gets(meta, "kva.mode", nullptr);
-    c->tail = rad_meta_geti(meta, "kva.tail", c->tail);
     if (const char* t = env("RADIANCE_KVA_TAIL"); t && !parse_int(t, &c->tail))
         return bad_value("RADIANCE_KVA_TAIL", t, "a token count");
     const char* a = env("RADIANCE_KVA_ALPHA");
@@ -207,7 +216,6 @@ inline int read_config(const RadModelMeta* meta, Config* c) {
         return bad_value("RADIANCE_KVA_ALPHA", a, "a strength in [0, 1]");
     RAD_ARCH_TRY(read_choice("RADIANCE_KVA_ROWSEL", { "class", "random", "all" },
                              "class|random|all", &c->rowsel));
-    c->share = rad_meta_getf(meta, "kva.rowsel.share", c->share);
     if (const char* s = env("RADIANCE_KVA_SHARE"); s && !parse_real(s, &c->share))
         return bad_value("RADIANCE_KVA_SHARE", s, "(0, 1]");
     if (!(c->share > 0.0 && c->share <= 1.0)) {
@@ -215,7 +223,6 @@ inline int read_config(const RadModelMeta* meta, Config* c) {
                      c->share);
         return RAD_E_INVAL;
     }
-    c->seed = rad_meta_geti(meta, "kva.rowsel.seed", 0);
     RAD_ARCH_TRY(read_switches(c));
     return read_variants(c);
 }

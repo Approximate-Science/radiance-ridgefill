@@ -2,7 +2,9 @@
 
 KVA / RidgeFill prefill for radiance's Qwen3.8-Flash-Next (`qwen4exp`), as plugins: an architecture
 plugin that shadows the in-tree `qwen4exp_fp8.so` (plugin name `qwen4exp_kva`), the `kva.so` kernel
-library, and `tools/kva_sidecar.py`, which puts the fitted tensors into the served container.
+library, and `tools/kva_projector.py`, which builds the projector folder the plugin loads from
+`<model dir>/projector/`. The model file stays exactly as published (the old container append is retired:
+`tools/dev/README.md`).
 
 ## Build
 
@@ -54,26 +56,34 @@ directory is git-ignored.
 ## Switches (read once, at startup)
 
 The MODE comes from the environment only, default `off`: a container's `kva.mode` is ignored (and said so
-once in the log). Other settings: container metadata (`rad-convert --set`) first, environment overrides.
-`arch/kva_config.h` is the full list.
+once in the log), and so are any `kva.*` weights an earlier append left in it. The fitted tensors come from
+the projector folder: `$RADIANCE_KVA_PROJECTOR`, else `projector/` beside the `--model` path as typed, else
+beside the file it resolves to (mount the model's DIRECTORY in Docker). A folder that cannot run on the model
+(other dimensions, layer layout or tokenizer, a missing or corrupt file) is refused by name and the engine
+serves stock; one fitted on another variant of the model (quantisation, recipe, base weights) is a WARNING
+naming both, and runs. `arch/kva_config.h` is the full list of switches.
 
 | switch | values | meaning |
 |---|---|---|
 | `RADIANCE_KVA` | `off` (default), `plumb`, `speed`, `quality` | `off` is stock radiance, byte for byte, even when the container holds kva.* tensors |
-| `RADIANCE_KVA_TAIL` / `kva.tail` | tokens, default 2048, ≥ 512, ≤ 2 × `--max-num-batched-tokens` − 64 | the exact tail T. Above one step a full chunk proves only one step ahead, so its last T − step rows (rounded to 64) also run exact (lower coverage); at 2 × step − 64 and beyond no row could ever be approximated, so startup refuses |
+| `RADIANCE_KVA_TAIL` | tokens, default 2048, ≥ 512, ≤ 2 × `--max-num-batched-tokens` − 64 | the exact tail T. Above one step a full chunk proves only one step ahead, so its last T − step rows (rounded to 64) also run exact (lower coverage); at 2 × step − 64 and beyond no row could ever be approximated, so startup refuses |
 | `RADIANCE_KVA_ALPHA` | 0..1, default 1 | correction strength |
 | `RADIANCE_KVA_ROWSEL` | `class`, `random`, `all` | quality mode's exact-row rule |
-| `RADIANCE_KVA_SHARE` / `kva.rowsel.share` | (0, 1], default 0.25 | share of a window's class matches kept exact |
-| `RADIANCE_KVA_PROJ`, `RADIANCE_KVA_ST`, `RADIANCE_KVA_ROWSEL_TABLE` | `shipped`/`refit`, `shipped`/`swap`/`refit`, `class`/`none`/`all` | which copy of each fitted tensor is served (controls and refits share the container) |
+| `RADIANCE_KVA_SHARE` | (0, 1], default 0.25 | share of a window's class matches kept exact |
+| `RADIANCE_KVA_PROJECTOR` | a directory | the projector folder, ahead of `projector/` beside the model |
+| `RADIANCE_KVA_PROJ_PLACE` | `vram` (default), `host` | where the projector maps live. `vram` costs 1.2 GiB of each card (~970 fewer resident expert slots a rank); `host` keeps them in host-mapped memory and copies each late layer's map into one of two VRAM slots (100 MiB a card) ahead of its GEMM, so approximated chunks run slower: measured quality TTFT +6% at 16K and +10% at 32K against `vram`, which at 16K is level with exact (+2.5%, CI includes 0), at 32K still 25% faster than exact (notes/aprime.md, R148) |
+| `RADIANCE_KVA_PROJ_RING` | `1` (default), `0` | gate-only: `0` lets the GEMM read the host maps in place -- measured 2.7x SLOWER than exact (every M tile re-reads the map over the link); do not serve with it |
+| `RADIANCE_KVA_ROWSEL_TABLE` | `class`/`none`/`all` | which of the folder's row tables quality mode uses (`none`/`all` are controls) |
 | `RADIANCE_KVA_STAGE` | `auto` (default), `stock` | the expert-stager lever: `auto` lets the late layers stream only their routed experts on an approximate pass (notes/impl.md §2); `stock` leaves staging as it is |
 | `RADIANCE_KVA_STAGE_ROWS` | rows | `auto` streams only when the pass has at most this many exact rows (default: always; R96 measures the crossover) |
 | `RADIANCE_KVA_SCORE_BULK` | `1` | KL mode (`--kld-ref`) serves stock unless set: logits on approximated rows are not the model's, so set it only when scoring the exact tail |
 | `RADIANCE_KVA_STRADDLE`, `RADIANCE_KVA_FORCE_SPLIT`, `RADIANCE_KVA_SHIFT_B`, `RADIANCE_KVA_FORCE_STREAM` | `split`/`end`, rows, ±rows, `1` | gate-only debug switches (R50, R47, R51, R94); each is said loudly at startup |
 | `RADIANCE_KVA_DUMP` | a directory | debug only, synchronises mid-step: the layer-S stream of every approximate chunk (`boundary.p<P>.npy` + `boundary.jsonl`) and the device mask of every masked one (`mask.jsonl`, `rows.jsonl`) |
-| `RADIANCE_KVA_DECLARE` | `all` | **set it for every `rad-convert` run with this plugin**: rad-convert writes only declared tensors, and an `--in-place` append drops any it was not shown |
+| `RADIANCE_KVA_PROJ`, `RADIANCE_KVA_ST`, `RADIANCE_KVA_DECLARE` | -- | retired with the container append; refused by name |
 
-A mode that cannot run refuses at startup by name (tail of two steps less a tile or more, no projector,
-quality without its row table, kva.so missing). Each approximate step logs one `kva: approximate step` line
+A mode with no usable projector serves stock and says why. A configuration that cannot run refuses at
+startup by name (tail of two steps less a tile or more, kva.so missing, or libr4d not loaded -- kva.so's
+`kva_gemm_nt_bias` forwards to libr4d's `gemm_nt_bias` row). Each approximate step logs one `kva: approximate step` line
 (rank 0) with the numbers it was decided from.
 
 **A shorter step for a long tail, with no plugin change:** `--checkpoint-interval` below

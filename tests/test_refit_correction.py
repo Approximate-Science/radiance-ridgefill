@@ -11,6 +11,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "refit"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "dev"))   # the append route (A')
 import fit_correction as FC  # noqa: E402
 import kva_sidecar as K  # noqa: E402
 
