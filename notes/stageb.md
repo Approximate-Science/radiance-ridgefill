@@ -366,3 +366,32 @@ prompt then 4 decoders as SEPARATE requests 0.5 s later, 5 rounds:
 Every decoder's text identical across rounds and across the two servers (4 distinct texts per arm,
 the same 4). **R60 GREEN**: texts identical to off (batched arrangement, sessions 4; separate requests,
 here), acceptance within the round-to-round spread of each arm.
+
+## 4. Decisions of 15:10Z (Dylan via the orchestrator) and what was built
+
+- **R55 speed: option (A), "decoders full, bulk lean"** -- 173dfc4. `PATH_DECODERS` in `kva_plan.h`: speed,
+  one prefill entry whose chunk is all bulk, decoders beside, every late attention layer on the per-row
+  sparse form (`straddle_ok`), the stager lever on, not `MASK=all`. Per late layer (`decoders_layer`,
+  `kva_layer.h`): the bulk rows [DT, n) get the lean pieces (projector from the layer-S stream + codes,
+  K/V or the delta net's projections + corrected scan); the decoder rows [0, DT) get the in-tree layer
+  over that range with the in-tree helpers' r0/rows -- connection read/write, attention per row (the
+  query path over every row, as A.1's straddle: an M-RoPE plane cannot be column-sliced), the delta
+  net's decode half verbatim and its out-projection over [0, DT), MoE over [0, DT) (`moe_layer` gained an
+  end row) with the stager probes so their experts stream. The decoders' dense GEMMs run at M = DT (the
+  narrow kernel a decode-only step uses): byte-identity to off is NOT required on this path (Dylan); the
+  bar is stock's own solo-vs-batched variation. Quality, plumb, two prefills, straddles, dense-attention
+  shapes, `MASK=all` and `TAIL_ONLY=0` keep the masked path. Static: the in-tree-step oracle
+  (`decoders_expected`) at TP1 and TP2 rank 0, D 1/4, n_spec 0/3 (54 cases, 680,899 checks); mutants
+  D1-D12 all caught (`evidence/stageB/mutants-decoders.txt`; D6 "decoders path in quality" needed a
+  planner-level case, as A.1's A10 did).
+- **Gate 1's instrument** -- fd9e174. The server refuses `logprobs` (HTTP 400), so
+  `RADIANCE_KVA_DUMP_LOGITS=<dir>` (debug, read at declare, any mode incl. off, issues nothing) dumps
+  each live pass's logits rows on every rank with each row's sequence/position/token;
+  `tools/logit_capture.py` sends the batched arrangement and each decoder alone and records which dump
+  lines belong to which request; `tools/logit_compare.py` gives a decoder's per-token KL(A||B) and top-1
+  agreement while the two sides' inputs agree. Floor = off batched vs off solo (the ksplit-from-M
+  class, same session); candidate = speed batched vs off batched; quality batched vs off batched must be
+  byte-identical. Captures run with `--profile-ops` (no replayed pass skips step()).
+- **R56 host guard: GO** -- 185e31b (planner rule, keyed `b - s_lb`, vram no threshold).
+- **VRAM placement refusing to start at 8192 / 10 seqs** -> Stage E (no placement code touched here).
+- Prediction HB-R55-speedA registered before any run (labbook seq 418).
