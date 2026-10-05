@@ -1,4 +1,8 @@
 # notes/adapter-map.md -- CORE vs ADAPTER map, the adapter interface, and second-adapter candidates
+> Prep map by an open-model worker (GLM-5.3), spot-checked by the orchestrator: the claims checked hold, but
+> some file:line references are off by a few lines (e.g. `stream_ok` is qwen4exp_kva.cpp:118, the plan tile
+> default is kva_plan.h:51). Re-locate by symbol before editing; Stage B/E merges will shift lines further.
+
 
 Report only. Every claim carries file:line in this clone (arch/, kernels/) or in the radiance
 1.0.8 checkout at /var/home/dylan/projects/inference/radiance (cited as `rad:`).
