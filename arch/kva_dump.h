@@ -17,9 +17,24 @@
  *                            approximate chunk whose first row is at absolute position P (R17)
  *   <dir>/boundary.jsonl     one line per such file: {"chunk_start", "n_tok", "file", "token_ids"}
  *   <dir>/mask.jsonl         one line per masked approximate chunk: {"chunk_start", "n_tok",
- *                            "n_ahead", "b", "s_lb", "bounds", "mask"} (R45)
+ *                            "n_ahead", "b", "s_lb", "n_seq", "n_seq_decode", "bounds", "mask"}
+ *                            (R45; R58' reads the steps with two prefills)
  *   <dir>/rows.jsonl         the same chunks: {"chunk_start", "n_tok", "rows_idx", "token_ids"},
  *                            rows_idx = the window's exact rows -- what tools/rows_compare.py reads (R39)
+ *
+ * RADIANCE_KVA_DUMP_LOGITS=<dir> (any mode, off included; tools/logit_compare.py reads it): every
+ * live trunk pass with output rows, after the step, each rank's logits rows --
+ *   <dir>/logits.<key>.r<R>.npy  f32 [n_out, width]: rank R's `logits` buffer rows
+ *   <dir>/logits.jsonl           one line per file: {"file", "rank", "width", "rows": [[out row index,
+ *                                step row, sequence, position, token], ...]}
+ * Replayed passes call no step(): run the server with --profile-ops (it turns recording off).
+ *
+ * RADIANCE_KVA_CAPTURE_STATE on a MIXED step (R61; scripts/state_compare.py reads it):
+ *   <dir>/mixed.<key>.r<R>.npy  f32 [n_seq, layers, heads, V, K]: every sequence's late delta-net
+ *                               states after the step, rank R's heads; <key> = the step's first
+ *                               position and the FNV-1a of all its token ids
+ *   <dir>/mixed.jsonl           one line per file: {"file", "key", "n_seq", "n_seq_decode", "cu",
+ *                               "starts" (each sequence's first position), "layers", "approximate"}
  */
 #ifndef QWEN4EXP_KVA_DUMP_H
 #define QWEN4EXP_KVA_DUMP_H
@@ -138,7 +153,8 @@ inline void dump_mask(RadCtx* c, const std::string& dir, rad_buf mask, rad_buf b
                              std::to_string(b->n_tok);
     dump_line(dir + "/mask.jsonl",
               head + ", \"n_ahead\": " + std::to_string(b->n_ahead) + ", \"b\": " +
-              std::to_string(bulk_end) + ", \"s_lb\": " + std::to_string(s_lb) + ", \"bounds\": [" +
+              std::to_string(bulk_end) + ", \"s_lb\": " + std::to_string(s_lb) + ", \"n_seq\": " +
+              std::to_string(b->n_seq) + ", \"n_seq_decode\": " + std::to_string(b->n_seq_decode) + ", \"bounds\": [" +
               std::to_string(bnd[0]) + ", " + std::to_string(bnd[1]) + ", " + std::to_string(bnd[2]) +
               ", " + std::to_string(bnd[3]) + "], \"mask\": \"" + bits + "\"}");
     dump_line(dir + "/rows.jsonl", head + ", \"rows_idx\": " + dump_ids_json(exact) +
@@ -254,6 +270,63 @@ inline void state_end(RadCtx* c, const std::string& dir, const RadBatch* b, cons
               std::to_string((rank + 1) * heads) + "], \"layers\": " + ints_json(layers) +
               ", \"approximate\": " + (approximate ? "true" : "false") + ", \"mode\": \"" + mode +
               "\", \"applied_before_copy\": false}");
+}
+
+/* One trunk pass's logits rows, with what each row is: its sequence (from cu_seqlens), its
+ * position and its token. Debug only (synchronises). */
+inline void dump_logits(RadCtx* c, const std::string& dir, const RadBatch* b, rad_buf logits, int64_t width,
+                        int rank) {
+    int32_t start = -1;
+    std::vector<int32_t> ids, cu((size_t)b->n_seq + 1), pos((size_t)b->n_tok), out((size_t)b->n_out);
+    std::vector<float> rows((size_t)(b->n_out * width));
+    if (!dump_chunk(c, b, &start, &ids) || !dump_read(c, cu.data(), b->cu_seqlens, (int64_t)cu.size() * 4) ||
+        !dump_read(c, pos.data(), b->positions, b->n_tok * 4) ||
+        !dump_read(c, out.data(), b->out_ids, b->n_out * 4) ||
+        !dump_read(c, rows.data(), rad_buf_ptr(c, logits), (int64_t)rows.size() * 4)) {
+        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_DUMP_LOGITS: device read failed\n");
+        return;
+    }
+    const std::string file = "logits." + chunk_key(start, ids) + ".r" + std::to_string(rank) + ".npy";
+    if (!dump_npy(dir + "/" + file, "<f4", {b->n_out, width}, rows.data(), (int64_t)rows.size() * 4))
+        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_DUMP_LOGITS: cannot write %s\n", file.c_str());
+    std::string list = "[";
+    for (int64_t j = 0; j < b->n_out; ++j) {
+        const int32_t row = out[(size_t)j];
+        int64_t seq = 0;
+        while (seq + 1 < b->n_seq && cu[(size_t)seq + 1] <= row) ++seq;
+        list += (j ? ", [" : "[") + std::to_string(j) + ", " + std::to_string(row) + ", " + std::to_string(seq) +
+                ", " + std::to_string(pos[(size_t)row]) + ", " + std::to_string(ids[(size_t)row]) + "]";
+    }
+    dump_line(dir + "/logits.jsonl", "{\"file\": \"" + file + "\", \"rank\": " + std::to_string(rank) +
+                                         ", \"width\": " + std::to_string(width) + ", \"rows\": " + list + "]}");
+}
+
+/* One mixed step's states (R61): the batch's sequence bounds and first positions read back, the
+ * states written as one .npy, one line in mixed.jsonl. `dims` = {heads, V, K} of this rank. */
+inline void mixed_state_end(RadCtx* c, const std::string& dir, const RadBatch* b, const std::vector<float>& data,
+                            const std::vector<int>& layers, std::initializer_list<int64_t> dims, int rank,
+                            bool approximate, const char* mode) {
+    int32_t start = -1;
+    std::vector<int32_t> ids, cu((size_t)b->n_seq + 1), pos((size_t)b->n_tok);
+    if (!dump_chunk(c, b, &start, &ids) || !dump_read(c, cu.data(), b->cu_seqlens, (int64_t)cu.size() * 4) ||
+        !dump_read(c, pos.data(), b->positions, b->n_tok * 4)) {
+        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE_STATE: device read failed\n");
+        return;
+    }
+    std::vector<int> starts, cus(cu.begin(), cu.end());
+    for (int64_t i = 0; i < b->n_seq; ++i) starts.push_back(pos[(size_t)cu[(size_t)i]]);
+    const auto d = dims.begin();
+    const std::string key = chunk_key(start, ids), file = "mixed." + key + ".r" + std::to_string(rank) + ".npy";
+    if (!dump_npy(dir + "/" + file, "<f4", {b->n_seq, (int64_t)layers.size(), d[0], d[1], d[2]}, data.data(),
+                  (int64_t)data.size() * 4))
+        std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE_STATE: cannot write %s/%s\n",
+                     dir.c_str(), file.c_str());
+    dump_line(dir + "/mixed.jsonl",
+              "{\"file\": \"" + file + "\", \"key\": \"" + key + "\", \"rank\": " + std::to_string(rank) +
+              ", \"n_seq\": " + std::to_string(b->n_seq) + ", \"n_seq_decode\": " + std::to_string(b->n_seq_decode) +
+              ", \"cu\": " + ints_json(cus) + ", \"starts\": " + ints_json(starts) + ", \"layers\": " +
+              ints_json(layers) + ", \"approximate\": " + (approximate ? "true" : "false") + ", \"mode\": \"" +
+              mode + "\"}");
 }
 
 }  /* namespace qwen4exp_kva */

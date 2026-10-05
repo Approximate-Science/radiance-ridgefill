@@ -12,6 +12,12 @@
  *   straddle  speed, one prefill sequence, no decoders, the chunk straddles the bulk end b: the bulk
  *             rows [0, b) get the lean pieces and the full late blocks run over the tail rows [b, n)
  *             only (the adapter needs every late attention layer on its per-row sparse form).
+ *   decoders  speed, one prefill sequence whose chunk is all bulk, decoders beside it: the bulk rows get
+ *             the lean pieces and the full late blocks run over the decoder rows [0, DT) only --
+ *             their dense GEMMs at M = DT, the shape a decode-only step gives them (ident.sh's
+ *             ksplit-from-M class; Dylan, 2026-10-05: byte-identity to off not required here). Needs
+ *             the per-row sparse attention (straddle_ok) and the stager lever (the decoders'
+ *             experts stream).
  *   masked    any other shape: every late block over all rows, the device mask choosing which rows use
  *             the projection. Taken only while the pass can STREAM its late experts (few exact rows,
  *             the stager lever on): measured on this deployment, a masked pass that has to stage its
@@ -19,7 +25,10 @@
  *             0.86x), and a pass with many exact rows streams every expert over the link (A.1
  *             profile: a 1,024-row tail's late MoE 453 ms against 86 ms staged). So:
  *   stock     whatever the mode, when no cheaper plan exists -- an opted-in request is never served
- *             slower than stock, and never less exact than its mode promises.
+ *             slower than stock, and never less exact than its mode promises. That includes a pass
+ *             with fewer bulk rows than `min_bulk_rows`: an approximate pass has a fixed cost (with
+ *             a host-placed projector, streaming every late layer's map), which a 64-row checkpoint
+ *             remainder cannot repay -- and the decoders riding that step pay it too (Stage B).
  * plumb (the oracle mode) always takes the masked path.
  */
 #ifndef QWEN4EXP_KVA_PLAN_H
@@ -30,8 +39,8 @@
 
 namespace qwen4exp_kva {
 
-enum Path { PATH_STOCK = 0, PATH_LEAN, PATH_MASKED, PATH_STRADDLE };
-static const char* const kPathNames[] = { "stock", "lean", "masked", "straddle" };
+enum Path { PATH_STOCK = 0, PATH_LEAN, PATH_MASKED, PATH_STRADDLE, PATH_DECODERS };
+static const char* const kPathNames[] = { "stock", "lean", "masked", "straddle", "decoders" };
 enum PlanMode { PLAN_OFF = 0, PLAN_PLUMB, PLAN_SPEED, PLAN_QUALITY };
 
 /* The keyed numbers of one pass, and whether the adapter can serve each shape. */
@@ -51,7 +60,10 @@ struct PlanConfig {
     int64_t tile = 64;               /* G: the delta net's chunk */
     int64_t force_split = 0, shift_b = 0;
     int64_t stage_rows = INT64_MAX;  /* exact rows a masked pass may carry and still stream: any */
+    int64_t min_bulk_rows = 0;       /* fewer bulk rows than this: the stock step (a pass's fixed
+                                      * cost, e.g. a host-placed projector's stream, outweighs them) */
     bool    force_stream = false;
+    bool    mask_step = false;       /* debug: every row before b approximated (R54's control) */
 };
 
 /* What step() does with the pass. */
@@ -80,13 +92,20 @@ inline Pass plan_pass(const PlanIn& in, const PlanConfig& c) {
     const int64_t b = bulk_end(in, c);
     const int64_t s_lb = std::max(in.n_tok_decode, in.n_tok - in.q_prefill);
     if (b <= s_lb) return p;
+    if (in.mode != PLAN_PLUMB && b - s_lb < c.min_bulk_rows) return p;
     p.b = b;
-    p.s_lb = s_lb;
+    p.s_lb = c.mask_step ? 0 : s_lb;   /* the projector then covers every row the mask can mark */
     p.split = b < in.n_tok;
     const bool one = in.n_seq_decode == 0 && Pn == 1;
     if (in.mode == PLAN_SPEED && one && !p.split) { p.path = PATH_LEAN; return p; }
     if (in.mode == PLAN_SPEED && one && in.straddle_ok) { p.path = PATH_STRADDLE; return p; }
-    const int64_t exact_rows = in.n_tok - (b - s_lb);
+    if (in.mode == PLAN_SPEED && Pn == 1 && in.n_seq_decode > 0 && !p.split && in.straddle_ok &&
+        in.stream_ok && !c.mask_step) {
+        p.path = PATH_DECODERS;
+        p.stream = true;
+        return p;
+    }
+    const int64_t exact_rows = in.n_tok - (b - p.s_lb);
     p.stream = in.stream_ok && (c.force_stream || exact_rows <= c.stage_rows);
     if (p.stream || in.mode == PLAN_PLUMB) p.path = PATH_MASKED;
     return p.path == PATH_MASKED ? p : Pass{};

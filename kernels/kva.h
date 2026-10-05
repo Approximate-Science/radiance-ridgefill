@@ -34,8 +34,16 @@ enum { KVA_MASK_MAX_ROWS = 8192, KVA_MASK_THREADS = 256 };
  * reference (kva b0/worker_ext.py log_gate) used. */
 #define KVA_SOFTPLUS_THRESHOLD 20.0f
 
-/* kva_mask's `mode`, in the order rows.cpp's constraint and the parse spell them. */
-enum { KVA_MODE_NONE = 0, KVA_MODE_CLASS = 1, KVA_MODE_RANDOM = 2, KVA_MODE_ALL = 3 };
+/* kva_mask's `mode`, in the order rows.cpp's constraint and the parse spell them. `step` is a
+ * debug control (R54's negative control): every row of the step before b' is approximated, the
+ * other sequences' and the decoders' included -- the gate that proves a decoder's text can change. */
+enum { KVA_MODE_NONE = 0, KVA_MODE_CLASS = 1, KVA_MODE_RANDOM = 2, KVA_MODE_ALL = 3, KVA_MODE_STEP = 4 };
+
+/* Where the mask's 1s may start: row 0 in step mode when the window is not empty, else s. The
+ * bounds keep s whatever the mode (the delta net's split scan is the last sequence's). */
+KVA_HD inline int64_t kva_mask_from(int mode, const int64_t* w) {
+    return mode == KVA_MODE_STEP && w[1] > w[0] ? 0 : w[0];
+}
 
 /* Operand positions, in schema order (rows.cpp holds the schemas). */
 enum { MK_CU = 0, MK_TOKENS, MK_POS, MK_SCORE, MK_MASK, MK_BOUNDS, MK_ZEROS };
