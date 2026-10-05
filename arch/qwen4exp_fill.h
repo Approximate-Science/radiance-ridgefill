@@ -1,4 +1,4 @@
-/* kva_fill.h -- the LEAN fill's pieces: the in-tree blocks' own op handles, issued by hand.
+/* qwen4exp_fill.h -- the LEAN fill's pieces: the in-tree blocks' own op handles, issued by hand.
  *
  * The lean fill serves the one shape with no exact row at all -- a pure prefill step of ONE
  * sequence whose whole chunk is bulk, in speed mode (PLAN-FIX §3) -- and runs only the part of each
@@ -14,8 +14,8 @@
  * in-tree mixed-step offsets (D, DT) are therefore 0 and dropped. Each block's ops stay contiguous
  * -- transients with disjoint declared op ranges may share bytes (notes/arch.md §6).
  */
-#ifndef QWEN4EXP_KVA_FILL_H
-#define QWEN4EXP_KVA_FILL_H
+#ifndef QWEN4EXP_FILL_H
+#define QWEN4EXP_FILL_H
 
 namespace qwen4exp_kva {
 
@@ -111,4 +111,4 @@ inline void attn_kv(RadCtx* c, const AttnGatedFP8& a, const RadBatch* batch) {
 
 }  /* namespace qwen4exp_kva */
 
-#endif /* QWEN4EXP_KVA_FILL_H */
+#endif /* QWEN4EXP_FILL_H */

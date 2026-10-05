@@ -14,7 +14,7 @@
  * chunk with bulk rows -- rows followed by at least T' prompt tokens (T rounded up to the delta
  * net's tile) -- whatever else rides in the step. Layers 0..S-1 run stock; from S on, each late
  * layer either takes the LEAN fill (speed mode, a one-sequence step whose whole chunk is bulk: only
- * the cache-writing pieces, kva_fill.h) or the MASKED layer (every other shape: the in-tree layer
+ * the cache-writing pieces, qwen4exp_fill.h) or the MASKED layer (every other shape: the in-tree layer
  * over all rows with the device mask choosing which rows use the projection, kva_layer.h). On a
  * masked pass the expert stager is steered, with zero-row probes of the late layers' gate-up GEMMs,
  * to stream the late layers' routed experts instead of staging each layer whole (notes/impl.md §2). The engine release
@@ -32,8 +32,9 @@
 #include "kva_plan.h"
 #include "kva_declare.h"
 #include "kva_dump.h"
-#include "kva_fill.h"
-#include "kva_moe.h"
+#include "qwen4exp_fill.h"
+#include "qwen4exp_moe.h"
+#include "qwen4exp_blocks.h"
 #include "kva_layer.h"
 #include "kva_hazard.h"
 #include "kva_guard.h"

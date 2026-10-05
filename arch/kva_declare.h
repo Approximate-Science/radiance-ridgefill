@@ -154,7 +154,7 @@ static int check_fill(const Kva& k) {
         return RAD_E_UNSUPPORTED;
     }
     for (int64_t l = k.split - 1; l < a.n_layer; ++l) {
-        /* The masked path issues each late layer's MoE pass itself (kva_moe.h), and that copy has
+        /* The masked path issues each late layer's MoE pass itself (qwen4exp_moe.h), and that copy has
          * no calibration tap: a calibration run serves through the in-tree path only. */
         if (a.calibrated[(size_t)l]) {
             std::fprintf(stderr, "radiance: qwen4exp_kva: layer %lld runs the MoE calibration tap, "

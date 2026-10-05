@@ -1,4 +1,4 @@
-/* kva_moe.h -- a routed layer's MoE, issued by hand on an approximate pass (PLAN-FIX §3, §6.1).
+/* qwen4exp_moe.h -- a routed layer's MoE, issued by hand on an approximate pass (PLAN-FIX §3, §6.1).
  *
  * WHY A COPY. MoeFP8::pass (radiance 140987f, arch/common/rad_block_moe_fp8.h:1341-1496) has no hook
  * for the two things an approximate pass needs: the routing slots of bulk rows dropped
@@ -11,8 +11,8 @@
  *
  * Omitted, and refused at declare instead (kva_declare.h check_fill): the calibration tap.
  */
-#ifndef QWEN4EXP_KVA_MOE_H
-#define QWEN4EXP_KVA_MOE_H
+#ifndef QWEN4EXP_MOE_H
+#define QWEN4EXP_MOE_H
 
 #include <functional>
 
@@ -159,4 +159,4 @@ inline void moe_layer(RadCtx* c, const MoeFP8& e, const MoeArm& arm, const RadBa
 
 }  /* namespace qwen4exp_kva */
 
-#endif /* QWEN4EXP_KVA_MOE_H */
+#endif /* QWEN4EXP_MOE_H */
