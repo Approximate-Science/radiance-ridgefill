@@ -68,3 +68,15 @@ within the quality-mode budget already accepted. Reason: with the cache, turn 2 
 snapshot, whose own exact tail stayed exact; a no-cache recompute of the longer turn-2 prompt
 approximates those positions -- so the two differ by design and identity is the wrong bar.
 **R65 corpus bar (orchestrator)**: >= 8 real branches before R65/R66 are read.
+
+## 3. Session C2 (19:08Z-; home 041ab13; host placement) -- two Stage B items + the R65 rerun
+- **The 32K C = 8 decoder stall** (twice in Stage B session 8, speed and quality): the same arm shape
+  (interleaved, 16K + 32K, C 0/1/4/8, 3 reps, server log followed, conc.py printing the decoders' errors
+  and queue counts on a stall) on STOCK and on quality-host: **all reps completed on both** (24 + 24).
+  Not reproduced. Tally: 2 stalls in ~150 plugin reps of that shape, 0 in ~120 stock reps -- too rare to
+  call a degradation or to rule one out; the instrumentation stays in every conc session.
+- **R60 on path A: unreachable, so unaffected.** With `--num-speculative-tokens 3` the stock scheduler
+  never co-batches decode with prefill: 0 MIXED steps in either server (85 prefill-only, ~480 decode-only),
+  so speculating decoders never ride beside a prefill chunk and speed took the lean path on all 75
+  approximate steps. Per-decoder acceptance (separate requests, 5 rounds x 4): off 3,347 / 5,298 = 0.6317,
+  speed 3,344 / 5,298 = 0.6312. (Stage B session 4's batched spec texts were taken the same way.)
