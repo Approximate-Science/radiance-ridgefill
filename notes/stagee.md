@@ -388,3 +388,23 @@ round's stock 9,981 / 19,393 ms; tables: `evidence/stagee/scripts/s4table.py evi
   is not edited while it runs; each such arm logs "serve FAILED" / "speed.sh FAILED"); D1's bf16+final and D2's
   quality-bf16 are skipped by `evidence/stagee/INT8_ONLY`. KL identity from here: int8 quality + int8 speed.
 - The bf16 code path stays (it is the int8 builder's input); nothing in the release tests bf16.
+
+## 19. S4 timing half (5a3115b, rounds a/b; int8 only from 20:31Z) -- the held cost after the reductions
+Settle from /health, settled 2K / 8K, ratio to the same round's stock (exact-a 1,251 / 5,057; exact-b 1,249 / 5,063 ms):
+| arm | 2K | 8K | slab slots r0 (stock 16,851 / 16,847) | engine's "already held" (stock 341-345 MiB) |
+|---|---|---|---|---|
+| held int8 a | **+0.9%** | **+1.2%** | 16,788 (−63) | 371.0 MiB (+26: the slot) |
+| held int8 b | +2.0% | +1.1% | 16,766 (−81) | 400.4 MiB (+55: the slot + 29.3) |
+| held bf16 a (history) | +1.4% | +2.3% | 16,749 (−102) | 397.0 MiB |
+- **What remains is VRAM, ~67 MiB a rank with int8:** the ring slot 25.4 MiB ("already held") and +41.0 MiB of activation
+  arena (657.43 → 698.43 MiB: the int8 stream codes 20 MiB, the projected input and its codes ~15 MiB, the in-tree
+  buffers the plugin's ops touch made whole-program ~6 MiB) -- −63 slab slots, the same rate as S3's control (stock with
+  128 MiB less: +1.6%).
+- **The extra 29.3 MiB of "already held" in some boots is not the plugin's**: it appears in plugin boots of every kind
+  (int8 371.0 / 400.4, bf16 397.0 / 426.4, two-slot int8 425.0 / 454.3) AND in a stock boot (S2 exact-3: 374.36 = 345.0
+  + 29.3). The engine reads it once at startup (core/engine_bringup.cpp:704-730) and sizes the slab from it, so a boot
+  that reads it serves with ~26 fewer slots; round b's +2.0% at 2K is that boot. Round a is the clean comparison.
+- Further plugin-side cuts are small: half-layer ring blocks would free 12.7 MiB (~11 slots, ~0.15%) at two copies and
+  a split GEMM a layer; the stream codes (20 MiB) are what replaced h_S (40 MiB) and the masked path needs them (b_h's
+  bulk rows are rewritten by the in-tree layer there). Arena aliasing (d) is engine-side (§14).
+- ON TTFT int8 one slot (quality T2048, median of 7): a 16K 0.821x, 32K 0.583x; b: see below.
