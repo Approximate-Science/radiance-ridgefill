@@ -42,11 +42,14 @@
  *                             shapes put break-even near 640 rows; 1,024 because below the stager's
  *                             1,025-row arming the stock step does not stage and is cheaper than that
  *                             line (unmeasured in between)                         default 1024
- *   env RADIANCE_KVA_FINAL    on | off: with MTP (--num-speculative-tokens > 0) and a folder holding the
- *                             `final` map, every approximate pass writes the predicted final stream of its
- *                             bulk rows into the trunk's stream before the epilogue, which the MTP head reads
- *                             (kva_final.h; DD-D). off = the head reads what the pass left (R70's control)
- *                                                                                     default on
+ *   env RADIANCE_KVA_FINAL    off | on: OPTIONAL, not in the release (Dylan, 2026-10-05). on, with MTP
+ *                             (--num-speculative-tokens > 0) and a folder holding the `final` map: every
+ *                             approximate pass writes the predicted final stream of its bulk rows into the
+ *                             trunk's stream before the epilogue, which the MTP head reads (kva_final.h; DD-D).
+ *                             Measured (R70, notes/staged.md): +1.8% drafted tokens a step at T 2048, for a
+ *                             bf16-sized ring slot (+25 MiB VRAM a rank with int8 maps), +200 MiB host and
+ *                             +210 MB a pass over the link. off: nothing of the map is declared, held or
+ *                             streamed, whatever the folder holds                         default off
  *   env RADIANCE_KVA_SCORE_BULK  1: approximate in KL mode too, whose logits on bulk rows are then
  *                             not the model's -- score only the exact tail (PLAN-FIX §6.2, R73)
  *
@@ -130,7 +133,7 @@ struct Config {
     int64_t     min_bulk_rows = -1;        /* -1: the default (kHostMinBulkRows), resolved in read_config */
     int64_t     ckpt_floor  = 0;           /* RADIANCE_KVA_CKPT_FLOOR (T_ck) */
     bool        score_bulk  = false;
-    bool        final_on    = true;        /* RADIANCE_KVA_FINAL: the MTP `final` map, when held and MTP is on */
+    bool        final_on    = false;       /* RADIANCE_KVA_FINAL=on: the MTP `final` map, when held and MTP is on */
     int         straddle    = STRADDLE_SPLIT;
     int64_t     force_split = 0;
     int64_t     shift_b     = 0;
@@ -229,8 +232,8 @@ inline int read_switches(Config* c) {
     RAD_ARCH_TRY(read_int("RADIANCE_KVA_CKPT_FLOOR", 0, INT64_MAX / 2, "a row count", &c->ckpt_floor));
     RAD_ARCH_TRY(read_choice("RADIANCE_KVA_SCORE_BULK", { "0", "1" }, "1 or unset", &v));
     c->score_bulk = v == 1;
-    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_FINAL", { "on", "off" }, "on|off", &v));
-    c->final_on = v == 0;
+    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_FINAL", { "off", "on" }, "off|on", &v));
+    c->final_on = v == 1;
     RAD_ARCH_TRY(read_choice("RADIANCE_KVA_STRADDLE", { "split", "end" }, "split|end",
                              &c->straddle));
     RAD_ARCH_TRY(read_int("RADIANCE_KVA_FORCE_SPLIT", 1, INT64_MAX, "a positive row count",

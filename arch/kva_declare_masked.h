@@ -221,7 +221,7 @@ static int decl_selected(RadBuilder* b, const RadModelMeta* meta, const qwen4exp
     const bool probe = ctx->shape_probe != 0;
     if (!take_folder(b, meta, m, k)) return RAD_OK;
     /* THE MTP final map (kva_final.h): only when this deployment drafts, the mode projects, the folder holds
-     * it and RADIANCE_KVA_FINAL is not off. Decided from declare-time numbers only. */
+     * it and RADIANCE_KVA_FINAL is on (default off). Decided from declare-time numbers only. */
     k.want_final = ctx->max_spec > 0 && (k.cfg.mode == MODE_SPEED || k.cfg.mode == MODE_QUALITY) &&
                    g_loaded.has_final && k.cfg.final_on;
     k.ring_end = m.g.n_layer + (k.want_final ? m.hccfg.hc : 0);
