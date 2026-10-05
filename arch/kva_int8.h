@@ -14,8 +14,8 @@
  * engine picks for a step's M); rows that disagree, or no row at all, refuse the int8 folder by
  * name and the engine serves stock.
  */
-#ifndef QWEN4EXP_KVA_INT8_H
-#define QWEN4EXP_KVA_INT8_H
+#ifndef KVA_INT8_H
+#define KVA_INT8_H
 
 #include <dlfcn.h>
 #include <link.h>
@@ -126,8 +126,4 @@ inline bool relayout_i8(const std::vector<const RadKernelInfo*>& rows, int64_t n
 
 }  /* namespace kva */
 
-/* The adapter and its static test still name these qwen4exp_kva:: (the split moves them, the names
- * stay). */
-namespace qwen4exp_kva { using namespace kva; }
-
-#endif /* QWEN4EXP_KVA_INT8_H */
+#endif /* KVA_INT8_H */

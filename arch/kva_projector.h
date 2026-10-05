@@ -24,8 +24,8 @@
  * model's (kva_match.h), or tensors whose shapes are not this model's. Nothing is declared then,
  * so the graph is the in-tree graph (R6/R7).
  */
-#ifndef QWEN4EXP_KVA_PROJECTOR_H
-#define QWEN4EXP_KVA_PROJECTOR_H
+#ifndef KVA_PROJECTOR_H
+#define KVA_PROJECTOR_H
 
 #include "kva_match.h"
 #include "kva_int8.h"
@@ -399,8 +399,4 @@ inline void free_uploads() {
 
 }  /* namespace kva */
 
-/* The adapter and its static test still name these qwen4exp_kva:: (the split moves them, the names
- * stay). */
-namespace qwen4exp_kva { using namespace kva; }
-
-#endif /* QWEN4EXP_KVA_PROJECTOR_H */
+#endif /* KVA_PROJECTOR_H */

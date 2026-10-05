@@ -17,8 +17,8 @@
  * table -- and not the section's bytes, which hold string-blob offsets an in-place append moves.
  * tools/kva_projector.py computes the same three things the same way.
  */
-#ifndef QWEN4EXP_KVA_MATCH_H
-#define QWEN4EXP_KVA_MATCH_H
+#ifndef KVA_MATCH_H
+#define KVA_MATCH_H
 
 #include "kva_folder.h"
 
@@ -181,8 +181,4 @@ inline Match match_model(const Folder& f, const RadModelMeta* meta, RadBuilder* 
 
 }  /* namespace kva */
 
-/* The adapter and its static test still name these qwen4exp_kva:: (the split moves them, the names
- * stay). */
-namespace qwen4exp_kva { using namespace kva; }
-
-#endif /* QWEN4EXP_KVA_MATCH_H */
+#endif /* KVA_MATCH_H */

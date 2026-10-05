@@ -16,8 +16,8 @@
  * download, a corrupt file or a duplicate tensor name refuses the folder by name. The hashes run
  * one thread a file, once per process (~1.3 GiB: about a second, mostly the first read).
  */
-#ifndef QWEN4EXP_KVA_FOLDER_H
-#define QWEN4EXP_KVA_FOLDER_H
+#ifndef KVA_FOLDER_H
+#define KVA_FOLDER_H
 
 #include "kva_guard.h"   /* sha256_block, real_path */
 #include "kva_json.h"
@@ -278,8 +278,4 @@ inline bool read_folder(Folder* f, std::string* why) {
 
 }  /* namespace kva */
 
-/* The adapter and its static test still name these qwen4exp_kva:: (the split moves them, the names
- * stay). */
-namespace qwen4exp_kva { using namespace kva; }
-
-#endif /* QWEN4EXP_KVA_FOLDER_H */
+#endif /* KVA_FOLDER_H */

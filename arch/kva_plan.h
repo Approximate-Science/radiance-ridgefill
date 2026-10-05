@@ -31,8 +31,8 @@
  *             remainder cannot repay -- and the decoders riding that step pay it too (Stage B).
  * plumb (the oracle mode) always takes the masked path.
  */
-#ifndef QWEN4EXP_KVA_PLAN_H
-#define QWEN4EXP_KVA_PLAN_H
+#ifndef KVA_PLAN_H
+#define KVA_PLAN_H
 
 #include <algorithm>
 #include <cstdint>
@@ -121,8 +121,4 @@ inline Pass plan_pass(const PlanIn& in, const PlanConfig& c) {
 
 }  /* namespace kva */
 
-/* The adapter and its static test still name these qwen4exp_kva:: (the split moves them, the names
- * stay). */
-namespace qwen4exp_kva { using namespace kva; }
-
-#endif /* QWEN4EXP_KVA_PLAN_H */
+#endif /* KVA_PLAN_H */

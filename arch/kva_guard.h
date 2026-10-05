@@ -14,8 +14,8 @@
  * claimant (loader.cpp:425-436). Residual risk, named: a patched build that keeps the release
  * string; the engine's sha256 is logged so such a build is identifiable.
  */
-#ifndef QWEN4EXP_KVA_GUARD_H
-#define QWEN4EXP_KVA_GUARD_H
+#ifndef KVA_GUARD_H
+#define KVA_GUARD_H
 
 #include <dlfcn.h>
 #include <limits.h>
@@ -230,8 +230,4 @@ inline int open_guard(const char* so) {
 
 }  /* namespace kva */
 
-/* The adapter and its static test still name these qwen4exp_kva:: (the split moves them, the names
- * stay). */
-namespace qwen4exp_kva { using namespace kva; }
-
-#endif /* QWEN4EXP_KVA_GUARD_H */
+#endif /* KVA_GUARD_H */

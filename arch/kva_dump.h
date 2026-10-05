@@ -36,8 +36,8 @@
  *   <dir>/mixed.jsonl           one line per file: {"file", "key", "n_seq", "n_seq_decode", "cu",
  *                               "starts" (each sequence's first position), "layers", "approximate"}
  */
-#ifndef QWEN4EXP_KVA_DUMP_H
-#define QWEN4EXP_KVA_DUMP_H
+#ifndef KVA_DUMP_H
+#define KVA_DUMP_H
 
 #include <algorithm>
 #include <cstdio>
@@ -331,8 +331,4 @@ inline void mixed_state_end(RadCtx* c, const std::string& dir, const RadBatch* b
 
 }  /* namespace kva */
 
-/* The adapter and its static test still name these qwen4exp_kva:: (the split moves them, the names
- * stay). */
-namespace qwen4exp_kva { using namespace kva; }
-
-#endif /* QWEN4EXP_KVA_DUMP_H */
+#endif /* KVA_DUMP_H */

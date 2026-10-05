@@ -3,8 +3,8 @@
  * numbers, true/false/null. Malformed text is refused, never guessed at -- a folder whose manifest
  * does not parse is "no projector" (PACKAGING.md §0).
  */
-#ifndef QWEN4EXP_KVA_JSON_H
-#define QWEN4EXP_KVA_JSON_H
+#ifndef KVA_JSON_H
+#define KVA_JSON_H
 
 #include <algorithm>
 #include <cstdint>
@@ -170,8 +170,4 @@ inline bool json_parse(const char* text, size_t n, Json* out) {
 
 }  /* namespace kva */
 
-/* The adapter and its static test still name these qwen4exp_kva:: (the split moves them, the names
- * stay). */
-namespace qwen4exp_kva { using namespace kva; }
-
-#endif /* QWEN4EXP_KVA_JSON_H */
+#endif /* KVA_JSON_H */

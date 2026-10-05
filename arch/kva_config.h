@@ -85,8 +85,8 @@
  * point RADIANCE_KVA_PROJECTOR at it) and RADIANCE_KVA_DECLARE (tools/dev/README.md). RETIRED with
  * the vram placement (Stage E): RADIANCE_KVA_PROJ_PLACE and RADIANCE_KVA_PROJ_RING.
  */
-#ifndef QWEN4EXP_KVA_CONFIG_H
-#define QWEN4EXP_KVA_CONFIG_H
+#ifndef KVA_CONFIG_H
+#define KVA_CONFIG_H
 
 #include <cerrno>
 #include <cmath>
@@ -286,8 +286,4 @@ inline int read_config(const RadModelMeta* meta, Config* c, int64_t min_tail = k
 
 }  /* namespace kva */
 
-/* The adapter and its static test still name these qwen4exp_kva:: (the split moves them, the names
- * stay). */
-namespace qwen4exp_kva { using namespace kva; }
-
-#endif /* QWEN4EXP_KVA_CONFIG_H */
+#endif /* KVA_CONFIG_H */

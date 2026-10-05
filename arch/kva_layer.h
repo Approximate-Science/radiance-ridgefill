@@ -8,8 +8,8 @@
  * the block runs whole, and the MoE drops the marked rows' routing slots. Decode rows and every
  * other sequence are therefore computed exactly as stock computes them, at stock GEMM shapes.
  */
-#ifndef QWEN4EXP_KVA_LAYER_H
-#define QWEN4EXP_KVA_LAYER_H
+#ifndef KVA_LAYER_H
+#define KVA_LAYER_H
 
 namespace kva {
 
@@ -194,6 +194,4 @@ inline void fill_layer(RadCtx* c, const Kva& k, int64_t li, const RadBatch* batc
 
 }  /* namespace kva */
 
-namespace qwen4exp_kva { using namespace kva; }
-
-#endif /* QWEN4EXP_KVA_LAYER_H */
+#endif /* KVA_LAYER_H */
