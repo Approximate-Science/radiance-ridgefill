@@ -149,7 +149,7 @@ static void note_debug(const Kva& k) {
 /* What the folder lets this mode run (kva_projector.h): false = serve stock, already said. Plumb
  * reads no fitted tensor (its mask keeps every row exact) and so holds none. */
 static bool take_folder(RadBuilder* b, const RadModelMeta* meta, const qwen4exp_fp8::Model& m, Kva& k) {
-    const Loaded& l = load_folder(meta, b, m);
+    const Loaded& l = load_folder(meta, b, k.ad);
     const Config& c = k.cfg;
     if (!l.usable) return false;
     if (c.mode == MODE_QUALITY && !tensor(l.folder, kScoreNames[c.rowsel_table])) {
@@ -168,7 +168,7 @@ static bool take_folder(RadBuilder* b, const RadModelMeta* meta, const qwen4exp_
 
 /* This rank's copies (the real declare only) handed to the issue sites. */
 static int take_upload(const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva& k) {
-    if (!upload_rank(g_loaded, m, k.cfg, ctx->rank, k.want_final)) return RAD_E_DEVICE;
+    if (!upload_rank(g_loaded, k.ad, k.cfg, ctx->rank, k.want_final)) return RAD_E_DEVICE;
     const Upload& u = g_upload[ctx->rank];
     if (k.cfg.mode == MODE_PLUMB) return RAD_OK;
     k.proj_w = u.proj_w;
@@ -250,7 +250,7 @@ static int decl_selected(RadBuilder* b, const RadModelMeta* meta, const qwen4exp
  * capture fits a projector, so there may be no folder yet). Never the container: nothing kva.* is
  * read from the model file. Declares nothing. */
 static int capture_split(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadModelMeta* meta, Kva& k) {
-    const Loaded& l = load_folder(meta, b, m);
+    const Loaded& l = load_folder(meta, b, k.ad);
     k.split = l.usable ? l.split : -1;
     const char* v = env("RADIANCE_KVA_CAPTURE_SPLIT");
     if (!l.usable && v && !parse_int(v, &k.split)) k.split = -1;

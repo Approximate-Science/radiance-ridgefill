@@ -9,9 +9,6 @@
 
 namespace qwen4exp_kva {
 
-using kva::KvaAdapter;
-using kva::StateShape;
-
 /* The fit facts the method was measured at on this model (KVA-FACTS §5). */
 constexpr int64_t kAdapterMinTail = 512, kAdapterDefaultTail = 2048;
 
@@ -24,6 +21,7 @@ inline KvaAdapter adapter_of(const qwen4exp_fp8::Model& m) {
     a.n_layer = m.g.n_layer;
     a.n_embd = m.g.n_embd;
     a.n_vocab_all = m.g.n_vocab_all;
+    a.world = m.g.world;
     a.wide = m.hccfg.hc * m.g.n_embd;
     a.tile = m.gcfg.chunk;
     a.split_lo = m.ple_layer + 1;  /* -1 (no PLE) gives 0: no constraint */

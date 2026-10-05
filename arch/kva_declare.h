@@ -8,6 +8,7 @@
 #ifndef QWEN4EXP_KVA_DECLARE_H
 #define QWEN4EXP_KVA_DECLARE_H
 
+#include "kva_adapter.h"
 #include "kva_config.h"
 #include "kva_int8.h"
 
@@ -18,8 +19,13 @@
 namespace qwen4exp_kva {
 
 using namespace rad::arch;
+using kva::KvaAdapter;
+using kva::StateShape;
 
 struct Kva {
+    /* The model's facts (kva_adapter.h), filled first by the declare: everything below that the core
+     * reads of the model it reads here. */
+    KvaAdapter ad{};
     Config  cfg{};
     /* Its own name pool: declared names must outlive declare (rad_arch.h's Names), and a sizing
      * declare runs on its own thread, so it must not append to the real model's pool. */

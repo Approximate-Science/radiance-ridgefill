@@ -85,23 +85,25 @@ inline std::string check_map(const Folder& f, int64_t li, int64_t n, int64_t wid
                 : p + ".weight " + dims + "] / .bias bf16 is missing or misshapen";
 }
 
-/* What this model needs of the folder's tensors; the first one that cannot run, or empty. */
-inline std::string check_tensors(const Folder& f, const qwen4exp_fp8::Model& m, Loaded* l) {
-    const int64_t S = f.manifest.integer("split", -1), n = m.g.n_embd, wide = m.hccfg.hc * n;
-    if (S <= m.ple_layer || S >= m.g.n_layer)
+/* What the adapter's model needs of the folder's tensors; the first one that cannot run, or empty. Every
+ * shape is a fact (wide, the state, the vocabulary) and the maps' dtype is the manifest's, so a new
+ * model needs no schema of its own here. */
+inline std::string check_tensors(const Folder& f, const KvaAdapter& a, Loaded* l) {
+    const int64_t S = f.manifest.integer("split", -1), n = a.n_embd, wide = a.wide;
+    if (S < a.split_lo || S >= a.n_layer)
         return "its split " + std::to_string(S) + " is not a late layer of this model (n-gram layer " +
-               std::to_string(m.ple_layer) + ", " + std::to_string(m.g.n_layer) + " layers)";
+               std::to_string(a.split_lo - 1) + ", " + std::to_string(a.n_layer) + " layers)";
     const Json* proj = f.manifest.get("projector");
     const std::string dtype = proj ? proj->text("dtype", "bf16") : "bf16";
     if (dtype != "bf16" && dtype != "i8") return "its projector dtype '" + dtype + "' is neither bf16 nor i8";
     l->int8 = dtype == "i8";
     int held = 0, want = 0;
-    for (int64_t li = S; li < m.g.n_layer; ++li) {
+    for (int64_t li = S; li < a.n_layer; ++li) {
         if (const std::string why = check_map(f, li, n, wide, l->int8); !why.empty()) return why;
-        if (m.layers[(size_t)li].full) continue;
+        if (a.full[(size_t)li]) continue;
         ++want;
         held += shaped(tensor(f, "st." + std::to_string(li)), RAD_F32,
-                       {m.gcfg.n_head_v * m.g.world, m.gcfg.head_v, m.gcfg.head_k});
+                       {a.state.n_head * a.world, a.state.sd0, a.state.sd1});
     }
     if (held && held != want)
         return "the correction covers " + std::to_string(held) + " of the " + std::to_string(want) +
@@ -113,15 +115,15 @@ inline std::string check_tensors(const Folder& f, const qwen4exp_fp8::Model& m, 
         l->has_final = true;
     }
     for (const char* s : kScoreNames)
-        if (tensor(f, s) && !shaped(tensor(f, s), RAD_F32, {m.g.n_vocab_all}))
-            return std::string("the row table '") + s + "' is not f32 [" + std::to_string(m.g.n_vocab_all) + "]";
+        if (tensor(f, s) && !shaped(tensor(f, s), RAD_F32, {a.n_vocab_all}))
+            return std::string("the row table '") + s + "' is not f32 [" + std::to_string(a.n_vocab_all) + "]";
     l->split = S;
     l->has_st = held > 0;
     return std::string();
 }
 
 /* Finds, reads and checks the folder once per process; every later declare reads the answer. */
-inline const Loaded& load_folder(const RadModelMeta* meta, RadBuilder* b, const qwen4exp_fp8::Model& m) {
+inline const Loaded& load_folder(const RadModelMeta* meta, RadBuilder* b, const KvaAdapter& a) {
     std::lock_guard<std::mutex> lk(g_load_mu);
     Loaded& l = g_loaded;
     if (l.tried) return l;
@@ -140,8 +142,8 @@ inline const Loaded& load_folder(const RadModelMeta* meta, RadBuilder* b, const 
                      at.dir.c_str(), why.c_str());
         return l;
     }
-    const Match mt = match_model(l.folder, meta, b, "qwen4exp");
-    why = mt.refused.empty() ? check_tensors(l.folder, m, &l) : mt.refused;
+    const Match mt = match_model(l.folder, meta, b, a.match_name);
+    why = mt.refused.empty() ? check_tensors(l.folder, a, &l) : mt.refused;
     if (!why.empty()) {
         std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: projector %s (found %s) REFUSED, it cannot run "
                              "on this model: %s [%s]; serving stock\n", at.dir.c_str(), at.how.c_str(),
@@ -223,8 +225,8 @@ inline void free_upload(Upload& u) {
  * bytes from the block's start. */
 struct RowBlock { int64_t rows = 0, scale_at = -1, bias_at = 0; };
 
-inline RowBlock row_block(const qwen4exp_fp8::Model& m, int64_t codes = -1, int64_t scales = 0) {
-    const int64_t n = m.g.n_embd, wide = m.hccfg.hc * n, row = wide * 2;
+inline RowBlock row_block(const KvaAdapter& a, int64_t codes = -1, int64_t scales = 0) {
+    const int64_t n = a.n_embd, row = a.wide * 2;
     RowBlock r;
     if (codes < 0) {
         r.rows = n + 1;
@@ -257,24 +259,24 @@ inline void put_piece(std::vector<Piece>& plan, const unsigned char* src, int64_
 /* THE FINAL MAP'S BLOCKS (with MTP, kva_final.h): hc row blocks of [n + 1, wide] bf16 -- rows i*n .. i*n + n of
  * the map, then that slice of its bias -- the bf16 projector block's shape, so they ride the same ring after
  * the late layers. Each block's GEMM writes columns i*n .. i*n + n of the predicted final stream. */
-inline void plan_final(const Folder& f, const qwen4exp_fp8::Model& m, std::vector<Piece>& plan, Layout* x) {
-    const int64_t n = m.g.n_embd, wide = m.hccfg.hc * n, row = wide * 2;
+inline void plan_final(const Folder& f, const KvaAdapter& a, std::vector<Piece>& plan, Layout* x) {
+    const int64_t n = a.n_embd, row = a.wide * 2;
     const FolderTensor* w = tensor(f, "final.weight");
     const FolderTensor* b = tensor(f, "final.bias");
-    for (int64_t i = 0; i < m.hccfg.hc; ++i) {
+    for (int64_t i = 0; i < a.wide / n; ++i) {
         x->fw.push_back(place_piece(plan, &x->hend, nullptr, (n + 1) * row, true));
         put_piece(plan, w->data + i * n * row, n * row, x->fw.back());
         put_piece(plan, b->data + i * n * 2, n * 2, x->fw.back() + n * row);
     }
 }
 
-inline bool plan_maps(const Folder& f, const Loaded& l, const qwen4exp_fp8::Model& m, bool final,
+inline bool plan_maps(const Folder& f, const Loaded& l, const KvaAdapter& a, bool final,
                       std::vector<Piece>& plan, Layout* x, Stored* stored, std::string* why) {
-    const int64_t n = m.g.n_embd, wide = m.hccfg.hc * n;
-    stored->assign((size_t)m.g.n_layer, I8Stored{});
+    const int64_t n = a.n_embd, wide = a.wide;
+    stored->assign((size_t)a.n_layer, I8Stored{});
     if (l.int8) {
         const std::vector<const RadKernelInfo*> rows = i8_rows();
-        for (int64_t li = l.split; li < m.g.n_layer; ++li) {
+        for (int64_t li = l.split; li < a.n_layer; ++li) {
             const std::string p = "proj." + std::to_string(li);
             if (!relayout_i8(rows, n, wide, tensor(f, p + ".codes")->data, tensor(f, p + ".scale")->data,
                              &(*stored)[(size_t)li], why))
@@ -282,9 +284,9 @@ inline bool plan_maps(const Folder& f, const Loaded& l, const qwen4exp_fp8::Mode
         }
     }
     const I8Stored& first = (*stored)[(size_t)l.split];
-    x->rb = l.int8 ? row_block(m, (int64_t)first.codes.size(), (int64_t)first.scale.size()) : row_block(m);
+    x->rb = l.int8 ? row_block(a, (int64_t)first.codes.size(), (int64_t)first.scale.size()) : row_block(a);
     const int64_t block = x->rb.rows * wide * 2;
-    for (int64_t li = l.split; li < m.g.n_layer; ++li) {
+    for (int64_t li = l.split; li < a.n_layer; ++li) {
         const std::string p = "proj." + std::to_string(li);
         const FolderTensor* b = tensor(f, p + ".bias");
         x->w[li] = place_piece(plan, &x->hend, nullptr, block, true);
@@ -298,7 +300,7 @@ inline bool plan_maps(const Folder& f, const Loaded& l, const qwen4exp_fp8::Mode
         }
         put_piece(plan, b->data, b->bytes, x->w[li] + x->rb.bias_at);
     }
-    if (final) plan_final(f, m, plan, x);
+    if (final) plan_final(f, a, plan, x);
     /* ONE slot (kva_layer.h ring_copy), the larger of a layer's block -- so int8 maps take half -- and (with
      * MTP) a final block */
     const int64_t slot = final ? std::max(block, (n + 1) * wide * 2) : block;
@@ -308,20 +310,19 @@ inline bool plan_maps(const Folder& f, const Loaded& l, const qwen4exp_fp8::Mode
 
 /* This rank's copy plan for `mode`: the maps (host block + ring slots), its value heads of the
  * correction, the selected row table. */
-inline Layout plan_rank(const Loaded& l, const qwen4exp_fp8::Model& m, const Config& c, int rank, bool final,
+inline Layout plan_rank(const Loaded& l, const KvaAdapter& a, const Config& c, int rank, bool final,
                         std::vector<Piece>& plan, Stored* stored, std::string* why) {
     const Folder& f = l.folder;
-    const GdnFP8::Config& g = m.gcfg;
-    const int64_t heads = g.n_head_v * g.head_v * g.head_k * 4;   /* one rank's correction, bytes */
+    const int64_t heads = a.state.n_head * a.state.sd0 * a.state.sd1 * 4;   /* one rank's correction, bytes */
     Layout x;
-    for (auto* v : { &x.w, &x.st }) v->assign(m.g.n_layer, -1);
+    for (auto* v : { &x.w, &x.st }) v->assign(a.n_layer, -1);
     if (c.mode == MODE_PLUMB) return x;
-    if (!plan_maps(f, l, m, final, plan, &x, stored, why)) return x;
+    if (!plan_maps(f, l, a, final, plan, &x, stored, why)) return x;
     /* The correction and the row table live in the host block too (Stage E): read zero-copy by their kernels,
      * once an element a pass (the correction's undo/apply, M = 1; the mask's score gather), on approximate
      * passes only -- VRAM is what every request pays in resident experts. */
-    for (int64_t li = l.split; li < m.g.n_layer; ++li) {
-        const FolderTensor* st = m.layers[(size_t)li].full ? nullptr : tensor(f, "st." + std::to_string(li));
+    for (int64_t li = l.split; li < a.n_layer; ++li) {
+        const FolderTensor* st = a.full[(size_t)li] ? nullptr : tensor(f, "st." + std::to_string(li));
         if (st) x.st[li] = place_piece(plan, &x.hend, st->data + rank * heads, heads, true);
     }
     const FolderTensor* sc = c.mode == MODE_QUALITY ? tensor(f, kScoreNames[c.rowsel_table]) : nullptr;
@@ -331,9 +332,8 @@ inline Layout plan_rank(const Loaded& l, const qwen4exp_fp8::Model& m, const Con
 
 /* The issue sites' operands for a layout: each late layer's GEMM reads the ring's one slot (codes /
  * scales / bias at the row block's offsets), and the ring copies its host row block there. */
-inline void take_operands(Upload& u, const Layout& x, const qwen4exp_fp8::Model& m, bool int8) {
-    const int64_t n = m.g.n_embd, wide = m.hccfg.hc * n, L = m.g.n_layer, F = (int64_t)x.fw.size();
-    const GdnFP8::Config& g = m.gcfg;
+inline void take_operands(Upload& u, const Layout& x, const KvaAdapter& a, bool int8) {
+    const int64_t n = a.n_embd, wide = a.wide, L = a.n_layer, F = (int64_t)x.fw.size();
     for (auto* v : { &u.proj_w, &u.proj_b, &u.proj_s, &u.st }) v->assign(L, RAD_NONE);
     for (auto* v : { &u.ring_src, &u.ring_dst }) v->assign(L + F, RAD_NONE);
     u.final_w.assign(F, RAD_NONE);
@@ -346,7 +346,7 @@ inline void take_operands(Upload& u, const Layout& x, const qwen4exp_fp8::Model&
         u.ring_dst[L + i] = RAD_P_T2(slot, RAD_BF16, n + 1, wide);
     }
     for (int64_t li = 0; li < L; ++li) {
-        if (x.st[li] >= 0) u.st[li] = RAD_P_T2(dev_at(u, true, x.st[li]), RAD_F32, g.n_head_v, g.head_v * g.head_k);
+        if (x.st[li] >= 0) u.st[li] = RAD_P_T2(dev_at(u, true, x.st[li]), RAD_F32, a.state.n_head, a.state.sd0 * a.state.sd1);
         if (x.w[li] < 0 || x.slot.empty()) continue;
         unsigned char* slot = dev_at(u, false, x.slot[0]);
         u.proj_w[li] = RAD_P_T2(slot, int8 ? RAD_I8 : RAD_BF16, n, wide);
@@ -358,7 +358,7 @@ inline void take_operands(Upload& u, const Layout& x, const qwen4exp_fp8::Model&
 }
 
 /* This rank's copies of what `mode` reads. Once per rank per process. */
-inline bool upload_rank(const Loaded& l, const qwen4exp_fp8::Model& m, const Config& c, int rank, bool final) {
+inline bool upload_rank(const Loaded& l, const KvaAdapter& a, const Config& c, int rank, bool final) {
     Upload& u = g_upload[rank];
     const int key = (c.mode * 3 + c.rowsel_table) * 2 + final;
     if (u.done && u.key == key) return u.ok;
@@ -368,7 +368,7 @@ inline bool upload_rank(const Loaded& l, const qwen4exp_fp8::Model& m, const Con
     std::vector<Piece> plan;
     Stored stored;
     std::string why;
-    const Layout x = plan_rank(l, m, c, rank, final, plan, &stored, &why);
+    const Layout x = plan_rank(l, a, c, rank, final, plan, &stored, &why);
     if (!why.empty()) {
         std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: rank %d cannot load the int8 projector %s: %s\n",
                      rank, l.folder.place.dir.c_str(), why.c_str());
@@ -379,8 +379,8 @@ inline bool upload_rank(const Loaded& l, const qwen4exp_fp8::Model& m, const Con
     u.vram_bytes = x.vend;
     u.host_bytes = x.hend;
     if ((x.vend && !u.vram) || (x.hend && !u.host)) return false;
-    take_operands(u, x, m, l.int8);
-    if (x.score >= 0) u.score = RAD_P_T2(dev_at(u, true, x.score), RAD_F32, m.g.n_vocab_all, 0);
+    take_operands(u, x, a, l.int8);
+    if (x.score >= 0) u.score = RAD_P_T2(dev_at(u, true, x.score), RAD_F32, a.n_vocab_all, 0);
     if (c.mode == MODE_PLUMB)   /* plumb reads no fitted tensor: say so rather than print a row of zeros */
         std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: rank %d holds nothing (plumb reads no fitted tensor)\n", rank);
     else std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: rank %d holds the projector: %.1f MiB host-mapped "

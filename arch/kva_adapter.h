@@ -30,6 +30,7 @@ struct KvaAdapter {
      * block makes that check vacuous; `split_lo` the lowest split whose stream has seen every
      * injected input (the PLE layer + 1). */
     int64_t n_layer = 0, n_embd = 0, n_vocab_all = 0, wide = 0;
+    int64_t world = 1;       /* tensor-parallel ranks: the folder holds every rank's state heads */
     int64_t tile = 1, split_lo = 0;
     /* the stager probes ride behind the gate-up of layer S - probe_depth, so streaming needs that
      * many routed layers below the split. top_k == 0 = a dense model: no probes, no drop arm. */
