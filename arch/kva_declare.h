@@ -108,63 +108,6 @@ namespace qwen4exp_kva {
 using namespace rad::arch;
 using namespace kva;
 
-/* A LINEAR group of [heads, 1, inner] f32 a sequence, bound to every late delta-net layer: one
- * slot per sequence the engine zeroes at admission, keeps for the sequence's life and snapshots
- * with every checkpoint (kv.cpp:1449-1486). The tape audit fails a step whose issues depend on host
- * state outside the pass key, so per-sequence state lives on the device, here (PLAN D7). */
-static rad_kvgroup decl_late_group(RadBuilder* b, const qwen4exp_fp8::Model& m, Kva& k,
-                                   const char* name, int64_t inner) {
-    RadKVGroupDecl d{};
-    d.kind         = RAD_KV_LINEAR;
-    d.dtype        = RAD_F32;
-    d.n_head_kv    = m.gcfg.n_head_v;
-    d.state_dim[0] = 1;
-    d.state_dim[1] = inner;
-    const rad_kvgroup g = rad_decl_kv_group(b, k.nm.f("%s", name), &d);
-    for (int64_t l = k.split; g && l < m.g.n_layer; ++l)
-        if (!m.layers[(size_t)l].full && rad_bind_layer_kv(b, (int)l, g) < 0) return 0;
-    return g;
-}
-
-/* The correction's and the decay sums' kva.so ops, declared per late delta-net layer. A handle
- * that comes back null means no kernel library serves the op: kva.so is not on the search path, or
- * declines this machine -- reported by name in decl_selected (R31). */
-static const char* decl_kernel_ops(RadBuilder* b, const qwen4exp_fp8::Model& m,
-                                   const RadBuildCtx* ctx, Kva& k) {
-    const Config& c = k.cfg;
-    const char* missing = nullptr;
-    const bool corrects = k.have_st && (c.mode == MODE_SPEED || c.mode == MODE_QUALITY);
-    if (corrects && !(k.kv_applied = decl_late_group(b, m, k, "kv_kva_applied", 1)))
-        return "kv_kva_applied";
-    if (corrects && c.mode == MODE_QUALITY && !(k.kv_rho = decl_late_group(b, m, k, "kv_kva_rho", 2)))
-        return "kv_kva_rho";
-    /* The decay sums read the in-tree a|b buffer from an op declared after the graph. */
-    if (k.kv_rho && rad_buf_concurrent(b, m.b_ab) < 0) return "gdn_ab";
-    for (int64_t l = k.split; corrects && l < m.g.n_layer; ++l) {
-        const qwen4exp_fp8::Layer& lay = m.layers[(size_t)l];
-        if (lay.full) continue;
-        for (int apply = 0; apply < 2; ++apply) {
-            const rad_op h = RAD_OP(b, "kva_state_correct",
-                RAD_PARAMS(RAD_RANGE("M", 1, m.g.max_seqs), RAD_STR("mode", apply ? "apply" : "undo"),
-                           RAD_F64("alpha", c.alpha), RAD_INT("n_head", m.gcfg.n_head_v),
-                           RAD_INT("sd0", m.gcfg.head_v), RAD_INT("sd1", m.gcfg.head_k)),
-                RAD_NOWEIGHTS);
-            (apply ? k.op_apply : k.op_undo)[(size_t)l] = h;
-            if (!h) missing = "kva_state_correct";
-        }
-        /* The decay sums read the layer's own a|b columns and its own A_log / dt_bias. Under a
-         * sizing declare these in-tree handles are the real declare's, which name the same weights
-         * (the in-tree declare declares them in the same order at every max_tok; the static test
-         * checks the weight lists agree). */
-        if (!k.kv_rho) continue;
-        k.op_rho[(size_t)l] = rw(b, RAD_OP(b, "kva_rho_update",
-            RAD_PARAMS(RAD_RANGE("M", 1, ctx->max_tok), RAD_INT("n_head", m.gcfg.n_head_v)),
-            RAD_WEIGHTS(lay.gdn.w_a_log, lay.gdn.w_dt_bias)), {lay.gdn.w.ab, k.b_mask, k.b_bounds}, {});
-        if (!k.op_rho[(size_t)l]) missing = "kva_rho_update";
-    }
-    return missing;
-}
-
 /* The refusals a serving mode needs before anything is issued (R31). Each names the number or the
  * tensor that refused it. */
 static int check_mode(const Kva& k, int64_t max_tok) {
@@ -281,13 +224,11 @@ static int decl_ring(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
     return RAD_E_UNSUPPORTED;
 }
 
-static int decl_fill(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva& k) {
+static int decl_fill(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
     const KvaAdapter& a = k.ad;
-    Geom g = m.g;
-    g.max_tok = ctx->max_tok;
     for (rad_buf h : { a.buf_stream, a.buf_x, a.buf_x_q, a.buf_x_s })
         if (h) RAD_ARCH_TRY(rad_buf_concurrent(b, h));
-    RAD_ARCH_TRY(k.quant.declare(b, g, m.a_x, g.n_embd));   /* model-owned: the adapter's declare_model */
+    if (a.declare_model) RAD_ARCH_TRY(a.declare_model(b, ctx, k));
     if (k.int8) {
         RAD_ARCH_TRY(decl_fill_i8(b, ctx, k));
         return decl_ring(b, ctx, k);

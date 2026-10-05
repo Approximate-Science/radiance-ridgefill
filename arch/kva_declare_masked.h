@@ -228,9 +228,9 @@ static int decl_selected(RadBuilder* b, const RadModelMeta* meta, const qwen4exp
     if (!probe) RAD_ARCH_TRY(check_mode(k, m.g.max_tok));
     if (!probe) RAD_ARCH_TRY(check_fill(k));
     if (!probe) RAD_ARCH_TRY(take_upload(m, ctx, k));
-    if (k.cfg.mode != MODE_PLUMB) RAD_ARCH_TRY(decl_fill(b, m, ctx, k));
+    if (k.cfg.mode != MODE_PLUMB) RAD_ARCH_TRY(decl_fill(b, ctx, k));
     const char* missing = decl_masked(b, m, ctx, k);
-    if (!missing) missing = decl_kernel_ops(b, m, ctx, k);
+    if (!missing && k.ad.decl_state_ops) missing = k.ad.decl_state_ops(b, ctx, k);
     if (!missing && decl_hazard(b, m, ctx, k) != RAD_OK) missing = "kva_hazard";
     if (!missing && k.want_final) missing = decl_final(b, m, ctx, k);
     if (missing && !probe) {

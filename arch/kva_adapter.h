@@ -16,6 +16,8 @@
 
 namespace kva {
 
+struct Kva;   /* kva_declare.h: the core's per-rank declare state, which the hooks fill */
+
 /* This rank's recurrent state per late layer, as the correction ops see it; {0,0,0} = none. */
 struct StateShape { int64_t n_head = 0, sd0 = 0, sd1 = 0; };
 
@@ -48,6 +50,10 @@ struct KvaAdapter {
      * writes (whichever dtype that is), the logits. The projector maps' dtype is not a model fact:
      * it is read from the folder's manifest (bf16 or int8). */
     rad_buf buf_stream = 0, buf_x = 0, buf_x_q = 0, buf_x_s = 0, buf_logits = 0;
+    /* hooks; nullptr = the capability is absent and the core skips it */
+    int (*declare_model)(RadBuilder*, const RadBuildCtx*, Kva&) = nullptr;          /* the fill's quantiser */
+    const char* (*decl_state_ops)(RadBuilder*, const RadBuildCtx*, Kva&) = nullptr; /* correction ops: the
+                                                                     missing op's name, or nullptr */
 };
 
 }  // namespace kva

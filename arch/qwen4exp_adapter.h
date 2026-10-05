@@ -9,6 +9,73 @@
 
 namespace qwen4exp_kva {
 
+/* A LINEAR group of [heads, 1, inner] f32 a sequence, bound to every late delta-net layer: one
+ * slot per sequence the engine zeroes at admission, keeps for the sequence's life and snapshots
+ * with every checkpoint (kv.cpp:1449-1486). The tape audit fails a step whose issues depend on host
+ * state outside the pass key, so per-sequence state lives on the device, here (PLAN D7). */
+inline rad_kvgroup decl_late_group(RadBuilder* b, const qwen4exp_fp8::Model& m, Kva& k,
+                                   const char* name, int64_t inner) {
+    RadKVGroupDecl d{};
+    d.kind         = RAD_KV_LINEAR;
+    d.dtype        = RAD_F32;
+    d.n_head_kv    = m.gcfg.n_head_v;
+    d.state_dim[0] = 1;
+    d.state_dim[1] = inner;
+    const rad_kvgroup g = rad_decl_kv_group(b, k.nm.f("%s", name), &d);
+    for (int64_t l = k.split; g && l < m.g.n_layer; ++l)
+        if (!m.layers[(size_t)l].full && rad_bind_layer_kv(b, (int)l, g) < 0) return 0;
+    return g;
+}
+
+/* The correction's and the decay sums' kva.so ops, declared per late delta-net layer: the adapter's
+ * decl_state_ops hook, because the decay sums read the delta net's own a|b columns and A_log / dt_bias.
+ * A handle that comes back null means no kernel library serves the op: kva.so is not on the search
+ * path, or declines this machine -- reported by name in decl_selected (R31). */
+inline const char* decl_state_ops(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[ctx->rank];
+    const Config& c = k.cfg;
+    const char* missing = nullptr;
+    const bool corrects = k.have_st && (c.mode == MODE_SPEED || c.mode == MODE_QUALITY);
+    if (corrects && !(k.kv_applied = decl_late_group(b, m, k, "kv_kva_applied", 1)))
+        return "kv_kva_applied";
+    if (corrects && c.mode == MODE_QUALITY && !(k.kv_rho = decl_late_group(b, m, k, "kv_kva_rho", 2)))
+        return "kv_kva_rho";
+    /* The decay sums read the in-tree a|b buffer from an op declared after the graph. */
+    if (k.kv_rho && rad_buf_concurrent(b, m.b_ab) < 0) return "gdn_ab";
+    for (int64_t l = k.split; corrects && l < m.g.n_layer; ++l) {
+        const qwen4exp_fp8::Layer& lay = m.layers[(size_t)l];
+        if (lay.full) continue;
+        for (int apply = 0; apply < 2; ++apply) {
+            const rad_op h = RAD_OP(b, "kva_state_correct",
+                RAD_PARAMS(RAD_RANGE("M", 1, m.g.max_seqs), RAD_STR("mode", apply ? "apply" : "undo"),
+                           RAD_F64("alpha", c.alpha), RAD_INT("n_head", m.gcfg.n_head_v),
+                           RAD_INT("sd0", m.gcfg.head_v), RAD_INT("sd1", m.gcfg.head_k)),
+                RAD_NOWEIGHTS);
+            (apply ? k.op_apply : k.op_undo)[(size_t)l] = h;
+            if (!h) missing = "kva_state_correct";
+        }
+        /* The decay sums read the layer's own a|b columns and its own A_log / dt_bias. Under a
+         * sizing declare these in-tree handles are the real declare's, which name the same weights
+         * (the in-tree declare declares them in the same order at every max_tok; the static test
+         * checks the weight lists agree). */
+        if (!k.kv_rho) continue;
+        k.op_rho[(size_t)l] = rw(b, RAD_OP(b, "kva_rho_update",
+            RAD_PARAMS(RAD_RANGE("M", 1, ctx->max_tok), RAD_INT("n_head", m.gcfg.n_head_v)),
+            RAD_WEIGHTS(lay.gdn.w_a_log, lay.gdn.w_dt_bias)), {lay.gdn.w.ab, k.b_mask, k.b_bounds}, {});
+        if (!k.op_rho[(size_t)l]) missing = "kva_rho_update";
+    }
+    return missing;
+}
+
+/* The block input's code pair, written by the fill as the connection read would (QuantFP8 takes int8 or
+ * E4M3 off the model's a_x, nothing for a bf16 one): the adapter's declare_model hook. */
+inline int declare_model(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[ctx->rank];
+    Geom g = m.g;
+    g.max_tok = ctx->max_tok;
+    return k.quant.declare(b, g, m.a_x, g.n_embd);
+}
+
 /* The fit facts the method was measured at on this model (KVA-FACTS §5). */
 constexpr int64_t kAdapterMinTail = 512, kAdapterDefaultTail = 2048;
 
@@ -45,6 +112,8 @@ inline KvaAdapter adapter_of(const qwen4exp_fp8::Model& m) {
     a.buf_x_q = m.a_x.cq();        /* the pair the connection read writes: int8 when q8_fed, else E4M3 */
     a.buf_x_s = m.a_x.cs();
     a.buf_logits = m.b_logits;
+    a.declare_model = &declare_model;
+    a.decl_state_ops = &decl_state_ops;
     return a;
 }
 
