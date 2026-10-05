@@ -98,8 +98,12 @@ approximates those positions -- so the two differ by design and identity is the 
 | 008 | 32,952 | 4,466 | 4,096 | 1,678 | 1,678 | 1,678 |
 
   The 18 A (producer) and C (append-only) requests: no tail overlap in the records, device count 0.
-  Not yet measured: the T_ck = 512 variant (session C3, queued), the greedy-answer agreement, and the
-  negative control (zeroing kv_kva_meta after a restore needs a debug switch that is not built).
+  **T_ck = 512 (session C3, 19:35Z, same corpus and flags + `RADIANCE_KVA_CKPT_FLOOR=512`)**: every
+  branch's device count is exactly its T_ck 0 count minus 512 -- 845 / 1,119 / 1,111 / 778 / 1,052 /
+  1,198 / 1,260 / 1,195 / 1,166 = max(0, oracle − 512), R65's floor clause, on all 9. (hazard_rate.py
+  reports DISAGREE there by design: its records-side superset cannot see the floor.)
+  Not measured: the greedy-answer agreement, and the negative control (zeroing kv_kva_meta after a
+  restore needs a debug switch that is not built).
 - **R68 GREEN**: `tools/hazard_rate.py` (superset rule from `timings`) flags exactly the 9 B's and none of
   the A/C's on this corpus, and with unnamed lines paired in order (fix above) its per-request cross-check
   with the device AGREEs (14,332 positions both). On the append-only R62 traffic: 0 flagged, 0 logged.
@@ -111,7 +115,7 @@ approximates those positions -- so the two differ by design and identity is the 
 | R62 | **green**: turn-2 `cache_n` = stock's, 10/10 conversations, quality and speed | C1 |
 | R63 | **not run** (snapshot/restore of the correction state at ≤ 1 ulp needs a capture of the pre-apply state after a restore; R62/R65 show restores working end to end) | -- |
 | R64 | **redefined** (each vs exact, cached ≤ no-cache); the original form shown unsatisfiable by design (C1); the new form's session `sessions/c4.sh` + `tools/turns_kld_corpus.py` written, **not run** | C1, c4.sh |
-| R65 | **green at T_ck 0** on 9 real branches (device = oracle = records); T_ck 512 variant, answer agreement and the negative control **not run** | C2 (+C3 if it ran) |
+| R65 | **green**: T_ck 0 on 9 real branches (device = oracle = records); T_ck 512: device = oracle − 512 on all 9. Answer agreement and the negative control **not run** | C2, C3 |
 | R66 | **not run** unless C3 ran (session written: exact / speed T_ck 0, 512, 1,024 / quality 0, 512, 16K + 32K, cache servers) | c3.sh |
 | R68 | **green**: superset flags exactly the 9 branches, per-request AGREE with the device after the in-order pairing fix | C2 |
 | static | 56 arch cases / 680,943 checks, kernel host 851 + GPU 1,158 (incl. kva_hazard device == host); mutants F1-F5, H1-H8 caught | §1, C1 |
