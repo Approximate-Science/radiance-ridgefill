@@ -3,8 +3,9 @@
 #
 #   gpuq.sh release env RK_RELEASE_VERSION=0.2.0 sh scripts/release_session.sh   (from a checkout of main's HEAD)
 #
-# Every server runs radiance's DEFAULT flags, as a user would: RK_FLAGS="--tp 2", no --max-num-seqs (the scripts'
-# `default`), so MTP is auto, the prefix cache is on, steps are 8,192 tokens, the context is the model's. Only the
+# Every server runs radiance's DEFAULT flags, as a user would, plus the host pool the model needs to load:
+# RK_FLAGS="--tp 2 --host-pool-mib 12288" (RK_RELEASE_FLAGS), no --max-num-seqs (the scripts' `default`), so MTP is
+# auto, the prefix cache is on, steps are 8,192 tokens, the context is the model's. Only the
 # R64 servers add --num-speculative-tokens 0 --profile-ops (the logits capture follows one greedy decoder and must
 # see every pass).
 #   0  frozen home of HEAD (scripts/frozen_home.sh: the build runs the host tests)
@@ -27,16 +28,19 @@ D=$(readlink -f "$W/data")
 COMMIT=$(git rev-parse HEAD) SHORT=$(git rev-parse --short HEAD)
 E=$W/evidence/release; mkdir -p "$E"
 : "${RK_RELEASE_VERSION:=0.2.0}"
-# the radiance release the plugin is built against and served on (the rebase onto 1.0.13 changes these four):
-: "${RK_RADIANCE_VERSION:=1.0.8}"
-: "${RK_RADIANCE_SRC:=/var/home/dylan/projects/inference/radiance}"
-: "${RK_BUILD_IMAGE:=radiance-build}"
+# the radiance release the plugin is built against and served on (1.0.13 since the rebase, Dylan 2026-10-05):
+: "${RK_RADIANCE_VERSION:=1.0.13}"
+: "${RK_RADIANCE_SRC:=$D/radiance-src-1.0.13}"
+: "${RK_BUILD_IMAGE:=radiance-build:1.0.13}"
 : "${RK_IMAGE:=stilldeadcode/radiance:$RK_RADIANCE_VERSION}"
 export RK_RADIANCE_SRC RK_BUILD_IMAGE RK_IMAGE
 : "${RK_RELEASE_DIST:=/var/home/dylan/AI-Work/radiance-kva-plugin-20261004/dist}"
 export RK_MODEL=/var/home/dylan/models/rad/qwen3.8-next-flash-fp8-iq4r-moe.rad
 export RK_DOCS=/var/home/dylan/AI-Work/kva-flashnext-tests-data/samples/quick/ppl.jsonl
-export RK_FLAGS="--tp 2" RK_SERVE_SEQS=default RK_E2E_SEQS=default RK_STAGE=release
+# radiance's defaults plus the one flag this 114 GiB model needs on two 32 GB cards: the defaults (--host-pool-mib 0,
+# no --weights-disk-tier) refuse to load it ("DID NOT FIT ... the host pool is full", evidence/r1013/def13-a.serve.log)
+: "${RK_RELEASE_FLAGS:=--tp 2 --host-pool-mib 12288}"
+export RK_FLAGS="$RK_RELEASE_FLAGS" RK_SERVE_SEQS=default RK_E2E_SEQS=default RK_STAGE=release
 PY=/var/home/dylan/projects/research/kva/.venv/bin/python
 T0=$(date '+%Y-%m-%d %H:%M:%S')
 log() { echo "$*" | tee -a "$E/session.log"; }
@@ -117,7 +121,7 @@ R=$E/r64; mkdir -p "$R"
 r64() {   # label mode extra-flags
   label=$1 mode=$2 extra=$3
   mkdir -p "$R/dump-$label"
-  if env RK_FLAGS="--tp 2 --num-speculative-tokens 0 $extra" RK_DOCKER_EXTRA="$MOUNT -v $R/dump-$label:/dump" \
+  if env RK_FLAGS="$RK_RELEASE_FLAGS --num-speculative-tokens 0 $extra" RK_DOCKER_EXTRA="$MOUNT -v $R/dump-$label:/dump" \
        RADIANCE_KVA_DUMP_LOGITS=/dump scripts/serve.sh "$mode" --profile-ops > "$R/serve-$label.out" 2>&1; then
     [ -f "$R/conv.json" ] || python3 tools/turn2.py build --docs "$RK_DOCS" --out "$R/conv.json" > "$R/build.out" 2>&1
     python3 tools/turn2.py run --conv "$R/conv.json" --dump "$R/dump-$label" --out "$R/manifest-$label.json" > "$R/run-$label.out" 2>&1
