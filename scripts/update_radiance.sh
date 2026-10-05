@@ -1,36 +1,45 @@
 #!/bin/sh
-# update_radiance.sh -- try the plugin against another radiance release in one command.
+# update_radiance.sh -- is the plugin compatible with another radiance release? One command, one verdict.
 #
-# USAGE: scripts/update_radiance.sh [--gpu-smoke] <radiance tag or commit>      e.g. v1.0.14
+# USAGE: scripts/update_radiance.sh <radiance tag or commit> [--host-only] [--ci] [--gpu-smoke]
+#        e.g.  scripts/update_radiance.sh v1.0.14
+#
+# EXIT: 0 COMPATIBLE, 1 INCOMPATIBLE, 2 INFRASTRUCTURE (the answer could not be computed: a bad tag, the
+# radiance checkout, the toolchain, a missing Python package). 2 is never reported as compatible.
 #
 # WHAT IT DOES, stopping at the first red step:
 #   a. SOURCE   `git archive` of the release from the radiance checkout ($RK_RADIANCE_REPO) into
 #               data/radiance-src-<name>/, made read-only. <name> is the release (1.0.14) when the commit is
 #               that release's tag, else <release>-g<short>. An existing directory is verified against the
 #               commit (tar --compare) and reused.
-#   b. BUILD    a host-only install of that radiance (build-radiance-<name>-host/, reused when its engine
-#               carries the release string) and the plugin against it (build-host-<name>/). CMake's own
-#               checks refuse a source/install mismatch. A compile error is the first answer: it names
-#               the file and line that no longer fits the release.
-#   c. TESTS    ctest -LE gpu -- the static oracle (`off` and every approximate path held issue for
-#               issue against THAT release's in-tree plugin), adapter_core, the purity gate, the kernel
-#               host rows -- then pytest. A failing oracle case is printed with its first difference.
-#   d. PACKAGE  only when a-c are green and the release's build image exists (radiance-build:<release>):
-#               the plugin's committed HEAD built in that image (scripts/frozen_home.sh, which runs the
-#               host suite again in there) into data/home-<short>-r<name>, then tools/package.py into
-#               dist/radiance-kva-r<name>-<short>/. No image: SKIPPED, with the commands that make one.
-#   e. VERDICT  PASS or FAIL, and -- either way -- which in-tree files the adapters COPY changed between
-#               the pinned release (RADIANCE_RELEASE) and this one, and which adapter file copies each
-#               (arch/*.copies): the files to port when the oracle fails, and to review when it does not.
+#   b. ABI      RAD_ABI_VERSION (abi/rad_abi.h) against the pinned release's: a change is INCOMPATIBLE
+#               whatever the tests say (a plugin is loaded by ABI number; a new number is a new contract).
+#   c. BUILD    a host-only install of that radiance (build-radiance-<name>-host/, reused when its engine
+#               carries the release string) and the plugin against it (build-host-<name>/). The plugin's
+#               configure checks and a compile error are INCOMPATIBLE answers: the error names the file and
+#               line that no longer fits the release.
+#   d. TESTS    ctest -LE gpu -- the static oracle (`off` and every approximate path held issue for issue
+#               against THAT release's in-tree plugin), adapter_core, the purity gate, the kernel host rows
+#               -- then pytest. Every failing oracle case is printed with its first difference and the
+#               adapter files it points at: those whose COPIED in-tree source changed (arch/*.copies).
+#   e. PACKAGE  (not with --host-only) when a-d are green and radiance-build:<release> exists: the
+#               committed HEAD built in that image (scripts/frozen_home.sh) and tools/package.py into
+#               dist/radiance-kva-r<name>-<short>/; no image: SKIPPED, naming the commands that make one.
+#   f. REPORT   always: the WARNING section -- every file of radiance's abi/, arch/common/ and
+#               arch/qwen4exp_fp8/ that changed between the pinned release (RADIANCE_VERSION) and this one
+#               -- and which adapter file copies each changed file. Loud, but not failing: a compatible
+#               release with changed blocks still deserves a look.
 #
-# --gpu-smoke (needs d's home and stilldeadcode/radiance:<release>): queues ONE gpuq session -- stock and
-# off ident on the release's runtime image (must be equal), an exact KL reference for it
-# (data/kld/ref-r<name>, recorded unless present), then int8 quality T2560 and int8 speed T2048 against
-# it, scored last-512 paired vs exact (scripts/kl_tail.py, R100's protocol). ~15-20 min of GPU; the
-# session's log is printed as the command to watch.
+# --ci         also prints GitHub/Forgejo workflow commands (::error:: for the verdict and each failure,
+#              ::warning:: for each changed in-tree file) and writes the report to data/update-<name>/
+#              report.md for the workflow to upload.
+# --host-only  stops after d (no docker): what CI runs.
+# --gpu-smoke  (needs e's home and stilldeadcode/radiance:<release>) queues ONE gpuq session: stock and off
+#              ident on the release's runtime image (must be equal), an exact KL reference for it
+#              (data/kld/ref-r<name>, recorded unless present), int8 quality T2560 and int8 speed T2048
+#              scored last-512 paired vs exact (scripts/kl_tail.py, R100's protocol). ~15-20 min of GPU.
 #
-# Exit 0 PASS, 1 FAIL, 2 usage or a missing input. Nothing outside this repo's data/, build-*/ and dist/
-# is written; the radiance checkout is only read (git rev-parse / show / archive / diff).
+# Nothing outside this repo's data/, build-*/ and dist/ is written; the radiance checkout is only read.
 #
 # Env vars:
 #   RK_RADIANCE_REPO  the radiance git checkout (default /var/home/dylan/projects/inference/radiance)
@@ -42,14 +51,25 @@ set -u
 
 . "$(dirname "$0")/common.sh"
 
-smoke=0
-case "${1:-}" in --gpu-smoke) smoke=1; shift ;; esac
-[ "$#" -eq 1 ] || { echo "usage: scripts/update_radiance.sh [--gpu-smoke] <radiance tag or commit>" >&2; exit 2; }
-ref=$1
+smoke=0 hostonly=0 ci=0 ref=""
+for a in "$@"; do
+    case $a in
+        --gpu-smoke) smoke=1 ;;
+        --host-only) hostonly=1 ;;
+        --ci)        ci=1 ;;
+        -*)          echo "update_radiance: unknown option $a" >&2; exit 2 ;;
+        *)           [ -z "$ref" ] || { echo "update_radiance: two releases given ($ref, $a)" >&2; exit 2; }; ref=$a ;;
+    esac
+done
+[ -n "$ref" ] || { echo "usage: scripts/update_radiance.sh <radiance tag or commit> [--host-only] [--ci] [--gpu-smoke]" >&2; exit 2; }
+[ $hostonly = 1 ] && [ $smoke = 1 ] && { echo "update_radiance: --gpu-smoke needs the device build --host-only skips" >&2; exit 2; }
 RREPO=${RK_RADIANCE_REPO:-/var/home/dylan/projects/inference/radiance}
 PY=${RK_PYTHON:-python3}
 JOBS=${RK_JOBS:-4}
 PROJ=${RK_PROJECTOR:-$RK_REPO/data/projector-qwen38fn-int8}
+
+infra() { echo "update_radiance: INFRASTRUCTURE: $*" >&2; [ $ci = 1 ] && echo "::error title=radiance watch: infrastructure::$*"; exit 2; }
+
 cmake_ok() {  # cmake >= 3.21, the minimum of both trees' CMakeLists.txt
     v=$("$1" --version 2>/dev/null | sed -n '1s/^cmake version \([0-9]*\)\.\([0-9]*\).*/\1 \2/p')
     [ -n "$v" ] || return 1
@@ -58,137 +78,176 @@ cmake_ok() {  # cmake >= 3.21, the minimum of both trees' CMakeLists.txt
 }
 CM=""
 for c in ${RK_CMAKE:-} cmake "$HOME/.local/bin/cmake"; do cmake_ok "$c" && { CM=$c; break; }; done
-[ -n "$CM" ] || { echo "update_radiance: no cmake >= 3.21 (set RK_CMAKE)" >&2; exit 2; }
+[ -n "$CM" ] || infra "no cmake >= 3.21 (set RK_CMAKE)"
+git -C "$RREPO" rev-parse --git-dir > /dev/null 2>&1 || infra "$RREPO is not a radiance git checkout (RK_RADIANCE_REPO)"
 
 # ---------------------------------------------------------------- a. the release
-commit=$(git -C "$RREPO" rev-parse --verify --quiet "$ref^{commit}") ||
-    { echo "update_radiance: '$ref' is not a commit of $RREPO" >&2; exit 2; }
+commit=$(git -C "$RREPO" rev-parse --verify --quiet "$ref^{commit}") || infra "'$ref' is not a commit of $RREPO"
 short=$(printf '%s' "$commit" | cut -c1-8)
 ver=$(git -C "$RREPO" show "$commit:CMakeLists.txt" | sed -n 's/^project(radiance VERSION \([0-9][0-9.]*\).*/\1/p')
-[ -n "$ver" ] || { echo "update_radiance: no project(radiance VERSION ...) at $commit" >&2; exit 2; }
+[ -n "$ver" ] || infra "no project(radiance VERSION ...) at $commit"
 if [ "$(git -C "$RREPO" describe --exact-match --tags "$commit" 2>/dev/null)" = "v$ver" ]; then name=$ver
 else name=$ver-g$short; fi
 SRC=$RK_REPO/data/radiance-src-$name
 LOG=$RK_REPO/data/update-$name
-mkdir -p "$LOG"
+mkdir -p "$LOG" || infra "cannot create $LOG"
 : > "$LOG/summary.txt"
-say() { printf '%s\n' "$*" | tee -a "$LOG/summary.txt"; }
+say()  { printf '%s\n' "$*" | tee -a "$LOG/summary.txt"; }
 step() { printf '  %-14s %s\n' "$1" "$2" | tee -a "$LOG/summary.txt"; }
+ann()  { [ $ci = 1 ] && printf '::%s title=%s::%s\n' "$1" "$2" "$3"; return 0; }
 
-pin=$(cut -d' ' -f2 "$RK_REPO/RADIANCE_RELEASE" 2>/dev/null || true)
-pinver=$(cut -d' ' -f1 "$RK_REPO/RADIANCE_RELEASE" 2>/dev/null || true)
+pin=$(cut -d' ' -f2 "$RK_REPO/RADIANCE_VERSION" 2>/dev/null || true)
+pinver=$(cut -d' ' -f1 "$RK_REPO/RADIANCE_VERSION" 2>/dev/null || true)
+[ -n "$pin" ] || infra "RADIANCE_VERSION (the pinned release: '<version> <commit>') is missing"
+git -C "$RREPO" cat-file -e "$pin^{commit}" 2>/dev/null || infra "the pinned commit $pin is not in $RREPO (fetch its tags)"
 plugin_sha=$(git -C "$RK_REPO" rev-parse HEAD)
-say "update_radiance: radiance $ver ($commit, '$ref') for plugin $(git -C "$RK_REPO" rev-parse --short HEAD) on $(git -C "$RK_REPO" branch --show-current); pinned ${pinver:-none}"
+say "update_radiance: radiance $ver ($commit, '$ref') for plugin $(git -C "$RK_REPO" rev-parse --short HEAD) ($(git -C "$RK_REPO" branch --show-current 2>/dev/null || echo detached)); pinned $pinver"
 say "  logs: $LOG"
 
-# e's report, which every exit prints: what the adapters copy that this release changed.
-copies_report() {
-    [ -n "$pin" ] || { say "  (no RADIANCE_RELEASE pin: cannot say what changed)"; return; }
-    [ "$pin" = "$commit" ] && { say "  in-tree changes since the pin: none (this IS the pinned release)"; return; }
-    if git -C "$RREPO" diff --quiet "$pin" "$commit" -- abi; then say "  abi/ since $pinver: unchanged"
-    else say "  abi/ since $pinver: CHANGED -- $(git -C "$RREPO" diff --shortstat "$pin" "$commit" -- abi)"; fi
-    say "  in-tree files the adapters copy (arch/*.copies), $pinver -> $ver:"
-    grep -hv '^#' "$RK_REPO"/arch/*.copies | awk 'NF == 2' | while read -r mine theirs; do
-        if git -C "$RREPO" diff --quiet "$pin" "$commit" -- "$theirs"; then st="unchanged"
-        else st="CHANGED ($(git -C "$RREPO" diff --numstat "$pin" "$commit" -- "$theirs" | awk '{print "+"$1" -"$2}'))"; fi
+# THE ADAPTER FILES A CHANGE POINTS AT: those whose copied in-tree source (arch/*.copies) changed since the pin.
+copies() { grep -hv '^#' "$RK_REPO"/arch/*.copies | awk 'NF == 2'; }
+suspects=$(copies | while read -r mine theirs; do
+    git -C "$RREPO" diff --quiet "$pin" "$commit" -- "$theirs" || echo "$mine"; done | sort -u | tr '\n' ' ')
+
+# f. the report every exit prints
+report() {
+    say ""
+    say "WARNINGS -- radiance files changed $pinver -> $name (abi/, arch/common/, arch/qwen4exp_fp8/):"
+    changed=$(git -C "$RREPO" diff --numstat "$pin" "$commit" -- abi arch/common arch/qwen4exp_fp8)
+    if [ -z "$changed" ]; then say "  none"
+    else
+        printf '%s\n' "$changed" | while read -r add del path; do
+            who=$(copies | awk -v p="$path" '$2 == p {print $1}' | sort -u | tr '\n' ' ')
+            line="$path (+$add -$del)${who:+ -- copied by ${who% }}"
+            say "  $line"
+            ann warning "radiance $pinver -> $name changed $path" "$line"
+        done
+    fi
+    say "  adapter copies (arch/*.copies):"
+    copies | while read -r mine theirs; do
+        if git -C "$RREPO" diff --quiet "$pin" "$commit" -- "$theirs"; then st=unchanged; else st=CHANGED; fi
         printf '    %-26s copies %-42s %s\n' "$mine" "$theirs" "$st" | tee -a "$LOG/summary.txt"
     done
-    say "  everything else changed in arch/ (called, not copied):"
-    git -C "$RREPO" diff --stat "$pin" "$commit" -- arch | sed '$d' | sed 's/^/    /' | tee -a "$LOG/summary.txt"
 }
-finish() {  # verdict exit-code
-    copies_report
-    say "RESULT: $1"
+verdict() {  # word exit-code reason
+    report
+    say ""
+    say "RESULT: $1${3:+ -- $3}"
+    [ $2 = 1 ] && ann error "radiance $ver: $1" "${3:-}"
+    if [ $ci = 1 ]; then
+        { echo "# radiance watch: $ver ($commit) -- $1"; echo; echo '```'; cat "$LOG/summary.txt"; echo '```'; } > "$LOG/report.md"
+    fi
     exit "$2"
 }
+incompatible() { verdict INCOMPATIBLE 1 "$*"; }
 
 if [ -d "$SRC" ]; then
     diffs=$(git -C "$RREPO" archive "$commit" | tar -d -C "$SRC" 2>&1 | grep -vE 'Mod time differs|Mode differs|Uid differs|Gid differs' || true)
-    if [ -n "$diffs" ]; then step source "FAIL: $SRC exists and is not $commit: $(printf '%s' "$diffs" | head -3 | tr '\n' '|')"; finish FAIL 1; fi
+    [ -z "$diffs" ] || infra "$SRC exists and is not $commit: $(printf '%s' "$diffs" | head -3 | tr '\n' '|')"
     step source "OK $SRC (existing, verified against $short)"
 else
-    mkdir -p "$SRC" && git -C "$RREPO" archive "$commit" | tar -x -C "$SRC" && chmod -R a-w "$SRC" ||
-        { step source "FAIL: git archive into $SRC"; finish FAIL 1; }
+    { mkdir -p "$SRC" && git -C "$RREPO" archive "$commit" | tar -x -C "$SRC" && chmod -R a-w "$SRC"; } ||
+        infra "git archive of $commit into $SRC"
     step source "OK $SRC (archived, read-only)"
 fi
 
-# ---------------------------------------------------------------- b. builds
+# ---------------------------------------------------------------- b. the ABI number
+abi_of() { git -C "$RREPO" show "$1:abi/rad_abi.h" 2>/dev/null | sed -n 's/^#define[ \t]*RAD_ABI_VERSION[ \t]*\([0-9]*\).*/\1/p'; }
+abi_pin=$(abi_of "$pin") abi_new=$(abi_of "$commit")
+abi_bad=""
+if [ "$abi_pin" = "$abi_new" ]; then step ABI "OK RAD_ABI_VERSION $abi_new (as $pinver)"
+else step ABI "CHANGED: RAD_ABI_VERSION $abi_pin ($pinver) -> $abi_new ($ver)"; abi_bad="RAD_ABI_VERSION $abi_pin -> $abi_new"; fi
+
+# ---------------------------------------------------------------- c. builds
 HB=$RK_REPO/build-radiance-$name-host
 if [ -x "$HB/install/bin/radiance" ] && strings "$HB/install/bin/radiance" | grep -qxF "$ver"; then
     step "host install" "OK $HB/install (existing, carries $ver)"
+elif nice -n 19 "$CM" -S "$SRC" -B "$HB" -DRAD_WITH_HIP=OFF -DRAD_WITH_FFMPEG=OFF -DRAD_BUILD_TESTS=OFF \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$HB/install" > "$LOG/radiance-host.log" 2>&1 &&
+     nice -n 19 "$CM" --build "$HB" -j "$JOBS" >> "$LOG/radiance-host.log" 2>&1 &&
+     "$CM" --install "$HB" >> "$LOG/radiance-host.log" 2>&1; then
+    step "host install" "OK $HB/install (built)"
 else
-    if nice -n 19 "$CM" -S "$SRC" -B "$HB" -DRAD_WITH_HIP=OFF -DRAD_WITH_FFMPEG=OFF -DRAD_BUILD_TESTS=OFF \
-            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$HB/install" > "$LOG/radiance-host.log" 2>&1 &&
-       nice -n 19 "$CM" --build "$HB" -j "$JOBS" >> "$LOG/radiance-host.log" 2>&1 &&
-       "$CM" --install "$HB" >> "$LOG/radiance-host.log" 2>&1; then
-        step "host install" "OK $HB/install (built)"
-    else
-        step "host install" "FAIL: radiance $ver does not build host-only ($LOG/radiance-host.log): $(grep -m3 -E 'error' "$LOG/radiance-host.log" | tr '\n' '|')"
-        finish FAIL 1
-    fi
+    step "host install" "FAIL ($LOG/radiance-host.log): $(grep -m3 -E 'error|Error' "$LOG/radiance-host.log" | tr '\n' '|')"
+    report; infra "radiance $ver itself does not build host-only here (toolchain?): $LOG/radiance-host.log"
 fi
 PB=$RK_REPO/build-host-$name
 if ! "$CM" -S "$RK_REPO" -B "$PB" -DCMAKE_PREFIX_PATH="$HB/install" -DRADIANCE_SRC="$SRC" -DRAD_WITH_HIP=OFF \
         > "$LOG/plugin-configure.log" 2>&1; then
     step "plugin build" "FAIL at configure ($LOG/plugin-configure.log):"
     grep -A4 'CMake Error' "$LOG/plugin-configure.log" | head -12 | sed 's/^/      /' | tee -a "$LOG/summary.txt"
-    finish FAIL 1
+    incompatible "the plugin's configure refuses radiance $ver"
 fi
 if ! nice -n 19 "$CM" --build "$PB" -j "$JOBS" > "$LOG/plugin-build.log" 2>&1; then
     step "plugin build" "FAIL: the plugin does not compile against radiance $ver ($LOG/plugin-build.log). First errors:"
-    grep -E 'error:' "$LOG/plugin-build.log" | sed "s|$RK_REPO/||" | sort -u | head -12 | sed 's/^/      /' | tee -a "$LOG/summary.txt"
-    finish FAIL 1
+    errs=$(grep -E 'error:' "$LOG/plugin-build.log" | sed "s|$RK_REPO/||" | sort -u | sort -t: -k1,1 -k2,2n | head -12)
+    printf '%s\n' "$errs" | sed 's/^/      /' | tee -a "$LOG/summary.txt"
+    printf '%s\n' "$errs" | while IFS= read -r e; do ann error "compile" "$e"; done
+    files=$(printf '%s\n' "$errs" | cut -d: -f1 | sort -u | tr '\n' ' ')
+    incompatible "compile errors in ${files% }${suspects:+; copied sources changed for ${suspects% }}"
 fi
 step "plugin build" "OK $PB"
 
-# ---------------------------------------------------------------- c. tests
+# ---------------------------------------------------------------- d. tests
 (cd "$PB" && ctest -LE gpu --output-on-failure) > "$LOG/ctest.log" 2>&1
 ct=$?
 step "ctest -LE gpu" "$( [ $ct = 0 ] && echo OK || echo FAIL): $(grep -E 'tests passed' "$LOG/ctest.log" | tail -1)"
+failed_cases=""
+for t in arch_static_test adapter_core_test; do
+    "$PB/tests/$t" > "$LOG/$t.log" 2>&1
+    printf '      %-18s %s\n' "$t" "$(grep -E 'check\(s\) over|failure\(s\)' "$LOG/$t.log" | tail -1)" | tee -a "$LOG/summary.txt"
+    for c in $(grep -E '^  FAIL' "$LOG/$t.log" | awk '{print $2}' | sort -u); do
+        failed_cases="$failed_cases $c"
+        diff1=$(awk -v c="$c" '$1 == "FAIL" && $2 == c {f = 1} f && /first difference/ {print; exit}' "$LOG/$t.log" | sed 's/^ *//')
+        line="[$t] $c -> ${suspects:-no copied source changed: a called block (WARNINGS below)}${diff1:+ ($diff1)}"
+        say "      FAIL $line"
+        ann error "static oracle" "$line"
+    done
+done
 if [ $ct != 0 ]; then
     grep -E '^ *[0-9]+ - .*\(Failed\)' "$LOG/ctest.log" | sed 's/^/      /' | tee -a "$LOG/summary.txt"
-    for t in arch_static_test adapter_core_test; do
-        [ -x "$PB/tests/$t" ] || continue
-        "$PB/tests/$t" > "$LOG/$t.log" 2>&1
-        grep -E '^  FAIL|first difference' "$LOG/$t.log" | sort | uniq -c | head -20 | sed "s/^/      [$t] /" | tee -a "$LOG/summary.txt"
-    done
-    finish FAIL 1
+    incompatible "static oracle / host tests fail (${failed_cases# }) -- port ${suspects:-the called blocks listed under WARNINGS}"
 fi
-for t in arch_static_test adapter_core_test; do   # their check counts, which ctest does not print
-    "$PB/tests/$t" > "$LOG/$t.log" 2>&1
-    printf '      %-18s %s\n' "$t" "$(grep -E 'check\(s\) over' "$LOG/$t.log")" | tee -a "$LOG/summary.txt"
-done
 (cd "$RK_REPO" && "$PY" -m pytest -q tests) > "$LOG/pytest.log" 2>&1
 pt=$?
 step pytest "$( [ $pt = 0 ] && echo OK || echo FAIL): $(tail -1 "$LOG/pytest.log")"
-[ $pt = 0 ] || finish FAIL 1
+if [ $pt != 0 ]; then
+    grep -qE 'ModuleNotFoundError|ImportError|No module named' "$LOG/pytest.log" &&
+        { report; infra "pytest could not import its requirements (pip install -r tools/requirements.txt): $LOG/pytest.log"; }
+    incompatible "pytest fails ($LOG/pytest.log)"
+fi
+[ -z "$abi_bad" ] || incompatible "$abi_bad: a plugin is loaded by ABI number"
 
-# ---------------------------------------------------------------- d. packages
-BIMG=radiance-build:$ver
+# ---------------------------------------------------------------- e. packages
 home=""
-if ! docker image inspect "$BIMG" > /dev/null 2>&1; then
-    step package "SKIPPED: no build image $BIMG. Make it: (cd $RREPO && docker/build.sh -r $commit --target build && docker tag radiance-build $BIMG)"
-elif [ -n "$(git -C "$RK_REPO" status --porcelain -- arch kernels tests CMakeLists.txt)" ]; then
-    step package "SKIPPED: arch/ kernels/ tests/ or CMakeLists.txt has uncommitted changes; a package is built from a commit"
+if [ $hostonly = 1 ]; then
+    step package "not built (--host-only)"
 else
-    hs=$(git -C "$RK_REPO" rev-parse --short HEAD)
-    if RK_HOME_TAG=-r$name RK_BUILD_IMAGE=$BIMG RK_RADIANCE_SRC=$SRC "$RK_SCRIPTS/frozen_home.sh" HEAD > "$LOG/frozen_home.log" 2>&1; then
-        home=$RK_REPO/data/home-$hs-r$name
-        pver=$(sed -n 's/^RAD_ARCH_PLUGIN([^,]*, *"[^"]*", *"[^"]*", *"\([0-9.]*\)".*/\1/p' "$RK_REPO/arch/qwen4exp_kva.cpp")
-        abi=$(sed -n 's/^set(PACKAGE_VERSION "\([0-9.]*\)")/\1/p' "$HB"/install/lib*/cmake/radiance/*ersion*.cmake 2>/dev/null | head -1)
-        out=$RK_REPO/dist/radiance-kva-r$name-$hs
-        if [ -e "$out" ]; then
-            step package "SKIPPED: $out exists (remove it to rebuild); device home $home"
-        elif "$PY" "$RK_REPO/tools/package.py" --home "$home" --projector "$PROJ" --out "$out" --version "$pver" \
-                --commit "$plugin_sha" --radiance-version "$ver" ${abi:+--abi-version "$abi"} > "$LOG/package.log" 2>&1; then
-            step package "OK $out (plugin $pver, radiance $ver, ABI ${abi:-?}; device home $home)"
-        else
-            step package "FAIL: tools/package.py ($LOG/package.log): $(tail -2 "$LOG/package.log" | tr '\n' '|')"
-            finish FAIL 1
-        fi
+    BIMG=radiance-build:$ver
+    if ! docker image inspect "$BIMG" > /dev/null 2>&1; then
+        step package "SKIPPED: no build image $BIMG. Make it: (cd $RREPO && docker/build.sh -r $commit --target build && docker tag radiance-build $BIMG)"
+    elif [ -n "$(git -C "$RK_REPO" status --porcelain -- arch kernels tests CMakeLists.txt)" ]; then
+        step package "SKIPPED: arch/ kernels/ tests/ or CMakeLists.txt has uncommitted changes; a package is built from a commit"
     else
-        step package "FAIL: the device build in $BIMG ($LOG/frozen_home.log): $(grep -m3 -E 'error|FAIL' "$LOG/frozen_home.log" | tr '\n' '|')"
-        finish FAIL 1
+        hs=$(git -C "$RK_REPO" rev-parse --short HEAD)
+        if RK_HOME_TAG=-r$name RK_BUILD_IMAGE=$BIMG RK_RADIANCE_SRC=$SRC "$RK_SCRIPTS/frozen_home.sh" HEAD > "$LOG/frozen_home.log" 2>&1; then
+            home=$RK_REPO/data/home-$hs-r$name
+            pver=$(sed -n 's/^RAD_ARCH_PLUGIN([^,]*, *"[^"]*", *"[^"]*", *"\([0-9.]*\)".*/\1/p' "$RK_REPO/arch/qwen4exp_kva.cpp")
+            abi=$(sed -n 's/^set(PACKAGE_VERSION "\([0-9.]*\)")/\1/p' "$HB"/install/lib*/cmake/radiance/*ersion*.cmake 2>/dev/null | head -1)
+            out=$RK_REPO/dist/radiance-kva-r$name-$hs
+            if [ -e "$out" ]; then
+                step package "SKIPPED: $out exists (remove it to rebuild); device home $home"
+            elif "$PY" "$RK_REPO/tools/package.py" --home "$home" --projector "$PROJ" --out "$out" --version "$pver" \
+                    --commit "$plugin_sha" --radiance-version "$ver" ${abi:+--abi-version "$abi"} > "$LOG/package.log" 2>&1; then
+                step package "OK $out (plugin $pver, radiance $ver, ABI ${abi:-?}; device home $home)"
+            else
+                step package "FAIL: tools/package.py ($LOG/package.log): $(tail -2 "$LOG/package.log" | tr '\n' '|')"
+                report; infra "packaging failed after a compatible verdict: $LOG/package.log"
+            fi
+        else
+            step package "FAIL: the device build in $BIMG ($LOG/frozen_home.log): $(grep -m3 -E 'error|FAIL' "$LOG/frozen_home.log" | tr '\n' '|')"
+            incompatible "the device build in $BIMG fails (the host build passed): $LOG/frozen_home.log"
+        fi
     fi
 fi
 
@@ -233,4 +292,4 @@ EOF
         step "gpu smoke" "QUEUED: $(head -1 "$LOG/smoke.queue"); watch $LOG/smoke/session.log"
     fi
 fi
-finish PASS 0
+verdict COMPATIBLE 0

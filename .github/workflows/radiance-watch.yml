@@ -1,0 +1,103 @@
+# radiance-watch -- does the plugin still fit radiance's newest release? (README "CI: radiance release watch")
+#
+# Runs scripts/update_radiance.sh <tag> --host-only --ci on an ordinary runner: it builds that radiance
+# release host-only (no GPU, no ROCm, no docker), builds the plugin against it, and runs the static oracle
+# (the plugin held issue for issue against that release's in-tree Qwen4-Exp plugin), the toy-adapter test,
+# the core-purity gate and pytest. Exit 0 COMPATIBLE, 1 INCOMPATIBLE (a build failure, an ABI number
+# change, any oracle mismatch -- each failing case printed with the adapter file it points at), 2
+# INFRASTRUCTURE (clone, toolchain, Python packages); 1 and 2 fail the job, and 2 is never "compatible".
+# Every radiance file under abi/, arch/common/ and arch/qwen4exp_fp8/ that changed since the pinned release
+# (RADIANCE_VERSION) is a ::warning:: annotation, compatible or not.
+#
+# GitHub Actions syntax, kept to the subset Forgejo / Codeberg Actions also runs: one ubuntu job,
+# actions/checkout and shell steps; the report upload picks the artifact action each forge supports.
+name: radiance-watch
+
+on:
+  schedule:
+    - cron: "17 5 * * *"          # daily: a new radiance release is caught within a day
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      radiance_tag:
+        description: "radiance tag or commit to test (empty: the newest release tag)"
+        required: false
+        default: ""
+
+jobs:
+  watch:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      RADIANCE_URL: https://codeberg.org/StillDeadcode/radiance
+      # HOST-ONLY REQUIREMENTS: cmake >= 3.21 (both trees' minimum; ubuntu-24.04 ships 3.28), g++-14 (C++20;
+      # the compiler radiance's own build image uses), binutils (strings), git, python3 >= 3.12 with
+      # tools/requirements.txt (torch from the CPU index: nothing here touches a GPU). No docker, no ROCm.
+      CC: gcc-14
+      CXX: g++-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          set -eu
+          sudo apt-get update -q || { echo "::error title=radiance watch: infrastructure::apt-get update failed"; exit 2; }
+          sudo apt-get install -y -q --no-install-recommends g++-14 cmake binutils git python3-venv ||
+            { echo "::error title=radiance watch: infrastructure::toolchain install failed"; exit 2; }
+          cmake --version | head -1; g++-14 --version | head -1; python3 --version
+
+      - name: Python requirements
+        run: |
+          set -eu
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q --upgrade pip
+          "$RUNNER_TEMP/venv/bin/pip" install -q --index-url https://download.pytorch.org/whl/cpu \
+              "torch==$(sed -n 's/^torch==//p' tools/requirements.txt)" ||
+            { echo "::error title=radiance watch: infrastructure::torch (CPU) install failed"; exit 2; }
+          "$RUNNER_TEMP/venv/bin/pip" install -q -r tools/requirements.txt ||
+            { echo "::error title=radiance watch: infrastructure::pip install -r tools/requirements.txt failed"; exit 2; }
+
+      - name: Resolve the radiance release
+        id: rel
+        env:
+          INPUT_TAG: ${{ github.event.inputs.radiance_tag }}
+        run: |
+          set -eu
+          tag="${INPUT_TAG:-}"
+          if [ -z "$tag" ]; then
+            tags=$(git ls-remote --tags --refs "$RADIANCE_URL" 'v*') ||
+              { echo "::error title=radiance watch: infrastructure::git ls-remote $RADIANCE_URL failed"; exit 2; }
+            tag=$(printf '%s\n' "$tags" | sed 's|.*refs/tags/||' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+          fi
+          [ -n "$tag" ] || { echo "::error title=radiance watch: infrastructure::no release tag at $RADIANCE_URL"; exit 2; }
+          echo "radiance release under test: $tag (pinned: $(cat RADIANCE_VERSION))"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Clone radiance
+        run: |
+          git clone -q --filter=blob:none "$RADIANCE_URL" "$RUNNER_TEMP/radiance" ||
+            { echo "::error title=radiance watch: infrastructure::git clone $RADIANCE_URL failed"; exit 2; }
+
+      - name: Compatibility (scripts/update_radiance.sh --host-only --ci)
+        env:
+          RK_RADIANCE_REPO: ${{ runner.temp }}/radiance
+          RK_PYTHON: ${{ runner.temp }}/venv/bin/python
+          RK_JOBS: "4"
+        run: scripts/update_radiance.sh "${{ steps.rel.outputs.tag }}" --host-only --ci
+
+      # The report and every log: data/update-<release>/ (summary.txt, report.md, build and test logs).
+      - name: Report (GitHub)
+        if: always() && github.server_url == 'https://github.com'
+        uses: actions/upload-artifact@v4
+        with:
+          name: radiance-watch-${{ steps.rel.outputs.tag }}
+          path: data/update-*/
+          if-no-files-found: warn
+      - name: Report (Forgejo / Codeberg)
+        if: always() && github.server_url != 'https://github.com'
+        uses: actions/upload-artifact@v3
+        with:
+          name: radiance-watch-${{ steps.rel.outputs.tag }}
+          path: data/update-*/
+          if-no-files-found: warn

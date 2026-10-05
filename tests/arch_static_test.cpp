@@ -561,6 +561,15 @@ struct Pair {
     RadBuilder stock, kva;
     int        st = RAD_OK;
 };
+/* The builder whose op table names the handles a failing comparison prints (the last declare_pair's KVA
+ * builder; the in-tree ops share its numbering): "op 134 (gdn_ab)" says which in-tree issue moved, which
+ * is what scripts/update_radiance.sh's report needs to point a reader at a block. */
+const RadBuilder* g_op_names = nullptr;
+const char* op_name(rad_op h) {
+    if (h == kLane) return "lane";
+    if (h == kJoin) return "lane join";
+    return g_op_names && h > 0 && h <= g_op_names->ops.size() ? g_op_names->ops[h - 1].op.c_str() : "?";
+}
 void declare_pair(Pair& p, const char* mode, int rank = 0, int world = 1, int64_t max_out_rows = 0,
                   int max_spec = 0) {
     RadModelMeta meta = flash_next_meta();
@@ -574,6 +583,7 @@ void declare_pair(Pair& p, const char* mode, int rank = 0, int world = 1, int64_
     REQUIRE_EQ(qwen4exp_fp8::declare(&p.stock, &meta, &c), RAD_OK);
     Env env({{"RADIANCE_KVA", mode}});
     p.st = qwen4exp_kva::declare(&p.kva, &meta, &c);
+    g_op_names = &p.kva;
 }
 
 /* R93 -- THE LEVER'S PREMISE: in every routed layer the FIRST op naming one of the layer's EXPERT
@@ -1119,9 +1129,9 @@ int differ_at(const std::vector<RecIssue>& got, const std::vector<RecIssue>& wan
     const int n = differ(got, want);
     for (size_t i = 0; n && i < std::max(got.size(), want.size()); ++i)
         if (i >= got.size() || i >= want.size() || !same_issue(got[i], want[i])) {
-            std::fprintf(stderr, "    first difference at issue %zu of %zu/%zu: op %u vs %u\n", i,
-                         got.size(), want.size(), i < got.size() ? got[i].op : 0u,
-                         i < want.size() ? want[i].op : 0u);
+            const rad_op g = i < got.size() ? got[i].op : 0u, w = i < want.size() ? want[i].op : 0u;
+            std::fprintf(stderr, "    first difference at issue %zu of %zu/%zu: op %u (%s) vs %u (%s)\n", i,
+                         got.size(), want.size(), g, op_name(g), w, op_name(w));
             break;
         }
     return n;
@@ -1231,6 +1241,7 @@ TEST(at_tp4_a_layer_with_plain_experts_takes_unequal_class_tables) {
         REQUIRE_EQ(qwen4exp_fp8::declare(&p.stock, &meta, &c), RAD_OK);
         Env env({{"RADIANCE_KVA", "quality"}});
         REQUIRE_EQ(qwen4exp_kva::declare(&p.kva, &meta, &c), RAD_OK);
+        g_op_names = &p.kva;
         const MoeFP8& e = qwen4exp_fp8::g_model[rank].layers[(size_t)kSplit].mlp;
         CHECK_EQ(e.ncls, 4);
         CHECK_EQ(e.n_reg, (int64_t)510);

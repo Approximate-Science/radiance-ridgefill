@@ -69,3 +69,31 @@ RK_RADIANCE_SRC = the 1.0.13 source), served on the 1.0.13 runtime image (RK_IMA
 still defaults to stilldeadcode/radiance:1.0.8); off ident vs the NEW 1.0.13 R3; int8 quality + speed
 KL rows vs the NEW 1.0.13 exact reference; rows will differ from 1.0.8's -- report the paired dNLL vs
 exact (R100's protocol).
+
+## The next release costs one command: scripts/update_radiance.sh + CI (orchestrator ~22:10Z, Dylan)
+
+`scripts/update_radiance.sh <tag> [--host-only] [--ci] [--gpu-smoke]` -- source (git archive, read-only,
+verified when reused), the ABI number vs the pin, a host-only radiance install + the plugin against it,
+ctest -LE gpu + pytest, then (not with --host-only) the device build in `radiance-build:<release>` and
+`tools/package.py` into `dist/`. Exit 0 COMPATIBLE / 1 INCOMPATIBLE / 2 INFRASTRUCTURE. Every run ends
+with the WARNINGS report: each file of radiance's abi/, arch/common/, arch/qwen4exp_fp8/ changed since the
+pin (`RADIANCE_VERSION`: `1.0.13 d0f639bd...`) and which adapter file copies it (`arch/qwen4exp.copies`).
+A failing oracle case prints the adapter files whose copied source changed and its first difference with
+OP NAMES (arch_static_test's differ_at now names the ops from the case's builder). `--gpu-smoke` writes and
+queues one gpuq session (stock vs off ident on the release's runtime image, an exact KL reference for it,
+int8 quality T2560 + speed T2048 last-512 vs exact). `scripts/frozen_home.sh` gained `RK_HOME_TAG` so one
+commit keeps a device home per release. CI: `.github/workflows/radiance-watch.yml` (README "CI: radiance
+release watch").
+
+Proven locally (2026-10-05, this machine: cmake 4.4.2, g++ 16.1.1, Python 3.14 -- the workflow's own
+toolchain is ubuntu-24.04's cmake 3.28 / g++-14 / Python 3.12, whose pinned wheels exist: numpy 2.5.3,
+torch 2.11.0+cpu, transformers 5.18.0, safetensors 0.8.0, pytest 9.1.1 all publish cp312 / py3 wheels):
+
+| run | the workflow's steps | exit | what it said |
+|---|---|---|---|
+| v1.0.13 | tag resolved by `git ls-remote` on codeberg (newest = v1.0.13 = d0f639bd), `git clone --filter=blob:none` (3 s), `--host-only --ci` | **0** | COMPATIBLE: ABI 15 = pin, 66 cases / 1,144,062 checks, adapter_core 5 / 115, pytest 209 / 33; WARNINGS none; report.md written. The Codeberg tag's archive == data/radiance-src-1.0.13 (tar --compare) |
+| v1.0.8 | `--host-only --ci` | **1** | INCOMPATIBLE: compile errors in arch/qwen4exp_moe.h:28/41/120 (`MoeFP8` has no member `ncls` -- the four-class MoE is 1.0.10's) and the two static cases that read it; copied sources changed for qwen4exp_adapter.h, qwen4exp_moe.h; nine ::warning:: files |
+| simulated release (scratch `git clone --shared` at v1.0.13 + one commit: GdnFP8::step issues its a\|b projection before its input projection; MoeFP8::pass requantises before routing) | `--host-only --ci` | **1** | INCOMPATIBLE: 12 oracle cases fail -- every approximate path; every `off` case passes (it IS the in-tree code) -- each pointing at qwen4exp_blocks.h, qwen4exp_fill.h, qwen4exp_moe.h, first difference "op 134 (gemm_nt_q) vs 135 (gemm_nt)" (the delta net's two projections, swapped); WARNINGS: rad_block_gdn_fp8.h -- copied by blocks.h, fill.h; rad_block_moe_fp8.h -- copied by moe.h |
+
+Not provable here: the workflow on a hosted runner (no forge access from this session); its first run is
+the check that the apt/pip steps install as written.
