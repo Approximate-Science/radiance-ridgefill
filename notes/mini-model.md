@@ -117,3 +117,15 @@ resolve ops against the kernel registry, which is why this never surfaced.
 Nothing in this repo was changed to work around the wall: the plugin, the kernel library, the
 tests and the tools are untouched except for the new `tools/mini_model.py`,
 `scripts/mini-qwen4exp.recipe`, `scripts/mini_cpu.sh` and this note.
+## GPU-side conversion attempts (orchestrator, 2026-10-05) -- PARKED
+
+Dylan parked the mini model with per-request ON/OFF ("stop investing"); the tooling stays. What the two
+GPU-side `rad-convert` runs (runtime image `stilldeadcode/radiance:1.0.8`, both cards visible) showed:
+1. The checkpoint kept the real `vision_config`, so radiance declared a vision tower: "the vision tower
+   emits 2560-wide rows and the model embeds 256-wide tokens". Fixed in `tools/mini_model.py` (cccc80e).
+2. With the tower gone, declare failed on every hyper-connection weight (`blk.*.attn_hc_up/down`,
+   `ffn_hc_up/down`, `output_hc_*`, `mtp.*_hc_*`): "takes 2 planes ... and no op reads it" -- libr4d's
+   hyper-connection ops do not resolve at hidden 256, so nothing reads those weights. A mini that serves on
+   the GPUs needs the REAL hidden size (2560): ~3 GiB, mostly the 248,320 x 2560 embedding and head.
+Resume: `MINI hidden = 2560` in mini_model.py, re-run `convert.sh` from `~/models/rad/test/mini-qwen4exp/`
+(GPU queue: `gpuq.sh`), then write the mini projector tool (not started).
