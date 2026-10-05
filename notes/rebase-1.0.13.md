@@ -62,13 +62,41 @@ Configure: "radiance 1.0.13: RADIANCE_SRC and .../bin/radiance agree"; headers i
 ctest -LE gpu **5/5**; arch_static **66 cases / 1,144,062 checks** (63 before + 3); adapter_core 5 / 115;
 purity gate green; pytest tests **209 passed / 33 skipped**.
 
-## Not done yet (GPU; waits for Stage E's 1.0.13 build image and 1.0.13 stock baselines)
+## G13 -- the engine gate on 1.0.13 (2026-10-05 22:05-22:13Z, boot 75e3e39b; evidence/rebase13/g13/session.log)
 
-One gpuq session: frozen home of this branch built in the 1.0.13 image (RK_BUILD_IMAGE /
-RK_RADIANCE_SRC = the 1.0.13 source), served on the 1.0.13 runtime image (RK_IMAGE -- scripts/common.sh
-still defaults to stilldeadcode/radiance:1.0.8); off ident vs the NEW 1.0.13 R3; int8 quality + speed
-KL rows vs the NEW 1.0.13 exact reference; rows will differ from 1.0.8's -- report the paired dNLL vs
-exact (R100's protocol).
+Frozen home **c64153f** (`rebase-1.0.13` HEAD) built in `radiance-build:1.0.13` (host suite 5/5 in the image),
+served on `stilldeadcode/radiance:1.0.13`, int8 folder `data/projector-qwen38fn-int8`, RADIANCE_KVA_FINAL=off.
+Predictions first (labbook seq 461-463), records 464-466, verdicts 467-469 -- all CONFIRMED.
+
+- **off ident = the 1.0.13 R3** (Stage E's evidence/r1013/ident-1013-boot1.txt; its three boots agree, and it is
+  identical to 1.0.8's R3).
+- The **1.0.13 exact KL reference (data/kld/ref-1.0.13) is byte-identical to 1.0.8's ref-stage0** -- rows.f32,
+  tokens.i32 and the 8.5 GiB logp.f16 -- so for these runs radiance 1.0.13 computes the model exactly as 1.0.8
+  does, and so does the plugin: **both int8 row files are byte-identical to 1.0.8's** (quality T2560 = Stage E's
+  ering run, speed T2048 = split G1). 67 approximate steps each; 25.4 MiB VRAM / ~637 MiB host-mapped a rank.
+- **R100 protocol, last 512 of each doc, paired vs the 1.0.13 exact reference (9 docs, bootstrap 95% CI):**
+
+| arm | dNLL vs exact | ppl ratio | KL | top-1 |
+|---|---|---|---|---|
+| int8 quality T2560 (the README's quality number) | **+0.00103 [-0.01348, +0.01529]** | 1.0010 | 0.0368 | 0.9128 |
+| int8 speed T2048 | +0.02423 [+0.00404, +0.04460] | 1.0245 | 0.0669 | 0.8937 |
+
+  Identical to 1.0.8's to the last digit, as the identical bytes require.
+
+## Merge-readiness of `rebase-1.0.13` (2026-10-05 ~22:15Z)
+
+- Branch from main f704bd9; main has not moved. Code: one adapter file ported (qwen4exp_moe.h) + static
+  cases; tooling: scripts/update_radiance.sh, frozen_home.sh RK_HOME_TAG, arch/qwen4exp.copies,
+  RADIANCE_VERSION, CI workflow; docs.
+- Host: ctest -LE gpu 5/5 (arch_static 66 / 1,144,062, adapter_core 5 / 115, purity, kernels), pytest
+  209 / 33 skipped -- locally and inside radiance-build:1.0.13. Engine: G13 above. Packages:
+  dist/radiance-kva-r1.0.13-c64153f (plugin 0.2.0, radiance 1.0.13, ABI 15.0.0, gfx1201).
+- **This branch serves radiance 1.0.13 only**: it does not compile against 1.0.8 (MoeFP8::ncls), and its
+  release guard forwards to the in-tree plugin on any other release. Merging it means every serving
+  deployment moves to 1.0.13's images (stilldeadcode/radiance:1.0.13; scripts/common.sh's RK_IMAGE default
+  still names 1.0.8 for the running sessions -- change it at merge).
+- Not run: TP4 on an engine (this box has two cards; the mod4 path is held statically), MTP drafting on
+  1.0.13 (the history-pass change is held statically; RADIANCE_KVA_FINAL is off by default), TTFT on 1.0.13.
 
 ## The next release costs one command: scripts/update_radiance.sh + CI (orchestrator ~22:10Z, Dylan)
 
