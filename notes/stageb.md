@@ -420,3 +420,57 @@ here), acceptance within the round-to-round spread of each arm.
   stock engine's logits for the SAME prompt differ by 1-2 logit units between "prefilled beside a 32K
   chunk" and "prefilled alone" (decoder 0: top token 1946 at 18.82 vs 198 at 19.03) -- a large class,
   stock's own, measured here, not assumed.
+
+### Session 8b/8c/8e -- R55 / R56 / R57 on the deployed configuration (projector in host memory, guard
+### 1,024 bulk rows), home `data/home-fd9e174`, interleaved, 6 reps reading 3-6 (16:00-17:10Z)
+
+| arm | length | C 0 / 1 / 4 / 8 prompt_ms | solo speedup | **R55 ratio C 1 / 4 / 8** | decoder gap median, KVA / exact (ms) C 1/4/8 | longest gap KVA / exact (ms) |
+|---|---|---|---|---|---|---|
+| exact | 16K | 9,696 / 10,127 / 10,222 / 10,336 | 1 | | 66 / 81 / 101 | 1,213 |
+| exact | 32K | 19,418 / 20,304 / 20,585 / 21,184 | 1 | | 76 / 90 / 130 | 1,219-1,226 |
+| **speed (A)** | 16K | 5,089 / 5,573 / 5,749 / 5,922 | 1.905 [1.870, 1.923] | **0.954 / 0.933 / 0.916** | 85 / 94 / 109 | 1,204-1,213 |
+| **speed (A)** | 32K | 8,534 / 9,674 / 10,046 / 10,274 | 2.275 [2.240, 2.292] | **0.922 / 0.901 / 0.906** | 100 / 110 / 113 | 1,197-1,204 |
+| quality | 16K (8c; 32K stalled, below) | 7,895 / 8,473 / 8,601 / 8,996 | 1.228 | 0.973 / 0.968 / 0.936 | 102 / 109 / 127 | -- |
+
+Per step (step_times.py), speed beside decoders: big chunks 620-644 ms (16K) and 524-547 ms (32K) vs
+533-636 ms lean solo -- the decoders path costs the long prompt almost nothing; stock's big chunk is
+1,202-1,214 ms. The 64-row remainders now run the stock step (guard): 76-96 ms on this ON server vs
+64-117 ms on the stock server.
+
+- **R55 GREEN for speed (A) and quality** on the deployed configuration (every cell >= 0.90; speed 32K
+  C = 4 is 0.901). Prediction HB-R55-speedA: ratio confirmed (>= 0.9); big-chunk cost confirmed (predicted
+  530-570 ms at 32K: 524-547).
+- **R56: longest gap and p90 GREEN, median RED.** Decoders' longest stall <= stock's in every cell (speed:
+  1,197-1,213 vs 1,213-1,226 ms) and their p90 is less than half of stock's (484-570 vs ~1,210 ms); but
+  their MEDIAN gap is 8-31% above stock's in 5 of 6 speed cells (32K C=8: 0.87) and 26-54% for quality.
+  The median sits on the 64-row remainder steps, which run the STOCK step on an ON server with the
+  projector in host memory, and those cost more than on the stock server (also visible before the
+  prefill: session 4's decode-only C = 8 15.4 vs 14.2 ms, +87% while warming). That is Stage E's
+  decode-cost finding on host placement, not the mixed-step path; R56's median goes green only with E's
+  fix. With the guard, the 2.2-3.5x of session 2c is gone (median now 1.05-1.54x).
+- **R57 GREEN** with the guard (`conc_steps.py --min-bulk-rows 1024`: every expected step logged or
+  replayed, none unexpected; the guard's stock remainders are expected stock).
+- **Open: a stall under load, cause unknown.** Twice at 32K with C = 8 (speed 8b at rep 1; quality 8c at
+  rep 0), the eight new streaming decoders did not reach 16 tokens within 120 s right after a 32K C = 4
+  rep; the speed rerun (8e) completed every rep. Kernel log clean both times. The server logs were
+  removed with the containers; conc.py now prints the decoders' errors and the running/waiting counts on
+  this failure (000c6c2) and sessions follow the server log (`docker logs -f`), so the next occurrence
+  leaves evidence. Seen in two modes, so not tied to the decoders path.
+- **Not run (pace change, 17:20Z):** R60 on the decoders path (speculating decoders now take it in speed
+  mode; static R53'/n_spec 3 shapes green; the session `sessions/s8d.sh` is written); quality 32K
+  interleaved on host placement.
+
+## 5. Final row table (stage-b @ merge 2899f91; plugin code at fd9e174 = frozen home `data/home-fd9e174`)
+
+| row | state | evidence |
+|---|---|---|
+| R53′ | **green** static: 16 mixed shapes + decoders path (TP1/TP2, D 1/4, n_spec 0/3), 54 cases; mutants B1-B16, K1-K2, G1-G5, D1-D12 all caught | §2, §4 |
+| R54 | **green**: masked path (quality; speed before A) byte-identical to off, 20/20 + 20/20; MASK=all control diverges; speed (A): gate 1 below stock's own floor (mean KL 0.0005-0.0029 vs 0.023-0.74), quality byte-identical | sessions 1, 8a |
+| R61 | **green** (masked path): 62/62 mixed steps decoder slots byte-identical, both modes; the decoders path is gate-1-checked instead (bytes may move by design) | session 1 |
+| R57 | **green** (C 0/1/4/8, both modes, guard-aware) | sessions 2, 8e |
+| R58′ | **green**: both tails at stock's two-prefill floor (2,048), better at 8,192; 31 Pn-2 masks, 0 earlier rows approximated | sessions 3, 3b |
+| R55 | **green** on host placement: speed (A) 0.901-0.954, quality 0.936-0.973 (16K) / 0.919-0.967 (vram, both lengths, session 5) | sessions 5, 8 |
+| R56 | **partial**: longest gap and p90 <= stock; median +5-54% above stock on host placement = E's ON-server stock-step cost | sessions 2c, 8 |
+| R60 | **green** on the masked path (texts identical, acceptance 0.6312 vs 0.6301); **not run** on the decoders path | sessions 4, 5 |
+| R6/R7 | **green** at 58ac8d4 and fd9e174 (off ident = R3) | sessions 1, 7a |
+| R56 host guard | built (185e31b), median gap 2.2-3.5x -> 1.05-1.54x stock | session 8 |
