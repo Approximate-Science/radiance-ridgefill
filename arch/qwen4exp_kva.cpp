@@ -71,7 +71,8 @@ static int declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* c
     k = Kva{};
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[ctx->rank];
     if (m.layers.empty()) return RAD_E_STATE;
-    RAD_ARCH_TRY(read_config(meta, &k.cfg));
+    const KvaAdapter a = adapter_of(m);
+    RAD_ARCH_TRY(read_config(meta, &k.cfg, a.min_tail, a.default_tail));
     note_meta_mode(k.cfg, ctx);
     for (auto [name, dir] : { std::pair<const char*, std::string*>{"RADIANCE_KVA_DUMP", &k.dump_dir},
                               {"RADIANCE_KVA_CAPTURE", &k.capture_dir},

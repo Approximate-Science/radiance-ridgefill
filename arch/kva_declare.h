@@ -180,10 +180,10 @@ static int check_mode(const Kva& k, const qwen4exp_fp8::Model& m) {
                      (long long)max_tok, (long long)G);
         return RAD_E_UNSUPPORTED;
     }
-    if (c.tail < kMinTail) {
+    if (c.tail < c.min_tail) {
         std::fprintf(stderr, "radiance: qwen4exp_kva: kva.tail is %lld tokens; the shortest exact "
                              "tail this method was measured at is %lld\n",
-                     (long long)c.tail, (long long)kMinTail);
+                     (long long)c.tail, (long long)c.min_tail);
         return RAD_E_INVAL;
     }
     return RAD_OK;

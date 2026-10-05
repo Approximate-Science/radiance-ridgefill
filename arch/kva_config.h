@@ -111,15 +111,18 @@ static const char* const kStraddleNames[] = { "split", "end" };
 /* RADIANCE_KVA_MIN_BULK_ROWS's default with the projector in host memory (the doc block above). */
 constexpr int64_t kHostMinBulkRows = 1024;
 
-/* The shortest exact tail the method was ever run at (tcc's MIN_TAIL, KVA-FACTS §5). */
-constexpr int64_t kMinTail = 512;
+/* The shortest exact tail the method was ever run at (tcc's MIN_TAIL, KVA-FACTS §5) and the tail it was
+ * measured at. Both are fit facts of a model family, so the adapter supplies them (KvaAdapter
+ * min_tail/default_tail); these are only read_config's defaults for a caller with no adapter. */
+constexpr int64_t kMinTail = 512, kDefaultTail = 2048;
 
 struct Config {
     int         mode        = MODE_OFF;
     /* T: the method's measured exact tail (PLAN D9; tcc's DYLUHN_KVA_TAIL default, KVA-FACTS §5) --
      * an operating choice, not a model or machine number. Changing it is Dylan's call (HANDOVER
      * §2.4.5); kva.tail / RADIANCE_KVA_TAIL override it. */
-    int64_t     tail        = 2048;
+    int64_t     tail        = kDefaultTail;
+    int64_t     min_tail    = kMinTail;    /* the adapter's floor under `tail`, refused below (check_mode) */
     double      alpha       = 1.0;
     int         rowsel      = ROWSEL_CLASS;
     double      share       = 0.25;
@@ -251,8 +254,11 @@ inline int read_switches(Config* c) {
     return RAD_OK;
 }
 
-inline int read_config(const RadModelMeta* meta, Config* c) {
+inline int read_config(const RadModelMeta* meta, Config* c, int64_t min_tail = kMinTail,
+                       int64_t default_tail = kDefaultTail) {
     *c = Config{};
+    c->tail = default_tail;
+    c->min_tail = min_tail;
     RAD_ARCH_TRY(read_choice("RADIANCE_KVA", { "off", "plumb", "speed", "quality" },
                              "off|plumb|speed|quality", &c->mode));
     c->meta_mode = rad_meta_gets(meta, "kva.mode", nullptr);
