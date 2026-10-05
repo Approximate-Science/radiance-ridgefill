@@ -408,3 +408,14 @@ Settle from /health, settled 2K / 8K, ratio to the same round's stock (exact-a 1
   a split GEMM a layer; the stream codes (20 MiB) are what replaced h_S (40 MiB) and the masked path needs them (b_h's
   bulk rows are rewritten by the in-tree layer there). Arena aliasing (d) is engine-side (§14).
 - ON TTFT int8 one slot (quality T2048, median of 7): a 16K 0.821x, 32K 0.583x; b: see below.
+- Round b: ON int8 16K **0.825x**, 32K **0.583x** (a: 0.821x / 0.583x). Copy profile, one slot, int8 (`p-int8`, one 16K
+  prefill, 336 copies): rank 0 0.50 ms, rank 1 4.53 ms a copy (two slots in S3: 0.49 / 3.94 ms; a profiled run
+  synchronises every op, so these are each copy alone); the h_S copy is gone with int8.
+
+### THE DOCUMENTED RESIDUAL (Dylan, 2026-10-05 ~20:55Z: "1% is fine" -- ACCEPTED; no half-layer slot)
+Requests that do not use KVA, int8 folder: **+0.9% (2K) / +1.2% (8K) settled prefill** against stock started in the
+same lock session, matched settled state (settle.py from /health, round a), because the plugin's ~67 MiB of VRAM a
+rank (the ring's one 25.4 MiB slot + 41 MiB of activation buffers) displaces ~63 of ~16,850 resident expert slots. Decode
+is unchanged (R77). The intermittent extra 29.3 MiB the engine sometimes reads as "already held" at startup is not
+the plugin's (a stock boot shows it too) and cannot be removed plugin-side; a boot that reads it serves with ~26 fewer
+slots whatever the mode. README "What a request that does not use KVA pays" carries this paragraph's numbers.
