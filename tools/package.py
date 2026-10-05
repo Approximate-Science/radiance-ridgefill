@@ -10,9 +10,11 @@ Produces, under --out:
   radiance-kva-<version>/        architectures/qwen4exp_fp8.so, kernels/kva.so, README.md
                                  (this repo's), LICENSE (the repo's), VERSION.json, SHA256SUMS
   projector-qwen3.8-flash-next/  an exact copy of the projector folder (its kva.json hashes
-                                 verified BEFORE copying; a mismatch refuses by name) + SHA256SUMS
+                                 verified BEFORE copying; a mismatch refuses by name)
+                                 + LICENSE (the repo's) + SHA256SUMS
   kva-chat-template/             kva_template.py, the marker spec, a pre-merged template
-                                 (kva_template.py merge of --base-template), a README, SHA256SUMS
+                                 (kva_template.py merge of --base-template), a README,
+                                 LICENSE (the repo's), SHA256SUMS
   <each>.tar.gz                  a tarball of each directory, byte-deterministic (sorted names,
                                  fixed mtime/uid/gid, gzip mtime 0): two runs give identical bytes
   SHA256SUMS                     the three tarballs
@@ -391,18 +393,23 @@ def package(args: argparse.Namespace) -> int:
                                   gpu_targets, gpu_source, args.abi_version, abi_source))
     write_sums(plugin_dir)
 
-    # ---- projector-qwen3.8-flash-next/ : the exact folder, hashes already verified
+    # ---- projector-qwen3.8-flash-next/ : the exact folder, hashes already verified,
+    #      plus the repo's LICENSE (the loader only hashes the files kva.json lists;
+    #      an extra file beside them changes nothing on the load path)
     projector_dir.mkdir()
     for path in sorted(projector.iterdir()):
         copy_file(path, projector_dir / path.name)
+    copy_file(license_, projector_dir / "LICENSE")
     write_sums(projector_dir)
 
-    # ---- kva-chat-template/ : the tool, the spec, a pre-merged template, a README
+    # ---- kva-chat-template/ : the tool, the spec, a pre-merged template, a README,
+    #      and the repo's LICENSE (every package ships under the repo's terms)
     template_dir.mkdir()
     copy_file(template_tool, template_dir / "kva_template.py")
     copy_file(spec, template_dir / spec.name)
     merge_template(template_tool, spec, base, template_dir)
     write_text(template_dir / "README.md", TEMPLATE_README.format(spec_name=spec.name))
+    copy_file(license_, template_dir / "LICENSE")
     write_sums(template_dir)
 
     # ---- the tarballs (deterministic) and dist/SHA256SUMS over them
@@ -420,8 +427,10 @@ def package(args: argparse.Namespace) -> int:
     print(f"packaged {PLUGIN_NAME}-{args.version} (commit {args.commit}, radiance "
           f"{radiance_version}, gpu targets {gpu_targets or 'none recorded'}) into {out}")
     print(f"  {plugin_dir.name}/ ({ARCH_SO}, {KERNEL_SO}, README.md, LICENSE, VERSION.json)")
-    print(f"  {PROJECTOR_DIRNAME}/ ({len(list(projector_dir.iterdir()))} files, manifest verified)")
-    print(f"  {TEMPLATE_DIRNAME}/ (kva_template.py, {spec.name}, chat_template.jinja, README.md)")
+    print(f"  {PROJECTOR_DIRNAME}/ ({len(list(projector_dir.iterdir()))} files, manifest verified, "
+          "LICENSE added)")
+    print(f"  {TEMPLATE_DIRNAME}/ (kva_template.py, {spec.name}, chat_template.jinja, "
+          "README.md, LICENSE)")
     print(f"  3 deterministic tarballs + SHA256SUMS; {n_files} files total")
     return 0
 

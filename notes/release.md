@@ -33,19 +33,23 @@ to disambiguate or to record what a host-only build cannot carry.
 ```
 radiance-kva-<version>/        the plugin home + README.md + LICENSE + VERSION.json + SHA256SUMS
 projector-qwen3.8-flash-next/   the projector folder, hashes re-verified against its kva.json
-                               BEFORE copying (a mismatch refuses naming the file) + SHA256SUMS
+                               BEFORE copying (a mismatch refuses naming the file)
+                               + LICENSE (the repo's) + SHA256SUMS
 kva-chat-template/             kva_template.py + the spec + a pre-merged chat_template.jinja
                                (built by `kva_template.py merge` + re-verified by `check`)
-                               + a README (merge your own; --override-chat-template) + SHA256SUMS
+                               + a README (merge your own; --override-chat-template)
+                               + LICENSE (the repo's) + SHA256SUMS
 <each>.tar.gz                  deterministic tarballs (sorted names, fixed mtime/uid/gid,
                                gzip mtime 0): two runs over the same inputs give identical bytes
 SHA256SUMS                     the three tarballs
 ```
 
 Every file is mode 0644; every refusal names the missing thing; nothing is written outside
-`--out` (and `--out` must not overlap an input). Two things to fix **before** the first real
-release: **the repo has no LICENSE file yet** — packaging refuses until one is added — and
-the release commit must be merged (not a worktree) so the recorded commit is fetchable.
+`--out` (and `--out` must not overlap an input). Every package now carries the repo's
+Apache-2.0 LICENSE (which landed in 7d52e70, after this note first said packaging refused to
+run without one); the projector loader only hashes the files kva.json lists, so the extra
+file changes nothing on the load path. One thing still to fix **before** the first real
+release: the release commit must be merged (not a worktree) so the recorded commit is fetchable.
 
 ## Running the gate
 
