@@ -320,6 +320,66 @@ Schema: params `M` (range n_seq, issued at 1) `n_head` `sd0` `sd1`; operands `st
   steps untouched, the state copy's operands and position, refusals. Two mutants (read `x` after the block; copy the
   state after the apply) each caught.
 
+## Quality-speed — why quality mode is slower than exact, and what would fix it (read-only, 2026-10-04)
+
+Inputs: notes/gates.md (R40 table, h2d bytes, per-layer stalls, Q6 placement). Nothing below was run; estimates are
+arithmetic on those numbers.
+
+**(1) The staging decision is the core's, per STEP, not per MoE pass.** `PrefillStager::begin_pass`
+(radiance `core/place/stager.cpp:74-82`) arms when the step runs at the arena's full plan (`set_full_arena(level == 0)`,
+`core/engine.cpp:1221`) and `batch->n_tok >= min_rows`, where `min_rows` = the largest smaller arena level + 1 = 1025
+(`core/engine_bringup.cpp:2559-2575`). Once armed, `Ctx::issue` (`core/runtime/issue.cpp:505-525`) calls
+`before_op` around every op: at a routed layer's FIRST expert op (its `moe_gemm_q` gate_up; first/last ops come from
+the expert units' declared uses, `stager.cpp:21-55`) it waits on that layer's copies and starts copying the NEXT layer's
+whole non-resident set (`stager.cpp:141-169`), regardless of the rows that op is issued at or which experts are routed.
+MoeFP8 has no say: it just issues `pass()`. One layer's non-resident set is ~213 MiB a rank here (Q6: 2 × 213 = 426
+MiB staging buffers); rank 1's Gen4 x4 link makes each staged layer ~23–26 ms whatever its rows (GATES: early layers at
+2,048 rows 25.6 ms, quality's late layers at 512 rows 22.9 ms).
+
+**(2) Ways to make the 24 compacted late passes read only routed experts.**
+
+| option | boundary | cost / risk |
+|---|---|---|
+| A. any batch/issue-level knob in the plugin | none exists | the arming reads the step's `n_tok`; the plugin cannot change it, nor which op is a layer's "first" |
+| B. turn the stager off for the whole program from the plugin (declare one extra op over a routed layer's experts after the next layer's ops; `stager.cpp:31-41` then logs "staging is off") | plugin-only, hack | every layer (early 24 at 2,048 rows, the exact tail) then zero-copies its routed experts on the critical path instead of an overlapped copy: same bytes, lost overlap (doc: gate_up 1.53 → 4.34 ms at 13 % pooled); applies to all modes it is declared in; relies on a warning path. Not recommended without a measured A/B |
+| C. **core: key staging on the issue's rows** -- pass `n` into `OpStager::before_op` (internal interface `core/runtime/stager.h`, no ABI change) and do not start the next layer's copy when this layer's first expert op is issued below `min_rows` | upstream proposal (HANDOVER §2.4.3, Dylan) | ~15 lines in stager.cpp/issue.cpp; exact and speed unchanged (their layers' first ops are at n_tok); one wasted copy a chunk (layer 24, started at layer 23); recommended |
+| D. ABI hint (`rad_stage_skip(c, layer)` or a RadBatch field) | ABI bump | C does the same without one |
+| E. fetch only the routed experts inside the plugin (tcc's engine did) | impossible as a plugin | expert pointers/residency are the core's (WTAB resolved at issue) |
+
+`rad_route_report` only feeds the heat engine (between steps); it does not drive the per-step staging.
+
+**(3) Stopping the padding rows from routing.** With k ≈ 127 rows selected of cap 512, ~385 rows are zero; their router
+logits are 0, so top-10 picks experts 0–9 by index. In-tree ops already drop a slot cleanly: `moe_scatter` places a slot
+only if its id is in `[expert_base, expert_base + n_expert)` (`libr4d/r4d_moe.hip:476-479` histogram, `:548-551`,
+`:595-599` place), pads the sorted tail with −1 (`:607-611`), and `moe_gather` gives an unclaimed slot zero contribution
+(`:1584-1585`, "how a dropped slot is expressed"). So: (a) a new kva.so op `kva_drop_rows(rows_idx [cap], ids:inout
+[cap, k])` setting `ids[i,:] = −1` where `rows_idx[i] < 0`, issued between `router_topk` and `moe_scatter` -- the cap
+pass is past the fused `router_topk_scatter` bound (rows·k = 5,120 > 1,024, OPS.md:522), so the unfused pair runs and
+the insert point exists -- which needs the plugin to hand-issue the compacted pass (a copy of `MoeFP8::pass`'s served
+branch, `rad_block_moe_fp8.h:1341-1490`, static-testable against it). Dropped rows then cost no GEMM rows, no expert
+reads and no route counts. (b) Config only: a smaller cap -- k was 78–144 on the quick docs' first chunks (R33);
+`kva.rowsel.cap=256` (or a `RADIANCE_KVA_CAP` env, three lines) halves the padding and truncates only when k > 256
+(never seen). D12, Dylan's call. Direct TTFT effect small: the padding adds at most experts 0–9 (2 % of a layer) and
+~385 rows of compute (≤ 1 ms a layer); the larger effect is keeping the heat engine's counts honest (padding makes
+experts 0–9 of every late layer look hottest) -- not measured.
+
+**(4) Estimated TTFT** (per-chunk costs from GATES: exact ≈ 1,250 ms/chunk at 16K and 1,237 at 32K; quality's
+approximate chunk ≈ (10,972 − 1,250)/7 = 1,389 ms at 16K, (20,687 − 1,237)/15 = 1,297 at 32K; late quality layer 22.9 ms
+of which MoE compute at 512 rows ~2 ms). Routed-only reads (option C) ≈ (~155/512 experts) × 213 MiB ≈ 64 MiB a late
+layer at rank 1's ~9 GB/s ≈ 7 ms, + ~2 ms compute → ~9 ms instead of 22.9:
+
+| fix | late layer | 16K TTFT | 32K TTFT |
+|---|---|---|---|
+| as built (measured) | 22.9 ms | 10,972 (0.91x) | 20,687 (0.96x) |
+| C (no staging for compacted passes) | ~9 ms | ~8,600 (≈1.16x) | ~15,650 (≈1.26x) |
+| C + padding dropped (a) | ~8.5 ms | ~8,500 (≈1.18x) | ~15,450 (≈1.28x) |
+| ceiling: late experts all resident (compute only) | ~2 ms | ~7,450 (≈1.34x) | ~13,150 (≈1.50x) |
+| + projector halved (int8 or row-shard + all_gather, Stage 8 arms): 26 MiB less staging per staged layer | −~1.5 ms on each staged layer | a further ~2–3 % in every mode | |
+
+9,216 is not estimated: its quality run is noisy (6,588–7,470 ms) and 3 of its 4.5 chunks are approximate. Deciding
+measurement before any fix: one `--profile-ops` quality step split into block time vs MoE wall per late layer (R36's
+data), and an ablation with staging off for the late layers once option C exists.
+
 ## 8. Open / for other lanes
 
 - SIDECAR/orchestrator: add `-e RADIANCE_KVA_DECLARE=all` to every rad-convert run with the KVA home (§4).
