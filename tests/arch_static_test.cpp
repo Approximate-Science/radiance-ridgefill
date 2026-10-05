@@ -1736,6 +1736,16 @@ TEST(the_release_scan_counts_nul_delimited_copies) {
     CHECK_EQ(qwen4exp_kva::count_version((dir.path / "absent").c_str(), "1.0.8"), -1);
 }
 
+/* The log names the releases the engine does carry: every NUL-delimited d.d.d string, once each. */
+TEST(the_found_releases_are_listed) {
+    TempDir dir;
+    REQUIRE(!dir.path.empty());
+    const std::string z(1, '\0'), p = (dir.path / "e").string();
+    std::ofstream(p, std::ios::binary) << "x" + z + "1.0.9" + z + "0.46.1" + z + "1.0" + z + "v1.2.3" + z +
+                                          "1..2" + z + "1.0.9" + z;
+    CHECK_EQ(qwen4exp_kva::releases_in(p.c_str()), std::string("1.0.9, 0.46.1"));
+}
+
 /* FIPS 180-4's own vectors, so a logged sha256 names the binary it claims to. */
 TEST(sha256_matches_the_fips_vectors) {
     TempDir dir;

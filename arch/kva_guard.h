@@ -22,6 +22,7 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -51,6 +52,31 @@ inline int count_version(const char* path, const char* version) {
     }
     std::fclose(f);
     return hits;
+}
+
+/* Every NUL-delimited "d.d.d" string in the file, comma-separated -- the releases it carries, for the
+ * log (the same strings CMake's release check reads, CMakeLists.txt). */
+inline std::string releases_in(const char* path) {
+    FILE* f = std::fopen(path, "rb");
+    if (!f) return "unreadable";
+    std::string out, run;
+    auto flush = [&] {
+        int dots = 0;
+        bool ok = !run.empty() && std::isdigit((unsigned char)run.front()) && std::isdigit((unsigned char)run.back());
+        for (size_t i = 0; ok && i < run.size(); ++i) {
+            if (run[i] == '.') ok = ++dots <= 2 && run[i - 1] != '.';
+            else ok = std::isdigit((unsigned char)run[i]) != 0;
+        }
+        if (ok && dots == 2 && out.find(run) == std::string::npos) out += (out.empty() ? "" : ", ") + run;
+        run.clear();
+    };
+    for (int c; (c = std::fgetc(f)) != EOF;) {
+        if (c == 0) flush();
+        else if (run.size() < 16) run += (char)c;
+        else run = "x";
+    }
+    std::fclose(f);
+    return out.empty() ? "none" : out;
 }
 
 /* ---------------------------------------------------------------- SHA-256 (FIPS 180-4) */
@@ -176,20 +202,22 @@ inline int open_guard() {
     Dl_info me{};
     const std::string self = dladdr((void*)&open_guard, &me) && me.dli_fname
                                  ? real_path(me.dli_fname) : std::string();
-    const std::string sha = sha256_file(engine.c_str());
+    const std::string sha = sha256_file(engine.c_str()), found = releases_in(engine.c_str());
     const std::string shadow = find_shadowed(self);
     if (!shadow.empty() && take_forward(shadow)) {
         std::fprintf(stderr, "radiance: qwen4exp_kva: WARNING: built against radiance %s, and the "
-                             "engine %s (sha256 %s) carries that release string %d times, not once; "
+                             "engine %s (sha256 %s) carries release string(s) '%s' (%s %d times); "
                              "forwarding to the engine's own architecture %s, KVA off\n",
-                     KVA_RADIANCE_VERSION, engine.c_str(), sha.c_str(), hits, shadow.c_str());
+                     KVA_RADIANCE_VERSION, engine.c_str(), sha.c_str(), found.c_str(),
+                     KVA_RADIANCE_VERSION, hits, shadow.c_str());
         return RAD_OK;
     }
     std::fprintf(stderr, "radiance: qwen4exp_kva: built against radiance %s, and the engine %s "
-                         "(sha256 %s) carries that release string %d times, not once; no in-tree "
+                         "(sha256 %s) carries release string(s) '%s' (%s %d times); no in-tree "
                          "architectures/qwen4exp_fp8.so on $RADIANCE_HOME to forward to, so this "
                          "plugin declines (a home given only as --radiance-home is not visible to "
-                         "it)\n", KVA_RADIANCE_VERSION, engine.c_str(), sha.c_str(), hits);
+                         "it)\n", KVA_RADIANCE_VERSION, engine.c_str(), sha.c_str(), found.c_str(),
+                 KVA_RADIANCE_VERSION, hits);
     return RAD_E_UNSUPPORTED;
 }
 
