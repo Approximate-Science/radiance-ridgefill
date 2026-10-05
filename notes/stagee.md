@@ -117,8 +117,14 @@ boot), window 2 = settled. Labbook HE-dec-vram-slots / HE-dec-host-alloc registe
   host+ring vs stock +3.4% (rank 1) / +5% (rank 0) spread uniformly over the dense ops (gemm_nt_q, gemm_nt,
   hc_read, all-reduces), routed-expert GEMMs equal (1,737 vs 1,743 ms) -- no single op.
 - Warm-up cost after start: every arm, stock included, decodes at 12-24 ms/step in its first ~6 s window.
-- Queued (detached, `run_diag2.sh` → `ediag2.sh`, one lock): stock / host+ring / host RING=0 / host+ring / stock,
-  three windows each, to replicate the ring's steady-state cost before any fix.
+- **ediag2 (15:16-15:29Z, 5 interleaved boots, 3 windows; window 3 = settled), C=1 / C=8:** stock 10.67 / 14.18 and
+  10.67 / 14.19; host + ring **10.65 / 14.19** and **10.67 / 14.19**; host RING=0 10.63 / 14.19. **Host placement
+  settles to stock**: ediag's +5.6% / +8.0% (one boot, window 2) was a LONGER WARM-UP TAIL at C=8 (window 2: 16.4
+  vs 14.2), not a steady-state cost. Labbook `stageE-dec-settled-c1` (median 10.68, range 10.63-10.71, n 10);
+  HE-dec-vram-slots and HE-dec-host-alloc both REFUTED.
+- **R77 conclusion: steady-state decode on an ON server = stock within ±0.4% for both placements; warm-up after start
+  is 12-24 ms/step in the first ~6 s window for every server (stock included), host's C=8 tail one window longer.**
+  No plugin fix is needed for decode. (C = 32: e1/d-* servers, run in ediag/ediag2.)
 
 ## 5. The int8 device leg (R79's oracle) -- green after a bound fix
 First run (e2/try1/kernel-gpu.log): 2 of 5 runs over a 2-bf16-ulp bound (worst 1.47x) on outputs the 80 f32 block
@@ -131,7 +137,7 @@ libref's gemm_nt_q on canonical planes, 0 of 5.57 M outputs over, worst 0.80 of 
 | row | state |
 |---|---|
 | R80 | **measured** (bf16 vram, host ring; §3): slab −6.6% / −1.0%, held 1.50 GiB / 434 MiB a card; `h_S`/`x_P` inside the arena (+~100 MiB vs stock); speed+final SKIPPED (no `final` map until Stage D). int8 arms not run yet (e3) |
-| R77 | **re-measuring**: steady-state decode = stock for vram; host ring +5.6% / +8.0% (replication queued); C=32 servers (d-*) running in ediag now |
+| R77 | **green at C = 1, 8 (steady state = stock ±0.4%, both placements; §4)**; warm-up stated; C=32 servers in ediag2 |
 | R78 | **red as measured**: 1,024 tokens vram 0.88x; host 1.05x; plus the ON-server prefill penalty on stock passes (~0.85x 2K-8K, both placements) -- cause open (§3) |
 | R79 | int8 BUILT + static (52 cases, 9/9 mutants) + device leg green; KL arms (e2) and VRAM/TTFT arms (e3) not run |
 | R85, R86, R88, R89, R90 | scripts ready (e4, e5), not run |
