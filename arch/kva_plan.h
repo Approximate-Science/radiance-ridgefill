@@ -19,7 +19,10 @@
  *             0.86x), and a pass with many exact rows streams every expert over the link (A.1
  *             profile: a 1,024-row tail's late MoE 453 ms against 86 ms staged). So:
  *   stock     whatever the mode, when no cheaper plan exists -- an opted-in request is never served
- *             slower than stock, and never less exact than its mode promises.
+ *             slower than stock, and never less exact than its mode promises. That includes a pass
+ *             with fewer bulk rows than `min_bulk_rows`: an approximate pass has a fixed cost (with
+ *             a host-placed projector, streaming every late layer's map), which a 64-row checkpoint
+ *             remainder cannot repay -- and the decoders riding that step pay it too (Stage B).
  * plumb (the oracle mode) always takes the masked path.
  */
 #ifndef QWEN4EXP_KVA_PLAN_H
@@ -51,6 +54,8 @@ struct PlanConfig {
     int64_t tile = 64;               /* G: the delta net's chunk */
     int64_t force_split = 0, shift_b = 0;
     int64_t stage_rows = INT64_MAX;  /* exact rows a masked pass may carry and still stream: any */
+    int64_t min_bulk_rows = 0;       /* fewer bulk rows than this: the stock step (a pass's fixed
+                                      * cost, e.g. a host-placed projector's stream, outweighs them) */
     bool    force_stream = false;
     bool    mask_step = false;       /* debug: every row before b approximated (R54's control) */
 };
@@ -81,6 +86,7 @@ inline Pass plan_pass(const PlanIn& in, const PlanConfig& c) {
     const int64_t b = bulk_end(in, c);
     const int64_t s_lb = std::max(in.n_tok_decode, in.n_tok - in.q_prefill);
     if (b <= s_lb) return p;
+    if (in.mode != PLAN_PLUMB && b - s_lb < c.min_bulk_rows) return p;
     p.b = b;
     p.s_lb = c.mask_step ? 0 : s_lb;   /* the projector then covers every row the mask can mark */
     p.split = b < in.n_tok;

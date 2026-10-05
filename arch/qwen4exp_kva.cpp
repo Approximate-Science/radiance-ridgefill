@@ -126,6 +126,7 @@ static Pass derive(const Kva& k, const RadBatch* batch) {
     pc.force_split = c.force_split;
     pc.shift_b = c.shift_b;
     pc.stage_rows = c.stage_rows;
+    pc.min_bulk_rows = c.min_bulk_rows;
     pc.force_stream = c.force_stream;
     pc.mask_step = c.mask_step;
     return plan_pass(in, pc);

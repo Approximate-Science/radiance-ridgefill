@@ -1008,6 +1008,40 @@ TEST(the_planner_straddles_only_in_speed) {
     CHECK_EQ(plan_pass(in, pc).path, PATH_STRADDLE);
 }
 
+/* R56 (host placement) -- A PASS APPROXIMATES ONLY WITH ENOUGH BULK ROWS: a decoder-shared prompt's
+ * 64-row checkpoint remainder runs the stock step when the projector lives in host memory (every
+ * approximate pass streams the whole projector), the 1,984-row chunk beside it still approximates;
+ * the bound is inclusive and is the bulk superset b - s_lb, a keyed number. Plumb (the oracle) is
+ * never held back. Defaults: 0 with the projector in VRAM, 1,024 in host memory, the switch over both. */
+TEST(a_host_placed_projector_approximates_only_passes_with_enough_bulk_rows) {
+    using namespace qwen4exp_kva;
+    PlanIn in;
+    in.eligible = in.stream_ok = true;
+    in.n_seq = 2; in.n_seq_decode = 1; in.n_tok_decode = 1; in.n_ahead = 2048;
+    PlanConfig pc;
+    pc.min_bulk_rows = 1024;
+    struct Case { int mode; int64_t bulk; int path; };
+    for (const Case& c : {Case{PLAN_QUALITY, 64, PATH_STOCK}, Case{PLAN_SPEED, 64, PATH_STOCK},
+                          Case{PLAN_QUALITY, 1023, PATH_STOCK}, Case{PLAN_QUALITY, 1024, PATH_MASKED},
+                          Case{PLAN_SPEED, 1984, PATH_MASKED}, Case{PLAN_PLUMB, 64, PATH_MASKED}}) {
+        in.mode = c.mode;
+        in.n_tok = 1 + c.bulk; in.q_prefill = c.bulk;
+        CHECK_EQ(plan_pass(in, pc).path, c.path);
+    }
+    for (auto [place, want] : {std::pair<const char*, int64_t>{"vram", 0}, {"host", 1024}}) {
+        Env e({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_PROJ_PLACE", place}});
+        Config cfg;
+        RadModelMeta meta = flash_next_meta();
+        REQUIRE_EQ(read_config(&meta, &cfg), RAD_OK);
+        CHECK_EQ(cfg.min_bulk_rows, want);
+    }
+    Env e({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_PROJ_PLACE", "host"}, {"RADIANCE_KVA_MIN_BULK_ROWS", "0"}});
+    Config cfg;
+    RadModelMeta meta = flash_next_meta();
+    REQUIRE_EQ(read_config(&meta, &cfg), RAD_OK);
+    CHECK_EQ(cfg.min_bulk_rows, 0);
+}
+
 /* R73 -- KL MODE IS EXACT UNLESS THE SWITCH IS SET: a declare that sizes logits for every prompt
  * row (max_out_rows > 0) serves every pass stock, because bulk rows' logits are not the model's;
  * RADIANCE_KVA_SCORE_BULK=1 says the caller scores the exact tail only, and the pass approximates. */
