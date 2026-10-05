@@ -37,7 +37,7 @@ endif()
 
 set(KVA_HIP_SOURCES "")
 if(KVA_HIP)
-  set(KVA_HIP_SOURCES mask.hip rho.hip state_correct.hip select.hip)
+  set(KVA_HIP_SOURCES mask.hip rho.hip state_correct.hip select.hip hazard.hip)
 endif()
 
 rad_add_plugin(kva kernels SOURCES rows.cpp host_ref.cpp forward.cpp HIP_SOURCES ${KVA_HIP_SOURCES})

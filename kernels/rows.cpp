@@ -68,6 +68,9 @@ static const RadParamSpec pGemm[] = { P_INT("M"), P_INT("N"), P_INT("K"), P_STR(
 static const RadOperandSpec oGemm[] = { OPD("a"), OPD("b"), OPD("bias"), OPD_O("res"), OUT("y") };
 
 static const RadParamSpec pStateRead[] = { P_INT("M"), P_INT("n_head"), P_INT("sd0"), P_INT("sd1") };
+static const RadParamSpec pHazard[] = { P_INT("M") };
+static const RadOperandSpec oHazard[] = { OPD("cu_last"), OPD("positions"), OPD_O("bounds"), OPD_O("span"),
+                                          INOUT("meta"), OPD("meta_idx"), INOUT("count") };
 static const RadOperandSpec oStateRead[] = { OPD("state"), OPD("state_idx"), OUT("out") };
 
 static const RadOpSchema kSchemas[] = {
@@ -132,6 +135,15 @@ static const RadOpSchema kSchemas[] = {
   "outside the pool reads zeros. state [n_states, n_head, sd0, sd1] f32 at the strides the "
   "operand carries (linear slots may be padded); out f32, written densely from its first element "
   "as [n_seq, n_head, sd0, sd1] (any contiguous operand at least that big)." },
+{ "kva_hazard", ARR(pHazard), ARR(oHazard),
+  "Prefix-cache branch hazard rows (KVA, DD-A's instrument). One sequence, the step's LAST: s, e from "
+  "cu_last [2]; P = positions[s]; span = the optional span operand's extent (T - n_ahead; absent = 0). "
+  "meta [n_states, ..., 2] f32, the sequence's slot = meta_idx[0] (outside the pool: nothing): m0 = "
+  "last approximated position + 1 (0 = none), m1 = positions counted below. If span > 0 and e > s: "
+  "before = span - (e - s); lo = max(P - before, m1), hi = min(P, m0); if before > 0 and hi > lo: "
+  "count[0] += hi - lo and m1 = hi. Then, with the optional bounds [>=2] {s, b'} and b' > s: m0 = "
+  "positions[b' - 1] + 1. i32 cu_last / positions / meta_idx / bounds, f32 meta / count. Refused "
+  "(host row): s < 0 or s > e; the device row counts nothing instead." },
 { "kva_gemm_nt_bias", ARR(pGemm), ARR(oGemm),
   "gemm_nt_bias (docs/OPS.md) with the weight `b` [N, K] and `bias` [N] as IN operands -- memory "
   "the caller owns, e.g. a projector loaded from a folder rather than the container: y = res + "
@@ -261,6 +273,18 @@ static int shape_state_read(const RadParam* p, int n_p, int operand, RadOpdDesc*
     });
 }
 
+static int shape_hazard(const RadParam*, int, int operand, RadOpdDesc* out) {
+    return pick(out, operand, {
+        opd_idx({ 2 }, 64, RAD_OPD_F_IDX_CU),
+        opd_idx({ 64 }, 1 << 20, RAD_OPD_F_IDX_UNIQUE),
+        opd_idx({ 4 }, 64),
+        opd_idx({ 32 }, 4),
+        opd(RAD_F32, { 8, 1, 1, 2 }, RAD_FILL_SIGMOID),
+        opd_idx({ 1, 1 }, 8),
+        opd(RAD_F32, { 1 }, RAD_FILL_SIGMOID),
+    });
+}
+
 /* ================================================================== the row table */
 
 static const RadConstraint cMaskHost[] = { RAD_CIN("mode", "none class random all step") };
@@ -293,7 +317,13 @@ ROW("kva_state_correct_host", "kva_state_correct", "GDN state apply / undo, the 
 ROW_NC("kva_state_read_host", "kva_state_read", "GDN state slot copy-out, the oracle",
        "any slot strides", "f32 state / out, i32 slots", RAD_DOMAIN_HOST, kva_state_read_host,
        shape_state_read),
+ROW_NC("kva_hazard_host", "kva_hazard", "branch hazard count on the last sequence, the oracle",
+       "any slot strides", "i32 cu_last / positions / slots, f32 meta / count", RAD_DOMAIN_HOST,
+       kva_hazard_host, shape_hazard),
 #ifdef KVA_HAVE_HIP
+ROW_NC("kva_hazard_device", "kva_hazard", "one thread",
+       "any slot strides", "i32 cu_last / positions / slots, f32 meta / count", RAD_DOMAIN_DEVICE,
+       kva_hazard_device, shape_hazard),
 ROW("kva_mask_device", "kva_mask", "last-sequence window mask in one workgroup, keys in LDS",
     "b up to the LDS key budget (KVA_MASK_MAX_ROWS), any n", "i32 cu_last / ids / mask / bounds, f32 score",
     RAD_DOMAIN_DEVICE, cMaskDevice, kva_mask_device, shape_mask),
