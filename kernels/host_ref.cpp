@@ -66,6 +66,7 @@ extern "C" int kva_mask_parse(const RadArgs* a, KvaMask* g) {
     const RadTensor* score = rad_arg_in(a, MK_SCORE);   /* optional: none / all never read it */
     const RadTensor* mask = rad_arg_in(a, MK_MASK);
     const RadTensor* bounds = rad_arg_in(a, MK_BOUNDS);
+    const RadTensor* zeros = rad_arg_in(a, MK_ZEROS);   /* optional */
     static const char* const modes[] = { "none", "class", "random", "all" };
     g->mode = parse_mode(rad_args_gets(a, "mode"), modes, 4);
     g->share = rad_args_getf_or(a, "share", NAN);
@@ -74,9 +75,11 @@ extern "C" int kva_mask_parse(const RadArgs* a, KvaMask* g) {
     if (!cu || !tok || !pos || !mask || !bounds || (ranked && !score) || g->mode < 0 ||
         !rad_args_geti(a, "seed", &seed) || !(g->share >= 0.0 && g->share <= 1.0)) return RAD_E_INVAL;
     if (cu->dtype != RAD_I32 || tok->dtype != RAD_I32 || pos->dtype != RAD_I32 ||
-        mask->dtype != RAD_I32 || bounds->dtype != RAD_I32 || (score && score->dtype != RAD_F32))
+        mask->dtype != RAD_I32 || bounds->dtype != RAD_I32 || (score && score->dtype != RAD_F32) ||
+        (zeros && zeros->dtype != RAD_I32))
         return RAD_E_DTYPE;
-    if (!dense(cu) || !dense(tok) || !dense(mask) || !dense(bounds) || (score && !dense(score)))
+    if (!dense(cu) || !dense(tok) || !dense(mask) || !dense(bounds) || (score && !dense(score)) ||
+        (zeros && !dense(zeros)))
         return RAD_E_STRIDE;
     g->b = rad_tensor_numel(tok);
     /* Positions: [b], or component-major [c, b] whose row 0 is the index (RadBatch::rope_pos's
@@ -92,6 +95,8 @@ extern "C" int kva_mask_parse(const RadArgs* a, KvaMask* g) {
     g->mask = (int32_t*)mask->data;
     g->n = rad_tensor_numel(mask);
     g->bounds = (int32_t*)bounds->data;
+    g->zeros = zeros ? (int32_t*)zeros->data : nullptr;
+    g->n_zeros = zeros ? rad_tensor_numel(zeros) : 0;
     g->seed = seed;
     return RAD_OK;
 }
@@ -316,6 +321,7 @@ extern "C" int kva_mask_host(const RadArgs* a, RadStream) {
     mask_window_host(g, w[0], w[1]);
     const int32_t bounds[4] = { (int32_t)w[0], (int32_t)w[1], (int32_t)w[1], (int32_t)w[2] };
     std::memcpy(g.bounds, bounds, sizeof bounds);
+    for (int64_t i = 0; i < g.n_zeros; ++i) g.zeros[i] = 0;
     return RAD_OK;
 }
 

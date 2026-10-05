@@ -411,9 +411,10 @@ struct MaskCall {
     const char* mode = "class";
     int32_t first_pos = 0;
     int64_t components = 1;
+    int64_t n_zeros = 0;   /* > 0: pass the optional `zeros` output, this many elements */
 };
 
-struct MaskOut { int rc = 0; std::vector<int32_t> mask, bounds; };
+struct MaskOut { int rc = 0; std::vector<int32_t> mask, bounds, zeros; };
 
 static MaskOut run_mask(const RadKernelInfo* row, const MaskCall& c) {
     const int64_t b = (int64_t)c.ids.size(), vocab = c.table ? (int64_t)c.table->size() : 1;
@@ -428,11 +429,15 @@ static MaskOut run_mask(const RadKernelInfo* row, const MaskCall& c) {
     for (int64_t i = 0; c.table && i < vocab; ++i) setf(score, i, (*c.table)[(size_t)i]);
     for (int64_t i = 0; i < c.n; ++i) seti(mask, i, kSentinel);
     for (int64_t i = 0; i < 4; ++i) seti(bounds, i, kSentinel);
+    Buf zeros = make(RAD_I32, { c.n_zeros > 0 ? c.n_zeros : 1 });
+    for (int64_t i = 0; i < c.n_zeros; ++i) seti(zeros, i, kSentinel);
     MaskOut o;
-    o.rc = run_group(row, { &cu, &tok, &pos, c.table ? &score : nullptr, &mask, &bounds },
+    o.rc = run_group(row, { &cu, &tok, &pos, c.table ? &score : nullptr, &mask, &bounds,
+                            c.n_zeros > 0 ? &zeros : nullptr },
                      { pint("M", b), pf64("share", c.share), pint("seed", c.seed), pstr("mode", c.mode) });
     for (int64_t i = 0; i < c.n; ++i) o.mask.push_back(geti(mask, i));
     for (int64_t i = 0; i < 4; ++i) o.bounds.push_back(geti(bounds, i));
+    for (int64_t i = 0; i < c.n_zeros; ++i) o.zeros.push_back(geti(zeros, i));
     return o;
 }
 
@@ -676,6 +681,22 @@ TEST(mask_class_semantics, "host") {
         CHECK(o.mask == want);
         CHECK(o.bounds == (std::vector<int32_t>{ 4, 14, 14, 16 }));
     }
+}
+
+/* The optional `zeros` output is written 0 on every element, whatever the window -- the stager
+ * probes' expert offsets (notes/impl.md) -- and its absence changes nothing else. */
+TEST(mask_writes_zeros_when_asked, "host") {
+    const RadKernelInfo* row = find_row("kva_mask", RAD_DOMAIN_HOST);
+    REQUIRE(row != nullptr);
+    MaskCall c;
+    c.ids = std::vector<int32_t>(64, 3);
+    c.n = 80; c.s = 16; c.e = 80; c.mode = "none";
+    const MaskOut plain = run_mask(row, c);
+    c.n_zeros = 513;
+    const MaskOut with = run_mask(row, c);
+    CHECK_EQ(with.rc, RAD_OK);
+    CHECK(with.zeros == std::vector<int32_t>(513, 0));
+    CHECK(with.mask == plain.mask && with.bounds == plain.bounds);
 }
 
 /* b' = min(max(b, s), e): a bulk end before s is an empty window, one past e stops at e; an empty
@@ -1451,9 +1472,10 @@ TEST(mask_device_matches_host, "gpu") {
             for (const char* mode : { "none", "class", "random", "all" })
                 for (double share : { 0.25, 1.0 }) {
                     c.mode = mode; c.share = share; c.components = runs % 2 ? 3 : 1;
+                    c.n_zeros = runs % 3 ? 0 : 513;
                     const MaskOut h = run_mask(host, c), d = run_mask(dev, c);
                     CHECK(h.rc == RAD_OK && d.rc == RAD_OK);
-                    CHECK(d.mask == h.mask && d.bounds == h.bounds);
+                    CHECK(d.mask == h.mask && d.bounds == h.bounds && d.zeros == h.zeros);
                     ++runs;
                 }
             const MaskOut h = run_mask(host, c);

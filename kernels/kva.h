@@ -38,7 +38,7 @@ enum { KVA_MASK_MAX_ROWS = 8192, KVA_MASK_THREADS = 256 };
 enum { KVA_MODE_NONE = 0, KVA_MODE_CLASS = 1, KVA_MODE_RANDOM = 2, KVA_MODE_ALL = 3 };
 
 /* Operand positions, in schema order (rows.cpp holds the schemas). */
-enum { MK_CU = 0, MK_TOKENS, MK_POS, MK_SCORE, MK_MASK, MK_BOUNDS };
+enum { MK_CU = 0, MK_TOKENS, MK_POS, MK_SCORE, MK_MASK, MK_BOUNDS, MK_ZEROS };
 enum { RH_A = 0, RH_MASK, RH_ALOG, RH_DTBIAS, RH_ND, RH_SIDX, RH_BOUNDS };
 enum { SC_STATE = 0, SC_STATE_IDX, SC_APPLIED, SC_APPLIED_IDX, SC_C, SC_ND, SC_ND_IDX, SC_BOUNDS };
 enum { SR_STATE = 0, SR_STATE_IDX, SR_OUT };
@@ -105,6 +105,7 @@ typedef struct KvaMask {
     const float*   score;   int64_t vocab;   /* [vocab]; null (absent) only in none / all mode */
     int32_t*       mask;    int64_t n;       /* [n], every row written: 1 = approximated */
     int32_t*       bounds;                   /* [4] {s, b', b', e} */
+    int32_t*       zeros;   int64_t n_zeros; /* optional [n_zeros], every element written 0 */
     double         share;
     long long      seed;
     int            mode;                     /* KVA_MODE_* */

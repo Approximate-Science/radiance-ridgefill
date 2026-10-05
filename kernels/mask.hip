@@ -47,6 +47,7 @@ __global__ void __launch_bounds__(KVA_MASK_THREADS) kva_mask_kernel(KvaMask g) {
     }
     for (int64_t i = t; i < g.n; i += KVA_MASK_THREADS)
         if (i < s || i >= end) g.mask[i] = 0;
+    for (int64_t i = t; i < g.n_zeros; i += KVA_MASK_THREADS) g.zeros[i] = 0;
 
     const int w = (int)(end - s);
     const int seg = (w + KVA_MASK_THREADS - 1) / KVA_MASK_THREADS;

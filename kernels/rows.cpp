@@ -23,6 +23,7 @@
 #define OPD(n)   { (n), RAD_OPD_IN, 0 }
 #define OPD_O(n) { (n), RAD_OPD_IN, 1 }
 #define OUT(n)   { (n), RAD_OPD_OUT, 0 }
+#define OUT_O(n) { (n), RAD_OPD_OUT, 1 }
 #define INOUT(n) { (n), RAD_OPD_INOUT, 0 }
 #define INOUT_O(n) { (n), RAD_OPD_INOUT, 1 }
 #define WGT(n)   { (n), RAD_OPD_WEIGHT, 0 }
@@ -37,7 +38,7 @@
  * token_ids' extent, which is per issue and is what a recorded pass replays. */
 static const RadParamSpec pMask[] = { P_INT("M"), P_F64("share"), P_INT("seed"), P_STR("mode") };
 static const RadOperandSpec oMask[] = { OPD("cu_last"), OPD("token_ids"), OPD("positions"),
-                                        WGT_O("score"), OUT("mask"), OUT("bounds") };
+                                        WGT_O("score"), OUT("mask"), OUT("bounds"), OUT_O("zeros") };
 
 static const RadParamSpec pSelect[] = { P_INT("M") };
 static const RadOperandSpec oSelect[] = { OPD("mask"), OPD("x_src"), OPD_O("q_src"), OPD_O("s_src"),
@@ -77,7 +78,8 @@ static const RadOpSchema kSchemas[] = {
   "(every row 0). score is optional and required by class and random. `positions` is the "
   "batch's token index in its sequence (RadBatch::positions), [b] or component-major [c, b] "
   "(row 0 is read, at the operand's strides); only random mode reads it. i32 cu_last, ids, "
-  "positions, mask and bounds; f32 score table." },
+  "positions, mask and bounds; f32 score table. Optional `zeros` i32: every element written 0 (the "
+  "zero expert offsets the arch side's stager probes read, notes/impl.md)." },
 { "kva_select", ARR(pSelect), ARR(oSelect),
   "Approximated rows take their source's values (KVA, the device mask). n = mask's extent. For "
   "every row i < n with mask[i] == 1, row i of each present destination is overwritten with row i "
@@ -180,6 +182,7 @@ static int shape_mask(const RadParam* p, int n_p, int operand, RadOpdDesc* out) 
         opd(RAD_F32, { vocab }),
         opd_idx({ n }, 2),
         opd_idx({ 4 }, n),
+        opd_idx({ 8 }, 4),
     });
 }
 
