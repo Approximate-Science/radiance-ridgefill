@@ -174,8 +174,20 @@ Work list (in order, after the held-prefill penalty which stays first):
    retired switches refused by name ("the projector is always streamed from host memory through the staging ring").
 2. int8 THROUGH THE RING: per layer the stored codes + stored scales + bias laid out as rows of `hc·n` bf16 (codes
    1,280 rows, scales 20, bias 1 → 1,301 rows), copied by the same `cast` bf16→bf16 (libr4d `r4d_p2p_copy2d`, a pure
-   byte copy -- no value passes through a float), slots 2 × 26.6 MiB; the GEMM's codes/scale/bias = slot offsets.
+   byte copy -- no value passes through a float), slots 2 × 25.4 MiB; the GEMM's codes/scale/bias = slot offsets.
 3. Option C (correction + row table to host memory) only if it measures free on ON TTFT (paired, warmed).
 4. kva_config.h comments, README, notes: nothing documents vram placement.
 5. Tests: B's 8192/10 config starts and serves; retired-switch refusals + mutants; off ≡ stock.
 6. Measure int8-ring vs bf16-ring: ON TTFT 9K/16K/32K warmed + paired; bytes a pass and copy time per rank.
+
+### Work in progress at the job limit (UNCOMMITTED in the worktree, not yet compiled -- ediag3 was measuring)
+Ring-only placement + int8 through the ring: `arch/kva_config.h` (PLACE/RING retired, refused by name),
+`arch/kva_declare.h` (`decl_ring`, always declared, int8 too), `arch/kva_projector.h` (RowBlock: bf16 [n+1] rows /
+int8 stored codes + scales + bias at the hook's sizes; host block + 2 VRAM slots only; upload key mode × table),
+`arch/kva_declare_masked.h` (int8+host refusal removed), `tests/arch_static_test.cpp` (run_step sets the ring's lanes
+and copies aside for the in-tree oracle -- `Run::all` keeps them; raw-operand, host-memory, int8-upload cases check
+the host row blocks' bytes; retired-switch refusals for PLACE/RING; the int8 comparison names ring copies by layer),
+README switch table + "Where the projector lives", folder README template. NEXT: build (`/tmp/stagee-build.sh`) and
+static-test once no session is measuring; mutants (PLACE/RING not refused; int8 scale/bias offsets in the slot);
+frozen home; engine: off ident, hostring bf16 KL bytes = A′'s hostring rows, int8 ring KL (R79), Stage B's 8192/10
+config starts and serves, int8-ring vs bf16-ring TTFT 9K/16K/32K + bytes/pass + copy time per rank.
