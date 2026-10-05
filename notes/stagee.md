@@ -18,6 +18,10 @@ projector `~/models/rad/projector/` by discovery unless a row says `RADIANCE_KVA
 | HE-R77-dec | R77 | decode ms/step at C = 1: off = exact ±1%; vram bf16 +1…+4%; host ring ±1%. C = 32: vram +2…+6% | vram C=1 > +8% or < 0 beyond noise |
 | HE-R79-kl | R79 | int8 projector vs bf16, paired per doc, last 512 at T 2560 and whole tail at T 2048: |ΔNLL| ≤ 0.002, CI includes 0 | CI excludes 0 or |Δ| > 0.005 |
 | HE-R79-slots | R79 | int8 recovers ≈ half the vram slots lost (≈ +550 a rank vs bf16) | < +400 |
+| HE-held-1slot | §14 | held (FORCE_SPLIT 2048) vs stock, 2K settled, matched state, after 6a68dde: int8 +0.3..+1.0%, bf16 +0.8..+1.6%; slab slots a rank int8 −60..−100, bf16 −110..−160 | int8 > +1.5%, or bf16 not below +2.6% |
+| HE-1slot-ttft | §14 | ON TTFT 16K/32K: one slot within ±1.5% of S3's two slots per dtype; int8 ≤ bf16 + 1% | > +3% either way |
+| HD-R76-plumb-media | R76 | image + ~12K text, greedy 64: plumb text (and logprobs) IDENTICAL to off; ≥ 3 approximate passes after the image | differs, or no approximate pass |
+| HD-R70-final | R70 | MTP depth 3, 16K, 256 greedy, median of 5, tokens/step vs stock: final 0.95..1.0x, FINAL=off 0.85..0.92x, int8+final within 0.02 of bf16+final | final < 0.93x, or final − off < 0.03 |
 
 ## 1. What was built (commits on `stage-e`)
 
