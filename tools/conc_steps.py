@@ -7,8 +7,15 @@ engine's own numbers: the long prompt's chunk q = n_tok - (n_seq - 1)(1 + spec) 
 the long prompt is the step's last entry), its context = the sum of its earlier chunks, n_ahead =
 min(N - ctx - q, max_tok), b = n_tok if n_ahead >= T else n_tok - roundup_G(T - n_ahead), s_lb =
 n_tok - q; approximate iff n_ahead > 0 and b > s_lb. Each expected step must be followed by a plugin
-line with the same n_tok and n_ahead (any path); a shortfall names the step. A replayed pass logs
-nothing, so a shortfall is first checked against replay before it is called a miss.
+line with the same n_tok and n_ahead (any path).
+
+A REPLAYED PASS LOGS NOTHING. The engine records a pass the second time its key is seen and replays
+the recording after that, without calling step() (radiance core/runtime/ctx.cpp:1258-1278), unless
+the expert stager arms it live (n_tok >= 1025). So the 64-row chunks a decoder-shared 32K prompt
+alternates with go silent after two sightings. A replay issues exactly what the live pass issued
+(the tape audit refuses anything else, ctx.cpp:1281-1298), and derive() reads only keyed fields, so
+an expected step whose shape (n_tok, n_seq, n_ahead) was LOGGED approximate earlier on the same server
+is counted "replayed"; only an expected step whose shape was never logged is a miss.
 
 usage: conc_steps.py <conc-label.json> [--tail 2048] [--tile 64] [--max-tok 2048] [--spec 0]
 """
@@ -39,7 +46,9 @@ def expected(steps, length, a):
     return out
 
 
-def check(rep, logdir, a):
+def check(rep, logdir, a, seen):
+    """Expected, logged, replayed, missing, unexpected for one rep; `seen` = the shapes (n_tok, n_seq,
+    n_ahead) logged approximate so far on this server, updated."""
     text = open(os.path.join(logdir, rep["log"]["file"])).read().splitlines()
     steps, kva, last = [], {}, None
     for line in text:
@@ -51,10 +60,20 @@ def check(rep, logdir, a):
         k = KVA.search(line)
         if k and last is not None:
             kva[last] = (int(k.group(2)), int(k.group(3)), k.group(1))
+    n_seq = {s[0]: s[2] for s in steps}
     want = expected(steps, rep["length"], a)
-    misses = [(s, n, h) for s, n, h, ok in want if ok and (s not in kva or kva[s][:2] != (n, h))]
+    replayed, misses = 0, []
+    for s, n, h, ok in want:
+        if not ok:
+            continue
+        if s in kva and kva[s][:2] == (n, h):
+            seen.add((n, n_seq[s], h))
+        elif (n, n_seq[s], h) in seen:
+            replayed += 1
+        else:
+            misses.append((s, n, h))
     extra = [s for s in kva if s not in {w[0] for w in want if w[3]}]
-    return sum(w[3] for w in want), len(kva), misses, extra
+    return sum(w[3] for w in want), len(kva), replayed, misses, extra
 
 
 def main():
@@ -67,16 +86,16 @@ def main():
     a = ap.parse_args()
     res = json.load(open(a.result))
     logdir = a.result[:-len(".json")] + ".logs"
-    bad = 0
+    bad, seen = 0, set()
     for rep in res["reps"]:
         if not rep.get("log"):
             continue
-        want, got, misses, extra = check(rep, logdir, a)
+        want, got, replayed, misses, extra = check(rep, logdir, a, seen)
         bad += bool(misses or extra)
         print(f"{rep['length']:6d} C={rep['decoders']} rep {rep['rep']}: expected {want} approximate, "
-              f"logged {got}" + (f"; MISSING at steps {misses}" if misses else "") +
+              f"logged {got}, replayed {replayed}" + (f"; MISSING at steps {misses}" if misses else "") +
               (f"; UNEXPECTED at steps {extra}" if extra else ""))
-    print("conc_steps: every expected step logged" if not bad else f"conc_steps: {bad} rep(s) differ")
+    print("conc_steps: every expected step logged or replayed, none unexpected" if not bad else f"conc_steps: {bad} rep(s) differ")
 
 
 if __name__ == "__main__":
