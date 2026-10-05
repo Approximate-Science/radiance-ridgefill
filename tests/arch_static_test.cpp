@@ -1061,7 +1061,9 @@ void push_layer(std::vector<RecIssue>& out, const std::vector<RecIssue>& seg, co
 }
 
 /* A stager probe as the oracle sees it: layer x's own stock gate-up issue, over one token, with the
- * routing replaced by the zero offsets and its output by the probe rows (notes/impl.md §2). */
+ * routing replaced by the zero offsets and its output by the probe rows (notes/impl.md §2). The output is
+ * the issue's LAST operand in either table form: 8 by parity (moe_gemm_q), 12 at four classes
+ * (moe_gemm_q_mod4, TP4 since radiance 1.0.10); the routing is operands 4 and 5 in both. */
 RecIssue probe_of(const std::vector<RecIssue>& stock, int x, int rank) {
     const MoeFP8& e = qwen4exp_fp8::g_model[rank].layers[(size_t)x].mlp;
     const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
@@ -1072,7 +1074,7 @@ RecIssue probe_of(const std::vector<RecIssue>& stock, int x, int rank) {
     r.opd[1].rows = 1;
     r.opd[4] = brows(k.b_zeros, e.c.top_k);
     r.opd[5].handle = k.b_zeros;
-    r.opd[8] = brows(k.b_probe, e.c.top_k);
+    r.opd.back() = brows(k.b_probe, e.c.top_k);
     return r;
 }
 
@@ -1168,6 +1170,117 @@ TEST(quality_masks_rows_in_place_through_the_in_tree_layer) {
         CHECK_EQ(count(got.log, "kva: approximate step"), 1);
         CHECK_EQ(got.device_calls, 0);
     }
+}
+
+/* AT FOUR RANKS THE ROUTED EXPERTS ARE FOUR CLASSES (radiance 1.0.10: MoeFP8::Config::ff_lo4, one table a
+ * class, `moe_gemm_q_mod4`), so the masked path's hand-issued MoE must take that form too: on every rank, a
+ * quality pass and a plumb pass that streams are the in-tree step with exactly the masked substitutions --
+ * the drop between the top-k and the sort (slots := -1, as at two ranks: the class tables are indexed by
+ * the sorted offsets, which a dropped slot never enters) and the probes as mod4 gate-ups over zero
+ * offsets. */
+TEST(at_tp4_the_masked_path_issues_the_four_class_moe_with_its_drop) {
+    for (const char* mode : {"quality", "plumb"})
+        for (int rank = 0; rank < 4; ++rank) {
+            Pair p;
+            declare_pair(p, mode, rank, 4);
+            REQUIRE_EQ(p.st, RAD_OK);
+            const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
+            const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+            for (int l = 0; l < 8; ++l) {
+                const MoeFP8& e = m.layers[(size_t)l].mlp;
+                CHECK_EQ(e.ncls, 4);
+                CHECK_EQ(p.kva.ops[e.op_gu - 1].op, std::string("moe_gemm_q_mod4"));
+                CHECK_EQ(p.kva.ops[e.op_dn - 1].op, std::string("moe_gemm_q_mod4"));
+            }
+            const bool quality = !std::strcmp(mode, "quality");
+            Batch x = make_step(p.kva, {{128}, 0, 2048});
+            Want w;
+            w.b = 128; w.rho_rows = 128; w.stream = true;
+            w.project = w.correct = w.rho = w.scored = quality;
+            const Run got = run_step(qwen4exp_kva::step, x.b, rank);
+            CHECK_EQ(differ_at(got.issues, masked_expected(x, w, rank)), 0);
+            int drops = 0, probes = 0;
+            for (const RecIssue& i : got.issues) {
+                drops += k.op_drop && i.op == k.op_drop;
+                probes += i.op == m.layers[(size_t)kSplit - 1].mlp.op_gu && i.n == 1;
+            }
+            CHECK_EQ(drops, quality ? 8 - kSplit : 0);   /* one a late routed layer */
+            CHECK_EQ(probes, 1);                         /* layer S-1's probe, behind layer S-3's gate-up */
+            CHECK_EQ(got.device_calls, 0);
+        }
+}
+
+/* AND A LAYER THAT KEEPS EXPERTS PLAIN bf16 (two here, in every layer: 510 quantised), whose four classes
+ * are 128, 128, 127, 127 experts long -- the one shape where the class tables' lengths differ, so the
+ * hand-issued GEMMs must take each class's own count. The protected experts' bf16 GEMMs follow as in
+ * the in-tree pass. */
+TEST(at_tp4_a_layer_with_plain_experts_takes_unequal_class_tables) {
+    RadModelMeta meta = flash_next_meta();
+    for (int rank : {0, 3}) {
+        RadBuildCtx c = served_ctx(rank, 4);
+        Pair p;
+        for (RadBuilder* b : {&p.stock, &p.kva}) {
+            /* first match wins in the fake's encoding lookup: these two experts are plain bf16 */
+            for (const char* e : {"_exps.3.weight", "_exps.9.weight"})
+                for (const char* proj : {"ffn_gate_up", "ffn_down"})
+                    b->encs.push_back({std::string(proj) + e, rad_enc_plain(RAD_BF16)});
+            served(*b);
+        }
+        hold_kva(p.kva, {"kva.proj", "kva.st"});
+        hold_score(p.kva, "kva.rowsel.score");
+        REQUIRE_EQ(qwen4exp_fp8::declare(&p.stock, &meta, &c), RAD_OK);
+        Env env({{"RADIANCE_KVA", "quality"}});
+        REQUIRE_EQ(qwen4exp_kva::declare(&p.kva, &meta, &c), RAD_OK);
+        const MoeFP8& e = qwen4exp_fp8::g_model[rank].layers[(size_t)kSplit].mlp;
+        CHECK_EQ(e.ncls, 4);
+        CHECK_EQ(e.n_reg, (int64_t)510);
+        CHECK_EQ(e.prot.size(), (size_t)2);
+        CHECK(e.op_pgu != 0);
+        Batch x = make_step(p.kva, {{128}, 0, 2048});
+        Want w;
+        w.b = 128; w.rho_rows = 128;
+        w.stream = w.project = w.correct = w.rho = w.scored = true;
+        const Run got = run_step(qwen4exp_kva::step, x.b, rank);
+        CHECK_EQ(differ_at(got.issues, masked_expected(x, w, rank)), 0);
+        for (const RecIssue& i : got.issues)
+            if (i.op == e.op_gu && i.n > 1) {
+                CHECK_EQ(i.opd[2].rows, 128); CHECK_EQ(i.opd[6].rows, 128);   /* classes 0 and 1 */
+                CHECK_EQ(i.opd[8].rows, 127); CHECK_EQ(i.opd[10].rows, 127);  /* classes 2 and 3 */
+            }
+    }
+}
+
+/* THE MTP HEAD ON A PREFILL CHUNK THAT DRAFTS NOTHING (radiance 1.0.13: MtpHcBlock::step returns after its
+ * attention when draft_pass < 0 and n_draft_out == 0 -- it is there only to leave its K/V and indexer keys).
+ * A head pass is never approximated (derive: draft passes run stock), so through the plugin it is the
+ * in-tree pass, in every serving mode: without its experts and lm_head on a history pass that drafts
+ * nothing, and with them on one that also drafts round 1. */
+TEST(an_mtp_history_pass_is_the_in_tree_head_whether_or_not_it_drafts) {
+    static int32_t draft_ids[1] = {127};
+    for (const char* mode : {"off", "speed", "quality"})
+        for (int64_t drafts : {0, 1}) {
+            Pair p;
+            declare_pair(p, mode, 0, 1, 0, /*max_spec=*/3);
+            REQUIRE_EQ(p.st, RAD_OK);
+            const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
+            REQUIRE(m.have_mtp);
+            Batch x = make_step(p.kva, {{128}, 0, 2048});
+            x.b.draft_pass = -1;
+            x.b.n_draft_out = drafts;
+            x.b.draft_out_ids = drafts ? draft_ids : nullptr;
+            const Run want = run_step(qwen4exp_fp8::step, x.b);
+            const Run got = run_step(qwen4exp_kva::step, x.b);
+            CHECK(want.issues.size() > 5);
+            CHECK_EQ(differ_at(got.issues, want.issues), 0);
+            CHECK_EQ(count(got.log, "kva: approximate step"), 0);
+            int lm_head = 0, experts = 0;
+            for (const RecIssue& i : got.issues) {
+                lm_head += i.op == m.mtp.op_logits;
+                experts += i.op == m.mtp.mlp.op_gu;
+            }
+            CHECK_EQ(lm_head > 0, drafts > 0);
+            CHECK_EQ(experts > 0, drafts > 0);
+        }
 }
 
 /* #6 -- THE STRADDLING CHUNK, masked (PLAN-FIX §4, DD-C): 64 tokens ahead of a 128-row chunk with

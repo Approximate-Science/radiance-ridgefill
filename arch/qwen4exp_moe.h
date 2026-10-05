@@ -1,6 +1,6 @@
 /* qwen4exp_moe.h -- a routed layer's MoE, issued by hand on an approximate pass (PLAN-FIX §3, §6.1).
  *
- * WHY A COPY. MoeFP8::pass (radiance 140987f, arch/common/rad_block_moe_fp8.h:1341-1496) has no hook
+ * WHY A COPY. MoeFP8::pass (radiance 1.0.13 d0f639b, arch/common/rad_block_moe_fp8.h:1408-1584) has no hook
  * for the two things an approximate pass needs: the routing slots of bulk rows dropped
  * (`kva_drop_rows`, ids := -1) between the top-k and the scatter, and the stager probes issued
  * right after one layer's gate-up GEMM (notes/impl.md §2). Everything else below is that function
@@ -20,6 +20,40 @@ namespace qwen4exp_kva {
 
 using namespace rad::arch;
 
+/* THE GROUPED GEMMS' WEIGHT TABLES (rad_block_moe_fp8.h:1458-1506). A quantised layer passes its experts
+ * as two tables by parity (`moe_gemm_q`), or -- at four ranks, where the extra fp8 block of a five-block
+ * expert goes round all four (MoeFP8::Config::ff_lo4, radiance 1.0.10) -- as four by number mod 4
+ * (`moe_gemm_q_mod4`), class q holding ceil((n_reg - q) / 4) experts. `n` is how many class q holds. */
+inline int64_t moe_class_len(const MoeFP8& e, int q) {
+    return e.ncls == 4 ? (e.n_reg + 3 - q) / 4 : e.n_reg / 2;
+}
+
+/* The gate/up GEMM over rows [r0, r0 + rows) of the quantised input, into `out` (rows * top_k slots), with
+ * `ids`/`offsets` its sorted slots and per-expert offsets: the in-tree issue in either table form. The
+ * probe passes zeros for both, which leaves every expert empty. */
+inline void moe_gate_up_q(RadCtx* c, const MoeFP8& e, int64_t r0, int64_t rows, RadOperand sorted,
+                          RadOperand offsets, RadOperand out) {
+    const int64_t n = e.g.n_embd;
+    const bool rot = e.c.expert_rot != 0;
+    const auto& w = e.w;
+    const RadOperand x = brow_slice(rot ? w.hr.q : w.h.q, r0, rows, n);
+    const RadOperand s = brow_slice(rot ? w.hr.s : w.h.s, r0, rows, n / RAD_FP8_BLOCK);
+    if (e.ncls == 4)
+        RAD_ISSUE_N(c, e.op_gu, rows, x, s,
+                    RAD_WTAB(e.w_gu[0], moe_class_len(e, 0)), RAD_WTAB(e.w_gus[0], moe_class_len(e, 0)),
+                    sorted, offsets,
+                    RAD_WTAB(e.w_gu[1], moe_class_len(e, 1)), RAD_WTAB(e.w_gus[1], moe_class_len(e, 1)),
+                    RAD_WTAB(e.w_gu[2], moe_class_len(e, 2)), RAD_WTAB(e.w_gus[2], moe_class_len(e, 2)),
+                    RAD_WTAB(e.w_gu[3], moe_class_len(e, 3)), RAD_WTAB(e.w_gus[3], moe_class_len(e, 3)),
+                    out);
+    else
+        RAD_ISSUE_N(c, e.op_gu, rows, x, s,
+                    RAD_WTAB(e.w_gu[0], moe_class_len(e, 0)), RAD_WTAB(e.w_gus[0], moe_class_len(e, 0)),
+                    sorted, offsets,
+                    RAD_WTAB(e.w_gu[1], moe_class_len(e, 1)), RAD_WTAB(e.w_gus[1], moe_class_len(e, 1)),
+                    out);
+}
+
 /* What differs from the in-tree pass: the drop op with the mask it reads (0 = no row dropped),
  * and what to issue right after the gate-up GEMM (empty = nothing). */
 struct MoeArm {
@@ -33,18 +67,12 @@ struct MoeArm {
  * its output rows -- the plugin's own (libr4d/r4d_moe.hip:909-916) -- while its HANDLE is the
  * layer's first expert op, which is all the prefill stager reacts to (stager.cpp:114-152). */
 inline void moe_probe(RadCtx* c, const MoeFP8& e, rad_buf zeros, rad_buf out) {
-    const int64_t ne = e.c.n_expert, k = e.c.top_k, n = e.g.n_embd, half = e.n_reg / 2;
-    const bool rot = e.c.expert_rot != 0;
-    const auto& w = e.w;
+    const int64_t ne = e.c.n_expert, k = e.c.top_k, n = e.g.n_embd;
     if (e.c.expert_bf16)
-        RAD_ISSUE_N(c, e.op_gu, 1, brow_slice(w.h.x, 0, 1, n), RAD_WTAB(e.w_gu[0], ne),
+        RAD_ISSUE_N(c, e.op_gu, 1, brow_slice(e.w.h.x, 0, 1, n), RAD_WTAB(e.w_gu[0], ne),
                     brows(zeros, k), brows(zeros, ne + 1), brows(out, k));
     else
-        RAD_ISSUE_N(c, e.op_gu, 1, brow_slice(rot ? w.hr.q : w.h.q, 0, 1, n),
-                    brow_slice(rot ? w.hr.s : w.h.s, 0, 1, n / RAD_FP8_BLOCK),
-                    RAD_WTAB(e.w_gu[0], half), RAD_WTAB(e.w_gus[0], half), brows(zeros, k),
-                    brows(zeros, e.n_reg + 1), RAD_WTAB(e.w_gu[1], half), RAD_WTAB(e.w_gus[1], half),
-                    brows(out, k));
+        moe_gate_up_q(c, e, 0, 1, brows(zeros, k), brows(zeros, e.n_reg + 1), brows(out, k));
 }
 
 /* The top-k and the sort, with the drop between them. The FUSED form has no point between the two,
@@ -69,22 +97,19 @@ inline void moe_route(RadCtx* c, const MoeFP8& e, const MoeArm& arm, RadOperand 
                 brows(w.sorted, rows * k), brows(w.eoff, ne + 1), ecnt);
 }
 
-/* rad_block_moe_fp8.h:1404-1438: the two grouped GEMMs, the shared arm beside them, the protected
+/* rad_block_moe_fp8.h:1458-1520: the two grouped GEMMs, the shared arm beside them, the protected
  * experts after -- with the arm's probes right behind the gate-up GEMM. */
 inline void moe_experts(RadCtx* c, const MoeFP8& e, const MoeArm& arm, int64_t T, int64_t r0,
                         int64_t rows) {
-    const int64_t ne = e.c.n_expert, k = e.c.top_k, n = e.g.n_embd, half = e.n_reg / 2;
-    const bool rot = e.c.expert_rot != 0, shared = e.op_sgate != 0;
+    const int64_t ne = e.c.n_expert, k = e.c.top_k, n = e.g.n_embd;
+    const bool shared = e.op_sgate != 0;
     const auto& w = e.w;
     if (e.c.expert_bf16)
         RAD_ISSUE_N(c, e.op_gu, rows, brow_slice(w.h.x, r0, rows, n), RAD_WTAB(e.w_gu[0], ne),
                     brows(w.sorted, rows * k), brows(w.eoff, ne + 1), brows(w.egu, rows * k));
     else
-        RAD_ISSUE_N(c, e.op_gu, rows, brow_slice(rot ? w.hr.q : w.h.q, r0, rows, n),
-                    brow_slice(rot ? w.hr.s : w.h.s, r0, rows, n / RAD_FP8_BLOCK),
-                    RAD_WTAB(e.w_gu[0], half), RAD_WTAB(e.w_gus[0], half),
-                    brows(w.sorted, rows * k), brows(w.eoff, e.n_reg + 1),
-                    RAD_WTAB(e.w_gu[1], half), RAD_WTAB(e.w_gus[1], half), brows(w.egu, rows * k));
+        moe_gate_up_q(c, e, r0, rows, brows(w.sorted, rows * k), brows(w.eoff, e.n_reg + 1),
+                      brows(w.egu, rows * k));
     if (arm.after_gate_up) arm.after_gate_up();
     if (shared) e.shared_up(c, T, r0, rows);
     e.gq_exp.step(c, w.egu, rows * k, 0, rows * k);
@@ -92,11 +117,20 @@ inline void moe_experts(RadCtx* c, const MoeFP8& e, const MoeArm& arm, int64_t T
     if (e.c.expert_bf16)
         RAD_ISSUE_N(c, e.op_dn, rows, brows(w.eff.x, rows * k), RAD_WTAB(e.w_dn[0], ne),
                     brows(w.sorted, rows * k), brows(w.eoff, ne + 1), brows(w.edn, rows * k));
+    else if (e.ncls == 4)
+        RAD_ISSUE_N(c, e.op_dn, rows, brows(w.eff.q, rows * k), brows(w.eff.s, rows * k),
+                    RAD_WTAB(e.w_dn[0], moe_class_len(e, 0)), RAD_WTAB(e.w_dns[0], moe_class_len(e, 0)),
+                    brows(w.sorted, rows * k), brows(w.eoff, e.n_reg + 1),
+                    RAD_WTAB(e.w_dn[1], moe_class_len(e, 1)), RAD_WTAB(e.w_dns[1], moe_class_len(e, 1)),
+                    RAD_WTAB(e.w_dn[2], moe_class_len(e, 2)), RAD_WTAB(e.w_dns[2], moe_class_len(e, 2)),
+                    RAD_WTAB(e.w_dn[3], moe_class_len(e, 3)), RAD_WTAB(e.w_dns[3], moe_class_len(e, 3)),
+                    brows(w.edn, rows * k));
     else
         RAD_ISSUE_N(c, e.op_dn, rows, brows(w.eff.q, rows * k), brows(w.eff.s, rows * k),
-                    RAD_WTAB(e.w_dn[0], half), RAD_WTAB(e.w_dns[0], half),
+                    RAD_WTAB(e.w_dn[0], moe_class_len(e, 0)), RAD_WTAB(e.w_dns[0], moe_class_len(e, 0)),
                     brows(w.sorted, rows * k), brows(w.eoff, e.n_reg + 1),
-                    RAD_WTAB(e.w_dn[1], half), RAD_WTAB(e.w_dns[1], half), brows(w.edn, rows * k));
+                    RAD_WTAB(e.w_dn[1], moe_class_len(e, 1)), RAD_WTAB(e.w_dns[1], moe_class_len(e, 1)),
+                    brows(w.edn, rows * k));
     if (e.op_pgu) {
         const int64_t np = (int64_t)e.prot.size();
         const RadOperand poff = brow_slice(w.eoff, e.n_reg, np + 1, 1);
@@ -109,7 +143,7 @@ inline void moe_experts(RadCtx* c, const MoeFP8& e, const MoeArm& arm, int64_t T
     if (shared) e.sh_down.step(c, w.sff, w.sout, T, r0, rows);
 }
 
-/* MoeFP8::pass with the arm's substitutions (rad_block_moe_fp8.h:1341-1496). */
+/* MoeFP8::pass with the arm's substitutions (rad_block_moe_fp8.h:1408-1584). */
 inline void moe_pass(RadCtx* c, const MoeFP8& e, const MoeArm& arm, int64_t T, int64_t r0,
                      int64_t rows) {
     const int64_t ne = e.c.n_expert, ne_all = e.c.n_expert_all, k = e.c.top_k, n = e.g.n_embd;
@@ -136,7 +170,7 @@ inline void moe_pass(RadCtx* c, const MoeFP8& e, const MoeArm& arm, int64_t T, i
                     brow_slice(w.x, r0, rows, n));
 }
 
-/* MoeFP8::step (rad_block_moe_fp8.h:1529-1576) over rows [from, to) (to < 0: the step's end): the
+/* MoeFP8::step (rad_block_moe_fp8.h:1631-1664) over rows [from, to) (to < 0: the step's end): the
  * passes and the routing report the heat engine reads -- with dropped slots or an exact-rows-only
  * range, the counts are the exact rows' alone, so bulk rows no longer register as heat. */
 inline void moe_layer(RadCtx* c, const MoeFP8& e, const MoeArm& arm, const RadBatch* batch,

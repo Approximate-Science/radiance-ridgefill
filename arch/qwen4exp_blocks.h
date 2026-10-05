@@ -1,8 +1,9 @@
 /* qwen4exp_blocks.h -- the qwen4exp adapter's late-block pieces (notes/adapter-split-spec.md §1.2): the
  * delta net's and the attention's in-tree issues over a row window, with the +st correction spliced
- * into the last sequence's scan. Verbatim copies of the in-tree blocks' step() pieces (cited per
- * function, radiance 140987f), so the static oracle compares them issue for issue. The core's layer
- * drivers (kva_layer.h) call them; nothing here names the projector.
+ * into the last sequence's scan. Verbatim copies of the in-tree blocks' step() pieces, cited per
+ * function; the blocks they copy are unchanged from radiance 1.0.8 (140987f) through 1.0.13 (d0f639b),
+ * so the citations hold for both, and the static oracle compares them issue for issue. The core's
+ * layer drivers (kva_layer.h) call them; nothing here names the projector.
  */
 #ifndef QWEN4EXP_BLOCKS_H
 #define QWEN4EXP_BLOCKS_H
