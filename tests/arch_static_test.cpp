@@ -2596,6 +2596,51 @@ void hold_kva_i8(RadBuilder& b) {
     qwen4exp_kva::g_i8_rows_for_test = &g_i8_rows;
 }
 
+/* THE INT8 PROJECTOR'S GEMM AT EVERY RANK COUNT. The projector is not sharded: every rank holds every late
+ * layer's whole map and computes the whole block input (N = n_embd 2560 from K = hc*n 10240), because the
+ * block input it feeds is replicated on every rank (only the heads inside the blocks are split). So the
+ * GEMM a rank declares at TP4 -- and the row the engine picks for it -- is TP1's: one shape for the
+ * kernel tests (kernel_test's int8 case runs exactly N 2560, K 10240). The correction is what TP splits:
+ * each rank's state heads are 48 / world (kernel_test each_ranks_heads_compute_their_slice_of_tp1). */
+TEST(every_rank_at_every_tp_declares_the_full_width_int8_projector) {
+    RadModelMeta meta = flash_next_meta();
+    for (int world : {1, 2, 4})
+        for (int rank = 0; rank < world; ++rank) {
+            RadBuildCtx c = served_ctx(rank, world);
+            Env env({{"RADIANCE_KVA", "quality"}});
+            RadBuilder kva;
+            served(kva);
+            hold_kva_i8(kva);
+            hold_score(kva, "kva.rowsel.score");
+            std::string log;
+            int st = RAD_OK;
+            log = stderr_of([&] { st = qwen4exp_kva::declare(&kva, &meta, &c); });
+            REQUIRE_EQ(st, RAD_OK);
+            const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+            REQUIRE(k.int8);
+            int gemms = 0;
+            for (const RecOp& o : kva.ops) {
+                if (o.op != "kva_gemm_nt_q") continue;
+                ++gemms;
+                for (const RecParam& q : o.p) {
+                    if (q.key == "N") CHECK_EQ(q.ival, 2560);
+                    if (q.key == "K") CHECK_EQ(q.ival, 10240);
+                }
+            }
+            CHECK_EQ(gemms, 8 - kSplit);
+            for (const RecParam& q : kva.ops[k.op_quant8 - 1].p) if (q.key == "n") CHECK_EQ(q.ival, 10240);
+            /* and the correction's ops at this rank's heads: one apply a late delta-net layer (4, 5, 6) */
+            int applies = 0;
+            for (int l = kSplit; l < 8; ++l) {
+                if (!k.op_apply[(size_t)l]) continue;
+                ++applies;
+                for (const RecParam& q : kva.ops[k.op_apply[(size_t)l] - 1].p)
+                    if (q.key == "n_head") CHECK_EQ(q.ival, 48 / world);
+            }
+            CHECK_EQ(applies, 3);
+        }
+}
+
 /* The int8 folder's declare: the quantiser over the stream, the bias add, one int8 GEMM a late layer
  * (no bf16 GEMM), the stream's codes and scales taking the whole program; each map copied in the
  * stored form the GEMM rows' hooks made (their size, their bytes), shaped as the GEMM reads it. */

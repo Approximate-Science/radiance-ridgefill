@@ -1453,18 +1453,120 @@ TEST(mask_matches_fnlev_rules, "both") {
     }
 }
 
+/* ================================================================== per-rank extents (TP1 / TP2 / TP4)
+ * The correction, the state read and the decay sums are per value head, and tensor parallelism hands
+ * rank r the contiguous heads [r * H/W, (r + 1) * H/W) (the delta net's own split; the folder's st.L is
+ * sliced the same way, kva_projector.h plan_rank). So a rank's row at its extent -- 24 heads at TP2, 12
+ * at TP4 -- must compute, byte for byte, the slice of what the row computes over all 48 heads at TP1.
+ * The host rows here; the device rows against them at each extent are the "gpu" cases above. */
+
+/* Heads [h0, h0 + n) of `full` copied into `part` (a CorrectRun of n heads), every pool and C. */
+static void copy_heads(const CorrectRun& full, CorrectRun& part, int64_t h0) {
+    for (int64_t s = 0; s < part.slots; ++s)
+        for (int64_t h = 0; h < part.heads; ++h) {
+            for (int64_t i = 0; i < part.sd0; ++i)
+                for (int64_t j = 0; j < part.sd1; ++j)
+                    setf(part.state, st_at(part, s, h, i, j), getf(full.state, st_at(full, s, h0 + h, i, j)));
+            setf(part.applied, s * part.heads + h, getf(full.applied, s * full.heads + h0 + h));
+            for (int w = 0; w < 2; ++w) setf(part.nd, (s * part.heads + h) * 2 + w, getf(full.nd, (s * full.heads + h0 + h) * 2 + w));
+        }
+    for (int64_t h = 0; h < part.heads; ++h)
+        for (int64_t e = 0; e < part.sd0 * part.sd1; ++e)
+            setf(part.c, h * part.sd0 * part.sd1 + e, getf(full.c, (h0 + h) * full.sd0 * full.sd1 + e));
+}
+
+/* Element differences between heads [h0, h0 + n) of `full` and all of `part`: state, applied, ND. */
+static int64_t heads_differ(const CorrectRun& full, const CorrectRun& part, int64_t h0) {
+    int64_t n = 0;
+    for (int64_t s = 0; s < part.slots; ++s)
+        for (int64_t h = 0; h < part.heads; ++h) {
+            for (int64_t i = 0; i < part.sd0; ++i)
+                for (int64_t j = 0; j < part.sd1; ++j)
+                    n += getf(part.state, st_at(part, s, h, i, j)) != getf(full.state, st_at(full, s, h0 + h, i, j));
+            n += getf(part.applied, s * part.heads + h) != getf(full.applied, s * full.heads + h0 + h);
+            for (int w = 0; w < 2; ++w)
+                n += getf(part.nd, (s * part.heads + h) * 2 + w) != getf(full.nd, (s * full.heads + h0 + h) * 2 + w);
+        }
+    return n;
+}
+
+TEST(each_ranks_heads_compute_their_slice_of_tp1, "host") {
+    const RadKernelInfo* corr = find_row("kva_state_correct", RAD_DOMAIN_HOST);
+    const RadKernelInfo* read = find_row("kva_state_read", RAD_DOMAIN_HOST);
+    const RadKernelInfo* rho = find_row("kva_rho_update", RAD_DOMAIN_HOST);
+    REQUIRE(corr && read && rho);
+    const int64_t H = 48, D = 128;   /* the model's value heads and state width */
+    Rng r{ 4848 };
+    CorrectRun full = correct_operands(6, H, D, D, { 4, -1, 1, 5 }, 8);
+    for (size_t i = 0; i < full.state.bytes.size() / 4; ++i) setf(full.state, (int64_t)i, r.normal());
+    for (int64_t i = 0; i < rad_tensor_numel(&full.c.t); ++i) setf(full.c, i, 0.01f * r.normal());
+    for (int64_t i = 0; i < rad_tensor_numel(&full.applied.t); ++i) setf(full.applied, i, 0.5f + r.normal());
+    for (int64_t i = 0; i < rad_tensor_numel(&full.nd.t); i += 2) {
+        const float d = (float)(1.0 + 50.0 * r.uniform());
+        setf(full.nd, i, (float)(d * 1.2 * r.uniform()));
+        setf(full.nd, i + 1, d);
+    }
+    struct Step { const char* mode; double alpha; bool nd; };
+    const Step steps[] = { { "undo", 1.0, false }, { "apply", 0.7, true }, { "apply", 1.0, false } };
+    Buf index = slot_index({ 4, -1, 1, 5 });
+    /* TP1: every step over all 48 heads, then the read. */
+    CorrectRun tp1 = full;
+    for (const Step& st : steps) CHECK_EQ(run_correct(corr, tp1, st.mode, st.alpha, st.nd), RAD_OK);
+    Buf read1;
+    CHECK_EQ(run_state_read(read, tp1, index, read1), RAD_OK);
+    RhoRun rho1 = random_rho(r, 512, H, 0.1, true);
+    rho1.pitch = 2 * H;
+    CHECK_EQ(run_rho(rho, rho1), RAD_OK);
+    for (int world : { 2, 4 }) {
+        const int64_t hw = H / world;
+        int64_t corr_diff = 0, read_diff = 0, rho_diff = 0;
+        for (int rank = 0; rank < world; ++rank) {
+            const int64_t h0 = rank * hw;
+            CorrectRun part = correct_operands(6, hw, D, D, { 4, -1, 1, 5 }, 8);
+            copy_heads(full, part, h0);
+            for (const Step& st : steps) CHECK_EQ(run_correct(corr, part, st.mode, st.alpha, st.nd), RAD_OK);
+            corr_diff += heads_differ(tp1, part, h0);
+            Buf readp;
+            CHECK_EQ(run_state_read(read, part, index, readp), RAD_OK);
+            for (int64_t q = 0; q < 4; ++q)
+                for (int64_t h = 0; h < hw; ++h)
+                    for (int64_t e = 0; e < D * D; ++e)
+                        read_diff += getf(readp, (q * hw + h) * D * D + e) != getf(read1, (q * H + h0 + h) * D * D + e);
+            /* the decay sums: the rank's heads of a (its half of a|b), A_log, dt_bias and ND */
+            RhoRun rp = rho1;
+            rp.heads = hw; rp.pitch = 2 * hw;
+            rp.a.clear(); rp.a_log.clear(); rp.dt_bias.clear();
+            for (int64_t t = 0; t < rho1.n; ++t)
+                for (int64_t h = 0; h < hw; ++h) rp.a.push_back(rho1.a[(size_t)(t * H + h0 + h)]);
+            for (int64_t h = 0; h < hw; ++h) {
+                rp.a_log.push_back(rho1.a_log[(size_t)(h0 + h)]);
+                rp.dt_bias.push_back(rho1.dt_bias[(size_t)(h0 + h)]);
+            }
+            rp.nd.assign((size_t)(rp.slots * hw * 2), 0.0f);
+            CHECK_EQ(run_rho(rho, rp), RAD_OK);
+            for (int64_t s = 0; s < rp.slots; ++s)
+                for (int64_t h = 0; h < hw; ++h)
+                    for (int w = 0; w < 2; ++w)
+                        rho_diff += rp.nd[(size_t)((s * hw + h) * 2 + w)] != rho1.nd[(size_t)((s * H + h0 + h) * 2 + w)];
+        }
+        CHECK_EQ(corr_diff, 0);
+        CHECK_EQ(read_diff, 0);
+        CHECK_EQ(rho_diff, 0);
+        std::fprintf(stderr, "  TP%d (%lld heads a rank): correct %lld, read %lld, decay sums %lld elements differ "
+                     "from TP1's slices\n", world, (long long)hw, (long long)corr_diff, (long long)read_diff,
+                     (long long)rho_diff);
+    }
+}
+
 /* ================================================================== device against host */
 
-/* R20: the device row and the host row on the same random operands -- model-sized heads, padded
+/* R20: the device row and the host row on the same random operands -- every rank count's per-rank
+ * value heads (48 at TP1, 24 at TP2, 12 at TP4) at the model's 128 x 128 state, padded
  * slot / head / row strides, nonzero applied scales, a skipped sequence -- agree to the bit, over
  * the whole buffers (padding included). */
-TEST(state_correct_device_matches_host, "gpu") {
-    if (!group_runnable()) return;
-    const RadKernelInfo* dev = find_row("kva_state_correct", RAD_DOMAIN_DEVICE);
-    const RadKernelInfo* host = find_row("kva_state_correct", RAD_DOMAIN_HOST);
-    REQUIRE(dev && host);
-    Rng r{ 31 };
-    CorrectRun k = correct_operands(6, 24, 128, 128, { 4, -1, 1, 5 }, 8);
+static void state_correct_device_vs_host(const RadKernelInfo* dev, const RadKernelInfo* host, int64_t heads) {
+    Rng r{ (uint64_t)(31 + heads) };
+    CorrectRun k = correct_operands(6, heads, 128, 128, { 4, -1, 1, 5 }, 8);
     for (size_t i = 0; i < k.state.bytes.size() / 4; ++i) setf(k.state, (int64_t)i, r.normal());
     for (int64_t i = 0; i < rad_tensor_numel(&k.c.t); ++i) setf(k.c, i, 0.01f * r.normal());
     for (int64_t i = 0; i < rad_tensor_numel(&k.applied.t); ++i) setf(k.applied, i, 0.5f + r.normal());
@@ -1479,8 +1581,8 @@ TEST(state_correct_device_matches_host, "gpu") {
     /* Then the same buffers with every pool on its own index and depth: state slots 3 0 5 2,
      * applied 1 3 0 and one outside its 4-slot pool, ND 5 6 2 0 in a 7-slot pool. */
     CorrectRun sep = k;
-    sep.applied = make(RAD_F32, { 4, 24, 1, 1 });
-    sep.nd = make(RAD_F32, { 7, 24, 1, 2 });
+    sep.applied = make(RAD_F32, { 4, heads, 1, 1 });
+    sep.nd = make(RAD_F32, { 7, heads, 1, 2 });
     for (int64_t i = 0; i < rad_tensor_numel(&sep.applied.t); ++i) setf(sep.applied, i, 0.5f + r.normal());
     for (int64_t i = 0; i < rad_tensor_numel(&sep.nd.t); i += 2) {
         setf(sep.nd, i + 1, (float)(1.0 + 50.0 * r.uniform()));
@@ -1499,34 +1601,47 @@ TEST(state_correct_device_matches_host, "gpu") {
             for (size_t i = 0; i < h.state.bytes.size(); ++i) differ += h.state.bytes[i] != on_dev.state.bytes[i];
             CHECK_EQ(differ, 0);
             CHECK(h.applied.bytes == on_dev.applied.bytes && h.nd.bytes == on_dev.nd.bytes);
-            std::fprintf(stderr, "  %s %-5s alpha %.1f ND %d: %zu state bytes, %zu differ (max abs diff %s)\n",
-                         pass ? "own slots  " : "shared slots", st.mode, st.alpha, (int)st.nd,
+            std::fprintf(stderr, "  %2lld heads %s %-5s alpha %.1f ND %d: %zu state bytes, %zu differ (max abs diff %s)\n",
+                         (long long)heads, pass ? "own slots  " : "shared slots", st.mode, st.alpha, (int)st.nd,
                          h.state.bytes.size(), differ, differ ? ">0" : "0");
         }
 }
 
+/* At every rank count's per-rank extent: TP1's 48 value heads, TP2's 24, TP4's 12. */
+TEST(state_correct_device_matches_host, "gpu") {
+    if (!group_runnable()) return;
+    const RadKernelInfo* dev = find_row("kva_state_correct", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("kva_state_correct", RAD_DOMAIN_HOST);
+    REQUIRE(dev && host);
+    for (int64_t heads : { 48, 24, 12 }) state_correct_device_vs_host(dev, host, heads);
+}
+
 /* kva_state_read, device vs host: model-sized heads at padded strides, a negative slot, a slot past
  * the pool and a repeated slot; the outputs agree to the bit and the out-of-pool rows are zeros. */
-TEST(state_read_device_matches_host, "gpu") {
-    if (!group_runnable()) return;
-    const RadKernelInfo* dev = find_row("kva_state_read", RAD_DOMAIN_DEVICE);
-    const RadKernelInfo* host = find_row("kva_state_read", RAD_DOMAIN_HOST);
-    REQUIRE(dev && host);
-    Rng r{ 61 };
-    CorrectRun k = correct_operands(6, 24, 128, 128, { 0 }, 8);
+static void state_read_device_vs_host(const RadKernelInfo* dev, const RadKernelInfo* host, int64_t heads) {
+    Rng r{ (uint64_t)(61 + heads) };
+    CorrectRun k = correct_operands(6, heads, 128, 128, { 0 }, 8);
     for (size_t i = 0; i < k.state.bytes.size() / 4; ++i) setf(k.state, (int64_t)i, r.normal());
     Buf index = slot_index({ 4, -1, 1, 7, 4 }), out_host, out_dev;
     CHECK_EQ(run_state_read(host, k, index, out_host), RAD_OK);
     CHECK_EQ(run_state_read(dev, k, index, out_dev), RAD_OK);
     size_t differ = 0, nonzero_out_of_pool = 0;
-    const int64_t per_seq = 24 * 128 * 128;
+    const int64_t per_seq = heads * 128 * 128;
     for (size_t i = 0; i < out_host.bytes.size(); ++i) differ += out_host.bytes[i] != out_dev.bytes[i];
     for (int64_t s : { 1, 3 }) for (int64_t e = 0; e < per_seq; ++e)
         nonzero_out_of_pool += getf(out_dev, s * per_seq + e) != 0.0f;
     CHECK_EQ(differ, 0);
     CHECK_EQ(nonzero_out_of_pool, 0);
-    std::fprintf(stderr, "  %zu out bytes, %zu differ; out-of-pool rows all zero: %s\n",
-                 out_host.bytes.size(), differ, nonzero_out_of_pool ? "no" : "yes");
+    std::fprintf(stderr, "  %2lld heads: %zu out bytes, %zu differ; out-of-pool rows all zero: %s\n",
+                 (long long)heads, out_host.bytes.size(), differ, nonzero_out_of_pool ? "no" : "yes");
+}
+
+TEST(state_read_device_matches_host, "gpu") {
+    if (!group_runnable()) return;
+    const RadKernelInfo* dev = find_row("kva_state_read", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("kva_state_read", RAD_DOMAIN_HOST);
+    REQUIRE(dev && host);
+    for (int64_t heads : { 48, 24, 12 }) state_read_device_vs_host(dev, host, heads);
 }
 
 /* A random window layout over an n-row step, the bulk end b kept within the device row's LDS
@@ -1635,7 +1750,7 @@ TEST(mask_device_fail_safe, "gpu") {
     CHECK_EQ(run_mask(host, big).rc, RAD_OK);
 }
 
-/* R34's device leg: device vs host on model-sized gates (bf16 a as a column slice of the a|b
+/* R34's device leg (at 48, 24 and 12 heads: TP1, TP2, TP4 a rank): device vs host on model-sized gates (bf16 a as a column slice of the a|b
  * buffer, carried over two chunks); rho within 1e-5, N and D reported. */
 TEST(rho_device_matches_host, "gpu") {
     if (!group_runnable()) return;
@@ -1644,18 +1759,19 @@ TEST(rho_device_matches_host, "gpu") {
     REQUIRE(dev && host);
     Rng r{ 51 };
     double worst_rho = 0, worst_rel = 0;
+    for (int64_t heads : { 48, 24, 12 })   /* TP1, TP2, TP4's value heads a rank */
     for (double exact : { 0.056, 0.5, 0.0 }) {
-        RhoRun h = random_rho(r, 2048, 24, exact, true);
-        h.pitch = 48;
+        RhoRun h = random_rho(r, 2048, heads, exact, true);
+        h.pitch = 2 * heads;   /* a is the first half of the rank's a|b columns */
         RhoRun d = h;
         for (int chunk = 0; chunk < 2; ++chunk) {
             CHECK_EQ(run_rho(host, h), RAD_OK);
             CHECK_EQ(run_rho(dev, d), RAD_OK);
         }
-        for (int64_t k = 0; k < 24; ++k) {
+        for (int64_t k = 0; k < heads; ++k) {
             worst_rho = std::max(worst_rho, (double)std::fabs(nd_rho(h, k) - nd_rho(d, k)));
             for (int w = 0; w < 2; ++w) {
-                const double a = h.nd[(size_t)((2 * 24 + k) * 2 + w)], b = d.nd[(size_t)((2 * 24 + k) * 2 + w)];
+                const double a = h.nd[(size_t)((2 * heads + k) * 2 + w)], b = d.nd[(size_t)((2 * heads + k) * 2 + w)];
                 worst_rel = std::max(worst_rel, std::fabs(a - b) / std::max(std::fabs(a), 1e-30));
             }
             if (exact == 0.0) CHECK(nd_rho(d, k) == 1.0f);   /* no exact row: exactly 1 */
