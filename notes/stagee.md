@@ -180,7 +180,8 @@ Work list (in order, after the held-prefill penalty which stays first):
 5. Tests: B's 8192/10 config starts and serves; retired-switch refusals + mutants; off ≡ stock.
 6. Measure int8-ring vs bf16-ring: ON TTFT 9K/16K/32K warmed + paired; bytes a pass and copy time per rank.
 
-### Work in progress at the job limit (UNCOMMITTED in the worktree, not yet compiled -- ediag3 was measuring)
+### Ring-only placement: COMMITTED 0003294 (static 51 cases green, 1,124,919 checks); not yet: mutants
+(`evidence/stagee/scripts/mutate_ring.py`, R1-R7), frozen home, engine checks (list below). Was:
 Ring-only placement + int8 through the ring: `arch/kva_config.h` (PLACE/RING retired, refused by name),
 `arch/kva_declare.h` (`decl_ring`, always declared, int8 too), `arch/kva_projector.h` (RowBlock: bf16 [n+1] rows /
 int8 stored codes + scales + bias at the hook's sizes; host block + 2 VRAM slots only; upload key mode × table),
