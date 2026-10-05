@@ -27,6 +27,12 @@ D=$(readlink -f "$W/data")
 COMMIT=$(git rev-parse HEAD) SHORT=$(git rev-parse --short HEAD)
 E=$W/evidence/release; mkdir -p "$E"
 : "${RK_RELEASE_VERSION:=0.2.0}"
+# the radiance release the plugin is built against and served on (the rebase onto 1.0.13 changes these four):
+: "${RK_RADIANCE_VERSION:=1.0.8}"
+: "${RK_RADIANCE_SRC:=/var/home/dylan/projects/inference/radiance}"
+: "${RK_BUILD_IMAGE:=radiance-build}"
+: "${RK_IMAGE:=stilldeadcode/radiance:$RK_RADIANCE_VERSION}"
+export RK_RADIANCE_SRC RK_BUILD_IMAGE RK_IMAGE
 : "${RK_RELEASE_DIST:=/var/home/dylan/AI-Work/radiance-kva-plugin-20261004/dist}"
 export RK_MODEL=/var/home/dylan/models/rad/qwen3.8-next-flash-fp8-iq4r-moe.rad
 export RK_DOCS=/var/home/dylan/AI-Work/kva-flashnext-tests-data/samples/quick/ppl.jsonl
@@ -42,14 +48,14 @@ quiet() {
     [ $n -ge 60 ] && break; sleep 10; n=$((n + 1)); done
   echo "load $(cut -d' ' -f1 /proc/loadavg) busy $busy waited $((n * 10))s"
 }
-log "RELEASE start $(date -u +%FT%TZ) boot $(cat /proc/sys/kernel/random/boot_id) commit $COMMIT version $RK_RELEASE_VERSION"
+log "RELEASE start $(date -u +%FT%TZ) boot $(cat /proc/sys/kernel/random/boot_id) commit $COMMIT version $RK_RELEASE_VERSION; radiance $RK_RADIANCE_VERSION ($RK_IMAGE, build $RK_BUILD_IMAGE, source $RK_RADIANCE_SRC)"
 
 # 0 + 1 ------------------------------------------------------------------------------------------------
-RK_RADIANCE_SRC=/var/home/dylan/projects/inference/radiance scripts/frozen_home.sh "$SHORT" > "$E/frozen_home.out" 2>&1 ||
+scripts/frozen_home.sh "$SHORT" > "$E/frozen_home.out" 2>&1 ||
   { log "frozen home FAILED: $(grep -E 'FAIL|error' "$E/frozen_home.out" | head -5 | tr '\n' '|')"; exit 2; }
 log "home $SHORT: $(grep 'tests passed' "$E/frozen_home.out")"
 python3 tools/package.py --home "$D/home-$SHORT" --projector "$D/projector-qwen38fn-int8" --out "$RK_RELEASE_DIST" \
-  --version "$RK_RELEASE_VERSION" --commit "$COMMIT" --radiance-version 1.0.8 > "$E/package.out" 2>&1 ||
+  --version "$RK_RELEASE_VERSION" --commit "$COMMIT" --radiance-version "$RK_RADIANCE_VERSION" > "$E/package.out" 2>&1 ||
   { log "package FAILED: $(tail -3 "$E/package.out" | tr '\n' '|')"; exit 2; }
 (cd "$RK_RELEASE_DIST" && sha256sum -c SHA256SUMS) > "$E/dist-sums.txt" 2>&1 || { log "dist SHA256SUMS FAILED"; exit 2; }
 X=$E/extract; rm -rf "$X"; mkdir -p "$X"
