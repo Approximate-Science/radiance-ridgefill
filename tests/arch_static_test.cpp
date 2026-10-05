@@ -1054,6 +1054,35 @@ TEST(a_host_placed_projector_approximates_only_passes_with_enough_bulk_rows) {
     CHECK_EQ(cfg.min_bulk_rows, 0);
 }
 
+/* DD-A's T_ck floor (Stage C) -- a chunk that writes a checkpoint keeps its last T_ck rows exact
+ * (rounded up to the tile); a chunk that writes none is untouched; 0 is off; it composes with a
+ * capped n_ahead (the smaller bulk end wins). The switch is read at declare. */
+TEST(a_checkpoint_writing_chunk_keeps_its_last_t_ck_rows_exact) {
+    using namespace qwen4exp_kva;
+    PlanIn in;
+    in.mode = PLAN_QUALITY; in.eligible = in.stream_ok = true;
+    in.n_tok = 2048; in.n_seq = 1; in.q_prefill = 2048;
+    PlanConfig pc;
+    struct Case { int64_t floor, ckpts, ahead, b; };
+    for (const Case& c : {Case{0, 1, 2048, 2048}, Case{512, 0, 2048, 2048}, Case{512, 1, 2048, 1536},
+                          Case{500, 1, 2048, 1536}, Case{1024, 1, 2048, 1024}, Case{512, 1, 1536, 1536},
+                          Case{512, 1, 1024, 1024}}) {
+        pc.ckpt_floor = c.floor; in.n_checkpoints = c.ckpts; in.n_ahead = c.ahead;
+        CHECK_EQ(plan_pass(in, pc).b, c.b);
+    }
+    Env e({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_CKPT_FLOOR", "512"}});
+    Config cfg;
+    RadModelMeta meta = flash_next_meta();
+    REQUIRE_EQ(read_config(&meta, &cfg), RAD_OK);
+    CHECK_EQ(cfg.ckpt_floor, 512);
+    Pair p;
+    declare_pair(p, "quality");
+    REQUIRE_EQ(p.st, RAD_OK);
+    Batch x = make_step(p.kva, {{128}, 0, 2048});
+    x.b.n_checkpoints = 1;
+    CHECK_EQ(qwen4exp_kva::derive(qwen4exp_kva::g_kva[0], &x.b).path, (int)PATH_STOCK);   /* 128 rows: all floor */
+}
+
 /* R73 -- KL MODE IS EXACT UNLESS THE SWITCH IS SET: a declare that sizes logits for every prompt
  * row (max_out_rows > 0) serves every pass stock, because bulk rows' logits are not the model's;
  * RADIANCE_KVA_SCORE_BULK=1 says the caller scores the exact tail only, and the pass approximates. */
