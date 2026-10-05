@@ -79,6 +79,31 @@ suites that fake their inputs.
 `-DRAD_WITH_HIP=OFF` leaves out the device rows even against a HIP install. Every `build*/` and `home/`
 directory is git-ignored.
 
+## Updating to a new radiance release
+
+The plugin is built against ONE radiance release (`RADIANCE_RELEASE` names it, with its commit): the arch
+plugin compiles that release's in-tree Qwen4-Exp source, and the release guard forwards to the engine's own
+architecture on any other. To try a new release:
+```sh
+scripts/update_radiance.sh v1.0.14              # host only: no GPU, ~15 min the first time, ~1 min after
+scripts/update_radiance.sh --gpu-smoke v1.0.14  # + one queued GPU session, ~15-20 min
+```
+It archives the release from the radiance checkout into `data/radiance-src-<release>/` (read-only), builds a
+host-only install of it and the plugin against it, runs `ctest -LE gpu` -- the static oracle holds `off` and
+every approximate path issue for issue against THAT release's in-tree plugin -- and pytest, and on green
+builds the device plugins in `radiance-build:<release>` and the release packages (`tools/package.py`) into
+`dist/radiance-kva-r<release>-<commit>/`. It ends `RESULT: PASS` or `RESULT: FAIL` (exit 0 / 1); logs and a
+summary in `data/update-<release>/`. `--gpu-smoke` adds one `gpuq` session on `stilldeadcode/radiance:<release>`:
+stock and `off` ident (must match), an exact KL reference for the release, int8 quality T2560 and int8
+speed T2048 scored last-512 paired vs exact.
+
+Either way it lists which in-tree files the adapter COPIES changed since the pinned release, and which
+adapter file copies each (`arch/*.copies`). When the oracle fails, those are the files to port: a compile
+error names the line that no longer fits (e.g. on v1.0.8 this branch fails in `arch/qwen4exp_moe.h` because
+1.0.10's four-class MoE fields do not exist there), a failing static case prints its first difference.
+Port the adapter file, rerun until PASS, then update `RADIANCE_RELEASE` and the release README's version.
+The 1.0.8 -> 1.0.13 port is the worked example (notes/rebase-1.0.13.md): one file changed.
+
 ## Switches (read once, at startup)
 
 The MODE comes from the environment only, default `off`: a container's `kva.mode` is ignored (and said so
