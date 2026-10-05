@@ -46,6 +46,8 @@ inline void kva_rows_of(void* h, std::vector<const RadKernelInfo*>* out) {
     }
 }
 
+/* dl_iterate_phdr's visitor: kva.so is already loaded by the engine (RTLD_NOLOAD finds it without loading
+ * a second copy), and the first loaded object whose plugin info names "kva" answers. */
 inline int visit_kva(struct dl_phdr_info* info, size_t, void* out) {
     auto* rows = (std::vector<const RadKernelInfo*>*)out;
     if (!info->dlpi_name || !info->dlpi_name[0] || !rows->empty()) return 0;
@@ -67,6 +69,7 @@ inline std::vector<const RadKernelInfo*> i8_rows() {
 /* One map's stored form: codes (operand b) and scale (operand b_scale). */
 struct I8Stored { std::vector<unsigned char> codes, scale; };
 
+/* A host tensor view for the layout hook: one 2-D plane over `data`, row-major. */
 inline RadTensor plane(uint32_t dtype, int64_t rows, int64_t cols, const void* data) {
     RadTensor t{};
     t.dtype = dtype;

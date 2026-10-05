@@ -157,6 +157,8 @@ inline int pick(const char* s, std::initializer_list<const char*> names) {
     return -1;
 }
 
+/* Strict parses: the whole string or nothing. "2048x" or "1e3" for a row count is refused, never read as
+ * a prefix -- a switch that silently means something else would mislabel every number taken under it. */
 inline bool parse_int(const char* s, int64_t* out) {
     char* end = nullptr;
     errno = 0;
@@ -206,6 +208,8 @@ inline int read_int(const char* name, int64_t lo, int64_t hi, const char* allowe
     return RAD_OK;
 }
 
+/* Switches from the retired container-append route: refused by name rather than ignored, so a script
+ * written for it cannot run believing it selected a variant. */
 inline int read_variants(Config* c) {
     for (const char* retired : { "RADIANCE_KVA_PROJ", "RADIANCE_KVA_ST", "RADIANCE_KVA_DECLARE" })
         if (const char* v = env(retired)) {

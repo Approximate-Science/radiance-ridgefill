@@ -96,6 +96,8 @@ static const char* decl_masked(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
     return decl_probes(b, k) < 0 ? "a buffer" : nullptr;
 }
 
+/* The startup line every measurement quotes: the mode and every number the planner and the masked path
+ * will read, so a log names the configuration that produced it (rad_note, once per declare). */
 static void note_config(RadBuilder* b, const Kva& k) {
     const Config& c = k.cfg;
     char rows[24] = "any";

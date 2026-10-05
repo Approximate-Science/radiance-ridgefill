@@ -47,7 +47,7 @@ struct Loaded {
     bool    has_final = false; /* final.weight [w, w] + final.bias [w] bf16: the MTP map (kva_final.h) */
 };
 static Loaded     g_loaded;
-static std::mutex g_load_mu;
+static std::mutex g_load_mu;   /* TP ranks declare on their own threads; the first reads the folder */
 /* Tests hand a folder in here instead of the disk (tests/arch_static_test.cpp); null in a build. */
 static const Folder* g_folder_for_test = nullptr;
 
@@ -64,8 +64,10 @@ struct Upload {
 };
 static Upload g_upload[MAX_RANKS];
 
+/* The row tables quality mode selects its exact rows from, indexed by RADIANCE_KVA_ROWSEL_TABLE. */
 static const char* const kScoreNames[] = { "score", "score_none", "score_all" };
 
+/* The folder's tensor `name`, or null; `shaped` = present with exactly this dtype and shape. */
 inline const FolderTensor* tensor(const Folder& f, const std::string& name) {
     auto it = f.tensors.find(name);
     return it == f.tensors.end() ? nullptr : &it->second;
@@ -172,6 +174,7 @@ struct Piece { const unsigned char* src; int64_t bytes; bool host; int64_t at; }
 /* The int8 maps' stored forms, made for one rank's upload and dropped after it. */
 using Stored = std::vector<I8Stored>;
 
+/* Reserves `bytes` at the block's next 256-byte boundary and plans the copy of `src` there; the offset. */
 inline int64_t place_piece(std::vector<Piece>& plan, int64_t* end, const unsigned char* src,
                            int64_t bytes, bool host) {
     const int64_t at = (*end + 255) / 256 * 256;   /* the GEMM wants 16-byte rows; 256 is the plane rule */
@@ -214,6 +217,7 @@ inline unsigned char* dev_at(const Upload& u, bool host, int64_t at) {
     return base ? base + at : nullptr;
 }
 
+/* A rank's copies back to the device allocator (plugin close, or a test declaring another mode). */
 inline void free_upload(Upload& u) {
     if (u.vram) rad_dev_free(u.vram, RAD_MEM_DEVICE);
     if (u.host) rad_dev_free(u.host, RAD_MEM_HOST_MAPPED);

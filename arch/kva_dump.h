@@ -53,6 +53,8 @@ namespace kva {
 using namespace rad::arch;
 
 /* Device to host, after everything issued so far has run. */
+/* A device read on the step's stream: sync, copy, sync. It stalls the step twice, which is why every dump
+ * and capture sits behind a switch no measured run sets. */
 inline bool dump_read(RadCtx* c, void* host, const void* dev, int64_t bytes) {
     RadStream s = rad_stream(c);
     return dev && rad_stream_sync(s) >= 0 && rad_memcpy_async(host, dev, bytes, s) >= 0 &&
@@ -72,6 +74,7 @@ inline bool dump_chunk(RadCtx* c, const RadBatch* b, int32_t* start, std::vector
            dump_read(c, ids->data(), b->token_ids, b->n_tok * 4);
 }
 
+/* One JSON line appended to `path` (the dumps' index files), or the reason on stderr. */
 inline void dump_line(const std::string& path, const std::string& line) {
     if (FILE* f = std::fopen(path.c_str(), "a")) {
         std::fprintf(f, "%s\n", line.c_str());
@@ -177,6 +180,8 @@ inline std::string chunk_key(int32_t start, const std::vector<int32_t>& ids) {
     return buf;
 }
 
+/* One exact chunk's capture (rank 0): its ids and positions, the rows a stride-8 capture keeps, and the
+ * late layers whose block input it read -- what tools/refit's fit consumes. */
 struct Capture {
     std::string            dir, prefix;
     int32_t                start = -1;
@@ -217,6 +222,7 @@ inline std::string ints_json(const std::vector<int>& v) {
     return out + "]";
 }
 
+/* The chunk's index arrays and its capture.jsonl line: the geometry the fit checks the files against. */
 inline void capture_end(const Capture& cap, int64_t split, int64_t hidden, int64_t hc) {
     const std::string base = cap.dir + "/" + cap.prefix;
     const int64_t n = (int64_t)cap.ids.size(), r = (int64_t)cap.rows.size();
@@ -239,6 +245,7 @@ struct StateDump {
     std::vector<float> data;    /* [layers.size(), heads, V, K] in `layers` order */
 };
 
+/* One (chunk, rank) state file plus its index line; `approximate` says whether the chunk was KVA's. */
 inline void state_end(RadCtx* c, const std::string& dir, const RadBatch* b, const StateDump& sd,
                       int64_t heads, int64_t v, int64_t k, int rank, int world, bool approximate,
                       const char* mode) {
