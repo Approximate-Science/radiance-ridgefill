@@ -227,3 +227,25 @@ copy counters / RADIANCE_LOG_STEPS on a slow vs fast server, and whether a stock
 4. `flock gpu.lock env HOME_E=<home> sh evidence/stagee/scripts/ediag4.sh`: the slow prefill state -- stock with the
    same VRAM taken (headroom +128 / +1,228 MiB), RADIANCE_LOG_STEPS through the transition.
 5. Then e3 (int8 short-prompt table, now ring-only: drop qv arms), e4 (R85/R86/R89/R90), e5 (R88) -- each under ONE lock.
+
+## 11. Resume session S1 (2026-10-05 16:26-16:48Z, one gpu.lock; home `data/home-bc7e742` = ring-only 0003294 + tools; arch 1dad9831…, kva.so f0911d4a…; boot 75e3e39b…; evidence/stagee/ering/)
+- Mutants (`mutate_ring.py`, `ering/mutate_ring.out`): **7/7 caught** -- R1/R2 retired switches not refused, R3 int8
+  scales at the slot start, R4 int8 bias at the bf16 block's place, R5 canonical codes uploaded, R6 copy into the other
+  slot, R7 bias at the codes' start.
+- **off ident = R3** (R6/R7 for the ring-only code). `RADIANCE_KVA_PROJ_PLACE=vram` and `RADIANCE_KVA_PROJ_RING=0`:
+  startup refused, "is retired: the projector is always streamed from host memory through the staging ring …".
+- **bf16 through the ring, rows byte-IDENTICAL to A′'s R144 rows**: plumb FORCE_STREAM, speed T2048, quality T2048,
+  quality T2560 (67 approximate steps each).
+- **Stage B's config `--max-num-batched-tokens 8192 --max-num-seqs 10`: starts and serves** in quality and speed (a 9K
+  prompt, 8 concurrent decoders); pinned pool 9,860 / 9,813 slots of ~10,240 (≈0.4 GiB margin) with the ring's 128 MiB.
+- **R79 quality -- int8 through the ring holds the bf16 projector's level** (paired int8 − bf16 dNLL, same boot):
+  quality T2560 last 512 **−0.00109 [−0.00400, +0.00215]**; quality T2048 whole tail **+0.00101 [−0.00111, +0.00336]**;
+  quality T2048 last 512 +0.00169 [−0.00146, +0.00493]; speed T2048 last 512 +0.00041 [−0.00450, +0.00527]. int8
+  headline +0.00103 [−0.01348, +0.01529] vs exact (bf16 +0.00212). Labbook `stageE-r79-int8-minus-bf16`, HE-R79-kl
+  CONFIRMED. R79's TTFT half: S3.
+- Option C (correction + row table to host memory) NOT done: it would save 28 MiB a card (the ring's slots are 100 MiB)
+  and make every approximated chunk zero-copy ~54 MiB of correction (2 ops × 18 layers × 1.5 MiB) over the link --
+  unlikely to measure free; kept in VRAM.
+- Earlier stock-vs-plugin warm-up evidence (e1, ediag3 warm-up reps): 5 stock/off boots and plumb-held run 2K at
+  1,227-1,234 ms from the first request; every e1 quality server (vram and host, ON and held) started at 1,426-1,453 ms;
+  ediag3's quality-host-held started slow and turned fast mid-warm-up, its speed-host-held started fast. S2 settles it.
