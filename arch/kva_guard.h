@@ -154,15 +154,16 @@ inline std::string engine_object() {
 }
 
 
-/* The in-tree architecture this plugin shadows: architectures/qwen4exp_fp8.so in a $RADIANCE_HOME
- * entry (split as the engine splits it, startup.cpp:96-108) that is not this file itself. */
-inline std::string find_shadowed(const std::string& self) {
+/* The in-tree architecture this plugin shadows: architectures/<so> in a $RADIANCE_HOME entry (split
+ * as the engine splits it, startup.cpp:96-108) that is not this file itself. `so` is the adapter's
+ * stem (it shadows that file by name, arch/CMakeLists.txt), so the core names no model. */
+inline std::string find_shadowed(const std::string& self, const char* so) {
     const char* home = std::getenv("RADIANCE_HOME");
     const std::string h = home ? home : "";
     for (size_t at = 0; at <= h.size();) {
         size_t end = h.find(':', at);
         if (end == std::string::npos) end = h.size();
-        const std::string cand = real_path(h.substr(at, end - at) + "/architectures/qwen4exp_fp8.so");
+        const std::string cand = real_path(h.substr(at, end - at) + "/architectures/" + so);
         if (!cand.empty() && cand != self) return cand;
         at = end + 1;
     }
@@ -197,8 +198,9 @@ inline bool take_forward(const std::string& path) {
     return true;
 }
 
-/* rad_plugin_open's body: RAD_OK to serve (as KVA, or forwarded), RAD_E_UNSUPPORTED to decline. */
-inline int open_guard() {
+/* rad_plugin_open's body: RAD_OK to serve (as KVA, or forwarded to the in-tree `so`), RAD_E_UNSUPPORTED
+ * to decline. */
+inline int open_guard(const char* so) {
     const std::string engine = engine_object();
     const int hits = count_version(engine.c_str(), KVA_RADIANCE_VERSION);
     if (hits == 1) return RAD_OK;
@@ -206,7 +208,7 @@ inline int open_guard() {
     const std::string self = dladdr((void*)&open_guard, &me) && me.dli_fname
                                  ? real_path(me.dli_fname) : std::string();
     const std::string sha = sha256_file(engine.c_str()), found = releases_in(engine.c_str());
-    const std::string shadow = find_shadowed(self);
+    const std::string shadow = find_shadowed(self, so);
     if (!shadow.empty() && take_forward(shadow)) {
         std::fprintf(stderr, "radiance: qwen4exp_kva: WARNING: built against radiance %s, and the "
                              "engine %s (sha256 %s) carries release string(s) '%s' (%s %d times); "
@@ -217,10 +219,10 @@ inline int open_guard() {
     }
     std::fprintf(stderr, "radiance: qwen4exp_kva: built against radiance %s, and the engine %s "
                          "(sha256 %s) carries release string(s) '%s' (%s %d times); no in-tree "
-                         "architectures/qwen4exp_fp8.so on $RADIANCE_HOME to forward to, so this "
+                         "architectures/%s on $RADIANCE_HOME to forward to, so this "
                          "plugin declines (a home given only as --radiance-home is not visible to "
                          "it)\n", KVA_RADIANCE_VERSION, engine.c_str(), sha.c_str(), found.c_str(),
-                 KVA_RADIANCE_VERSION, hits);
+                 KVA_RADIANCE_VERSION, hits, so);
     return RAD_E_UNSUPPORTED;
 }
 

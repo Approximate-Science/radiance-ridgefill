@@ -2641,7 +2641,7 @@ TEST(sha256_matches_the_fips_vectors) {
 TEST(the_forward_table_starts_empty) {
     CHECK(qwen4exp_kva::g_forward.declare == nullptr && qwen4exp_kva::g_forward.step == nullptr &&
           qwen4exp_kva::g_forward.probe == nullptr);
-    CHECK(qwen4exp_kva::find_shadowed("").empty() || std::getenv("RADIANCE_HOME") != nullptr);
+    CHECK(qwen4exp_kva::find_shadowed("", qwen4exp_kva::kShadowSo).empty() || std::getenv("RADIANCE_HOME") != nullptr);
 }
 
 /* THE STAGING RING (DD-L, one slot since Stage E): each late layer's map + bias row block is copied

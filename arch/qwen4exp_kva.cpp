@@ -42,6 +42,10 @@ namespace qwen4exp_kva {
 
 using namespace rad::arch;
 
+/* The in-tree file this plugin is built to shadow (arch/CMakeLists.txt's stem): the guard forwards to
+ * it on a release mismatch. */
+constexpr const char* kShadowSo = "qwen4exp_fp8.so";
+
 static_assert((int)MODE_OFF == PLAN_OFF && (int)MODE_PLUMB == PLAN_PLUMB && (int)MODE_SPEED == PLAN_SPEED &&
               (int)MODE_QUALITY == PLAN_QUALITY, "kva_config.h's Mode and kva_plan.h's PlanMode share one order");
 
@@ -372,7 +376,7 @@ static int probe(const RadModelMeta* meta, RadArchProbe* out) {
 }  /* namespace qwen4exp_kva */
 
 #ifdef QWEN4EXP_KVA_EXPORTS
-extern "C" int rad_plugin_open(void) { return qwen4exp_kva::open_guard(); }
+extern "C" int rad_plugin_open(void) { return qwen4exp_kva::open_guard(qwen4exp_kva::kShadowSo); }
 extern "C" void rad_plugin_close(void) { qwen4exp_kva::free_uploads(); }
 RAD_ARCH_PROBE(qwen4exp_kva)
 RAD_ARCH_PLUGIN(qwen4exp_kva, "qwen4exp", "", "0.2.0",
