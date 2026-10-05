@@ -215,3 +215,15 @@ issues the stock step). Prime suspect: the expert mover still migrating experts 
 plugin's held VRAM; the heat engine moves 8 units a dispatch) until it converges -- the fast state. Next: the mover's
 copy counters / RADIANCE_LOG_STEPS on a slow vs fast server, and whether a stock server with the same held VRAM
 (headroom +128 MiB / +1,228 MiB) shows the same slow start.
+
+## 10. Resume order (written 16:01Z; supersedes §7's list)
+1. Mutants for 0003294: `python3 evidence/stagee/scripts/mutate_ring.py` (R1-R7) -- compiles: only when no radiance-kva
+   container is up (`/tmp/stagee-gapbuild.sh` pattern) or between my own sessions.
+2. Frozen home of the ring-only commit: `RK_RADIANCE_SRC=~/projects/inference/radiance scripts/frozen_home.sh <HEAD>`.
+3. `flock gpu.lock env HOME_E=<that home> sh evidence/stagee/scripts/ering.sh` (detached, nohup setsid): off ident,
+   retired-switch refusals, bf16-ring KL bytes vs A′'s R144 rows, int8-ring KL (R79), Stage B's 8192/10 config,
+   int8-ring vs bf16-ring TTFT 9K/16K/32K + 16K profiles (the ring's `cast`: 24 calls a pass; the stream copy into h_S
+   is the other `cast`, 1 call a masked pass).
+4. `flock gpu.lock env HOME_E=<home> sh evidence/stagee/scripts/ediag4.sh`: the slow prefill state -- stock with the
+   same VRAM taken (headroom +128 / +1,228 MiB), RADIANCE_LOG_STEPS through the transition.
+5. Then e3 (int8 short-prompt table, now ring-only: drop qv arms), e4 (R85/R86/R89/R90), e5 (R88) -- each under ONE lock.
