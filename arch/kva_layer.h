@@ -201,7 +201,7 @@ inline void ring_copy(RadCtx* c, const Kva& k, int64_t li) {
 inline void ring_next(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li) {
     if (!k.op_ring) return;
     rad_lane_join(c, 1, 0);
-    if (li + 1 < m.g.n_layer) ring_copy(c, k, li + 1);
+    if (li + 1 < k.ring_end) ring_copy(c, k, li + 1);   /* after the last layer: the final map's blocks (MTP) */
 }
 
 /* THE PROJECTOR over rows [r0, r0 + rows) of the layer-S stream `src` into `dst`: the bf16 GEMM, or

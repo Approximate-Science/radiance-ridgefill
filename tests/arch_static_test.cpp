@@ -2575,6 +2575,156 @@ TEST(an_int8_folder_without_one_agreed_stored_form_is_refused_by_name) {
     CHECK(has(log, "its projector dtype 'i4' is neither bf16 nor i8"));
 }
 
+/* ==================================================================== the MTP final map (Stage D, R71) */
+
+/* The final map's bytes: 210 MB with a pattern, so each block's copy can be traced to its rows. */
+const unsigned char* final_bytes() {
+    static std::vector<unsigned char> v;
+    if (v.empty()) {
+        v.resize((size_t)10240 * 10240 * 2 + 10240 * 2);
+        for (size_t i = 0; i < v.size(); ++i) v[i] = (unsigned char)(i * 2654435761u >> 13);
+    }
+    return v.data();
+}
+
+/* hold_kva's folder plus final.weight [hc*n, hc*n] and final.bias [hc*n], and the manifest saying so. */
+void hold_kva_final(RadBuilder& b) {
+    hold_kva(b, {"kva.proj", "kva.st"});
+    hold_score(b, "kva.rowsel.score");
+    const std::string text = std::string(R"({"format": 1, "adapter": "qwen4exp", "split": 4,
+        "final": {"file": "final.safetensors", "dtype": "bf16"},
+        "model": {"arch_id": "qwen4exp", "name": "test-q38-flashnext",
+                  "meta": {"hc_count": "4", "linear_num_value_heads": "48"},
+                  "vocab_sha256": ")") + kTinyVocab + R"("},
+        "files": {"final.safetensors": "unused by the test folder"}})";
+    g_test_folder.manifest = qwen4exp_kva::Json{};
+    qwen4exp_kva::json_parse(text.data(), text.size(), &g_test_folder.manifest);
+    for (auto [name, shape, at] : {std::tuple<const char*, std::vector<int64_t>, int64_t>{"final.weight", {10240, 10240}, 0},
+                                   {"final.bias", {10240}, 10240LL * 10240 * 2}}) {
+        qwen4exp_kva::FolderTensor t;
+        t.data = final_bytes() + at;
+        t.dtype = RAD_BF16;
+        t.shape = shape;
+        t.bytes = rad_dtype_bytes(RAD_BF16, shape.size() == 2 ? shape[0] * shape[1] : shape[0]);
+        g_test_folder.tensors[name] = t;
+    }
+}
+
+/* With MTP (max_spec > 0) the final map is declared, uploaded as hc row blocks of [n + 1, hc*n] -- block i holds
+ * rows i*n .. i*n + n of the map and that slice of the bias -- and ridden by the ring after the last late layer;
+ * without MTP, or with RADIANCE_KVA_FINAL=off, nothing of it is declared or held. */
+TEST(the_final_map_is_held_and_declared_only_with_mtp) {
+    RadModelMeta meta = flash_next_meta();
+    for (auto [spec, sw, want] : {std::tuple<int, const char*, bool>{3, "on", true}, {0, "on", false}, {3, "off", false}}) {
+        RadBuildCtx c = served_ctx();
+        c.max_spec = spec;
+        Env env({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_FINAL", sw}});
+        RadBuilder kva;
+        served(kva);
+        hold_kva_final(kva);
+        REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
+        const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+        CHECK_EQ(k.want_final, want);
+        CHECK_EQ(k.op_final != 0, want);
+        CHECK_EQ(k.b_final != 0, want);
+        CHECK_EQ(k.ring_end, (int64_t)(8 + (want ? 4 : 0)));
+        CHECK_EQ(k.final_w.size(), (size_t)(want ? 4 : 0));
+        if (!want) continue;
+        CHECK_EQ(kva.ops[k.op_final - 1].op, std::string("kva_gemm_nt_bias"));
+        CHECK(kva.concurrent.count(k.b_final));
+        const int64_t row = 10240 * 2;
+        for (int i = 0; i < 4; ++i) {
+            const unsigned char* block = (const unsigned char*)k.ring_src[(size_t)(8 + i)].raw - kDeviceView;
+            CHECK_EQ(k.ring_src[(size_t)(8 + i)].rows, 2561);
+            CHECK(std::memcmp(block, final_bytes() + (size_t)i * 2560 * row, (size_t)2560 * row) == 0);
+            CHECK(std::memcmp(block + 2560 * row, final_bytes() + 10240LL * row + (size_t)i * 2560 * 2, 2560 * 2) == 0);
+            /* the slot it lands in keeps alternating after layer 7 (index 8 + i), and the GEMM reads it */
+            CHECK(k.ring_dst[(size_t)(8 + i)].raw == k.ring_dst[(size_t)((8 + i) % 2 ? 7 : 6)].raw);
+            CHECK(k.final_w[(size_t)i].raw == k.ring_dst[(size_t)(8 + i)].raw);
+            CHECK_EQ((uintptr_t)k.final_b[(size_t)i].raw, (uintptr_t)k.final_w[(size_t)i].raw + 2560u * row);
+        }
+    }
+}
+
+/* R71: with MTP, every approximate path ends with the final map -- hc GEMMs over the bulk rows' layer-S stream
+ * (h_S on the masked path, b_h's rows on lean and straddle), block i into columns i*n .. i*n + n of kva_final --
+ * and the predicted rows go into b_h through the mask (masked, straddle) or by a row copy (lean), right before
+ * the epilogue's connection read. Everything else is the pass without the map, op for op; the ring carries the
+ * hc blocks after the last layer, each copied while the one before computes. */
+TEST(with_mtp_the_bulk_rows_take_the_predicted_final_stream_before_the_epilogue) {
+    struct Case { const char* mode; Shape s; int path; };
+    for (const Case& cs : {Case{"speed", {{2048}, 0, 2048}, qwen4exp_kva::PATH_LEAN},
+                           Case{"speed", {{128}, 0, 1984}, qwen4exp_kva::PATH_STRADDLE},
+                           Case{"quality", {{1, 64, 128}, 1, 2048}, qwen4exp_kva::PATH_MASKED}}) {
+        RadModelMeta meta = flash_next_meta();
+        RadBuildCtx c = served_ctx();
+        c.max_spec = 3;
+        const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
+        std::vector<std::string> runs[2];
+        Run r[2];
+        RadBuilder b[2];
+        for (int on = 0; on < 2; ++on) {
+            Env env({{"RADIANCE_KVA", cs.mode}, {"RADIANCE_KVA_FINAL", on ? "on" : "off"}});
+            served(b[on]);
+            hold_kva_final(b[on]);
+            REQUIRE_EQ(qwen4exp_kva::declare(&b[on], &meta, &c), RAD_OK);
+            Batch x = make_step(b[on], cs.s);
+            const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+            const qwen4exp_kva::Pass p = qwen4exp_kva::derive(k, &x.b);
+            REQUIRE_EQ(p.path, cs.path);
+            r[on] = run_step(qwen4exp_kva::step, x.b);
+            runs[on] = named(r[on].issues, b[on], k);
+            if (!on) continue;
+            /* the final segment: right before the mixer's read */
+            const std::vector<RecIssue>& v = r[on].issues;
+            size_t mix = 0;
+            while (mix < v.size() && v[mix].op != m.mixer.op_read) ++mix;
+            REQUIRE(mix >= 5 && mix < v.size());
+            const int64_t T = x.b.n_tok, r0 = p.path == qwen4exp_kva::PATH_MASKED ? p.s_lb : 0;
+            const int64_t rows = p.path == qwen4exp_kva::PATH_LEAN ? T : p.b - r0;
+            for (int i = 0; i < 4; ++i) {
+                const RecIssue& g = v[mix - 5 + (size_t)i];
+                CHECK_EQ(g.op, k.op_final);
+                CHECK_EQ(g.n, rows);
+                CHECK(same_operand(g.opd[0], brow_slice(p.path == qwen4exp_kva::PATH_MASKED ? k.b_hs : m.b_h, r0, rows, 10240)));
+                CHECK(g.opd[1].raw == k.final_w[(size_t)i].raw && g.opd[2].raw == k.final_b[(size_t)i].raw);
+                CHECK(same_operand(g.opd[4], bcol_at(k.b_final, r0, 10240, i * 2560, 2560, rows)));
+            }
+            const RecIssue& in = v[mix - 1];
+            if (p.path == qwen4exp_kva::PATH_LEAN) {
+                CHECK_EQ(in.op, k.op_cast);
+                CHECK(same_operand(in.opd[1], brows(m.b_h, T)));
+            } else {
+                CHECK_EQ(in.op, k.op_select);
+                CHECK(same_operand(in.opd[0], brows(k.b_mask, T)) && same_operand(in.opd[4], brows(m.b_h, T)));
+            }
+            /* the ring: blocks 8 .. 11 copied after layer 7, each waited for before its GEMM */
+            std::vector<std::string> seq;
+            for (const RecIssue& i : r[on].all) {
+                if (i.op == kJoin) seq.push_back("join" + std::to_string(i.n / 16) + std::to_string(i.n % 16));
+                else if (i.op == k.op_ring) {
+                    int j = -1;
+                    for (int y = kSplit; y < 12; ++y) if (i.opd[0].raw == k.ring_src[(size_t)y].raw) j = y;
+                    seq.push_back("copy" + std::to_string(j));
+                } else if (i.op == k.op_final) seq.push_back("final");
+            }
+            const std::vector<std::string> tail(seq.end() - 15, seq.end());
+            const std::vector<std::string> want = { "join10", "join01", "copy9", "final", "join10", "join01", "copy10",
+                                                    "final", "join10", "join01", "copy11", "final", "join10", "final" };
+            CHECK(std::vector<std::string>(tail.end() - 14, tail.end()) == want);
+            CHECK(std::find(seq.begin(), seq.end(), "copy8") != seq.end());
+        }
+        /* everything but the final segment is the pass without the map */
+        std::vector<std::string> on_wo;
+        for (const std::string& t : runs[1])
+            if (t.rfind("kva_gemm_nt_bias#" + std::to_string(8 - kSplit), 0) != 0) on_wo.push_back(t);
+        on_wo.erase(std::remove_if(on_wo.begin(), on_wo.end(), [](const std::string& t) {
+            return t.find("kva_final") != std::string::npos; }), on_wo.end());
+        CHECK(on_wo == runs[0]);
+        CHECK_EQ(r[1].device_calls, 0);
+    }
+}
+
 /* ==================================================================== the folder on disk */
 
 /* A safetensors file of the given tensors (all zeros), as safetensors writes one. */

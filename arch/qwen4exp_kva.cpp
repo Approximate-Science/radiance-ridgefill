@@ -229,6 +229,7 @@ static void approximate_step(RadCtx* c, const Kva& k, const RadBatch* batch, con
         else if (p.path == PATH_STRADDLE) straddle_layer(c, k, m, li, batch, p, sd);
         else                              masked_layer(c, k, m, li, batch, p, sd);
     }
+    final_stream(c, k, m, batch, p);   /* MTP: the bulk rows' predicted final stream, before the epilogue reads b_h */
     epilogue(c, m, batch);
 }
 

@@ -26,6 +26,11 @@
  *                             rows inside an ON server, and A.1's 64-row guard cost 331 ms at 9,216
  *                             and ran every T 2560 chunk exact. A threshold stays available for a
  *                             machine where the link makes streaming many rows lose    default unlimited
+ *   env RADIANCE_KVA_FINAL    on | off: with MTP (--num-speculative-tokens > 0) and a folder holding the
+ *                             `final` map, every approximate pass writes the predicted final stream of its
+ *                             bulk rows into the trunk's stream before the epilogue, which the MTP head reads
+ *                             (kva_final.h; DD-D). off = the head reads what the pass left (R70's control)
+ *                                                                                     default on
  *   env RADIANCE_KVA_SCORE_BULK  1: approximate in KL mode too, whose logits on bulk rows are then
  *                             not the model's -- score only the exact tail (PLAN-FIX §6.2, R73)
  *
@@ -101,6 +106,7 @@ struct Config {
     int         stage       = STAGE_AUTO;
     int64_t     stage_rows  = INT64_MAX;   /* always stream: notes/impl.md A.1 R96, the guard's trade */
     bool        score_bulk  = false;
+    bool        final_on    = true;        /* RADIANCE_KVA_FINAL: the MTP `final` map, when held and MTP is on */
     int         straddle    = STRADDLE_SPLIT;
     int64_t     force_split = 0;
     int64_t     shift_b     = 0;
@@ -196,6 +202,8 @@ inline int read_switches(Config* c) {
     RAD_ARCH_TRY(read_int("RADIANCE_KVA_STAGE_ROWS", 0, INT64_MAX, "a row count", &c->stage_rows));
     RAD_ARCH_TRY(read_choice("RADIANCE_KVA_SCORE_BULK", { "0", "1" }, "1 or unset", &v));
     c->score_bulk = v == 1;
+    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_FINAL", { "on", "off" }, "on|off", &v));
+    c->final_on = v == 0;
     RAD_ARCH_TRY(read_choice("RADIANCE_KVA_STRADDLE", { "split", "end" }, "split|end",
                              &c->straddle));
     RAD_ARCH_TRY(read_int("RADIANCE_KVA_FORCE_SPLIT", 1, INT64_MAX, "a positive row count",

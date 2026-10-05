@@ -46,6 +46,15 @@ struct Kva {
      * row block and the VRAM slot it is copied into, and the copy op. */
     std::vector<RadOperand> ring_src, ring_dst;
     rad_op op_ring = 0;
+    int64_t ring_end = 0;                     /* blocks the ring moves a pass: the late layers' indices, then
+                                               * the final map's hc blocks (n_layer .. n_layer + hc) */
+    /* THE MTP `final` MAP (kva_final.h, DD-D): with MTP on, the predicted final stream of the bulk rows,
+     * computed from the layer-S stream in hc column blocks streamed through the ring, written into the
+     * trunk's stream before the epilogue. */
+    bool want_final = false;
+    std::vector<RadOperand> final_w, final_b; /* [hc]: each block's map rows and bias, in its ring slot */
+    rad_buf b_final = 0;
+    rad_op  op_final = 0;
     /* kva_state_correct per late delta-net layer (undo, apply) and kva_rho_update (quality). */
     std::vector<rad_op> op_undo, op_apply, op_rho;
     /* What each sequence's late delta-net layer had added to its state at its last approximate
@@ -289,6 +298,7 @@ static int decl_fill(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuild
 }  /* namespace qwen4exp_kva */
 
 #include "kva_projector.h"
+#include "kva_final.h"
 #include "kva_declare_masked.h"
 
 #endif /* QWEN4EXP_KVA_DECLARE_H */

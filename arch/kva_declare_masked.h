@@ -139,7 +139,7 @@ static bool take_folder(RadBuilder* b, const RadModelMeta* meta, const qwen4exp_
 
 /* This rank's copies (the real declare only) handed to the issue sites. */
 static int take_upload(const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva& k) {
-    if (!upload_rank(g_loaded, m, k.cfg, ctx->rank)) return RAD_E_DEVICE;
+    if (!upload_rank(g_loaded, m, k.cfg, ctx->rank, k.want_final)) return RAD_E_DEVICE;
     const Upload& u = g_upload[ctx->rank];
     if (k.cfg.mode == MODE_PLUMB) return RAD_OK;
     k.proj_w = u.proj_w;
@@ -149,6 +149,8 @@ static int take_upload(const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva
     k.score = u.score;
     k.ring_src = u.ring_src;
     k.ring_dst = u.ring_dst;
+    k.final_w = u.final_w;
+    k.final_b = u.final_b;
     return RAD_OK;
 }
 
@@ -159,12 +161,18 @@ static int decl_selected(RadBuilder* b, const RadModelMeta* meta, const qwen4exp
                          const RadBuildCtx* ctx, Kva& k) {
     const bool probe = ctx->shape_probe != 0;
     if (!take_folder(b, meta, m, k)) return RAD_OK;
+    /* THE MTP final map (kva_final.h): only when this deployment drafts, the mode projects, the folder holds
+     * it and RADIANCE_KVA_FINAL is not off. Decided from declare-time numbers only. */
+    k.want_final = ctx->max_spec > 0 && (k.cfg.mode == MODE_SPEED || k.cfg.mode == MODE_QUALITY) &&
+                   g_loaded.has_final && k.cfg.final_on;
+    k.ring_end = m.g.n_layer + (k.want_final ? m.hccfg.hc : 0);
     if (!probe) RAD_ARCH_TRY(check_mode(k, m));
     if (!probe) RAD_ARCH_TRY(check_fill(m, k));
     if (!probe) RAD_ARCH_TRY(take_upload(m, ctx, k));
     if (k.cfg.mode != MODE_PLUMB) RAD_ARCH_TRY(decl_fill(b, m, ctx, k));
     const char* missing = decl_masked(b, m, ctx, k);
     if (!missing) missing = decl_kernel_ops(b, m, ctx, k);
+    if (!missing && k.want_final) missing = decl_final(b, m, ctx, k);
     if (missing && !probe) {
         std::fprintf(stderr, "radiance: qwen4exp_kva: mode %s issues '%s' and no kernel library "
                              "serves it -- kva.so is missing from $RADIANCE_HOME or declines this "
