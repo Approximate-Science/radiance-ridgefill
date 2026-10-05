@@ -23,10 +23,15 @@ Follow these steps to set up the plugin alongside your existing Radiance server:
    ```
 5. **(Optional) Configure chat template:** If you plan to use per-request opt-in once available, supply `--override-chat-template <model dir>/projector/chat_template.jinja` (or your merged template from `tools/kva_template.py`).
 6. **Mount directory in Docker:** If running inside Docker, mount the model's containing *directory* (e.g. `-v /data/models:/models`), rather than mounting only the single `.rad` file. The plugin discovers `projector/` relative to the model directory.
-7. **Start Radiance with your selected mode:** Launch the engine with your desired operating mode (e.g., `RADIANCE_KVA=quality`). Verify in the startup log that the projector was matched with zero warnings:
+7. **Start Radiance with your selected mode:** Launch the engine with your desired operating mode (e.g., `RADIANCE_KVA=quality`). Verify in the startup log that the projector was matched with zero warnings. The line the plugin prints (`arch/kva_projector.h`) is
    ```
-   KVA: projector /models/projector matches qwen4exp: arch ok, metadata 11/11, tokenizer ok, encodings 489/489, anchors 3/3, 0 warning(s)
+   radiance: qwen4exp_kva: KVA: projector <folder> (found <how>) matches <model>: arch ok, metadata <n>/<n>, tokenizer ok, encodings <n>/<n>, anchors <n>/<n>, <N> warning(s); split <S>, <correction>, <MiB> MiB in <files> files
    ```
+   A realistic filled example (as logged on the reference setup):
+   ```
+   radiance: qwen4exp_kva: KVA: projector /models/projector (found beside --model /models/qwen3.8-next-flash-fp8-iq4r-moe.rad (same device and inode as the mapped /models/qwen3.8-next-flash-fp8-iq4r-moe.rad)) matches qwen4exp: arch ok, metadata 11/11, tokenizer ok, encodings 489/489, anchors 3/3, 0 warning(s); split 24, correction held, 1257.0 MiB in 28 files
+   ```
+   What varies: the folder path and the parenthesised `(found ...)` rule that located it (`$RADIANCE_KVA_PROJECTOR=<dir>`, `beside --model <path> as typed`, or `beside the resolved model file <path>`); the model name as the engine reports it; the metadata/encodings/anchors counts (how many manifest keys checked out of how many); the warning count; the split layer; `correction held` vs `no correction`; and the folder's size and file count. What does **not** vary on a good match: `arch ok`, `tokenizer ok`, and `0 warning(s)`.
 
 ## Operating Modes
 
@@ -40,6 +45,8 @@ The operating mode is configured at engine startup via the `RADIANCE_KVA` enviro
 - `plumb`: Verification and diagnostics mode. Routes stock computation through the masked pipeline without approximation to verify numerical identity with stock kernels.
 
 ### Per-Request On/Off
+
+> **Not available in this build:** everything below describes the planned interface (Stage F, next release); the current release selects modes server-wide only.
 
 > **Note:** Per-request opt-in via chat template kwargs is **coming in the next release** (Stage F). In the current release, modes are selected server-wide.
 
@@ -64,7 +71,7 @@ The table below lists the trade-offs and resource costs across operating modes a
 | **VRAM Placement Side Effect** | Projector in VRAM (`RADIANCE_KVA_PROJ_PLACE=vram`) | On a KVA server with the projector in VRAM, chunks that run exact are slower than stock (16K all-exact 11.6 s vs 9.6 s) and short prompts run at 0.85–0.94x of stock due to fewer resident expert slots (staging buffer growth). | TBD (Stage E measurement, int8 halves it). |
 | **Concurrency (decoders present)** | Mixed traffic (prefill beside active decoders) | Speed mode keeps 67–89% of its solo speedup, still faster than stock in every measured case (1.34–2.30x faster than stock). Decoder text is byte-identical to KVA-off. | Measured in Stage B (`notes/stageb.md`, R54/R55). |
 | **Host Staging Ring** | `RADIANCE_KVA_PROJ_RING=0` (zero-copy gate) | **Prefill TTFT:** 2.7x slower than stock exact (27,096 ms at 16K; 54,104 ms at 32K) due to per-M-tile PCIe re-reads. | Do not disable the staging ring (`PROJ_RING=1` default). |
-| **Exact Tail vs Chunk Size** | `RADIANCE_KVA_TAIL=2048` (default) | Exact tail must satisfy $T \le 2 \times \text{step} - 64$. At chunk size 2048, $T < 4,032$. Startup refuses if exceeded. Prompts shorter than $T + \text{chunk}$ run stock exact. | To use small chunks with large tail, set `--checkpoint-interval` below `--max-num-batched-tokens`. |
+| **Exact Tail vs Chunk Size** | `RADIANCE_KVA_TAIL=2048` (default) | Exact tail must satisfy $T \le 2 \times \text{step} - 64$. At chunk size 2048, $T \le 4,032$; the code refuses only $T > 4{,}032$. Startup refuses if exceeded. Prompts shorter than $T + \text{chunk}$ run stock exact. | To use small chunks with large tail, set `--checkpoint-interval` below `--max-num-batched-tokens`. |
 | **Multimodal / Vision Steps** | Steps containing media | Steps with image/media inputs run stock exact compute (0 approximate steps). | Derive logic detects media rows and disables approximation for that step. |
 | **Prefix Cache & Branching** | Prefix cache interactions | Prefix cache storage capacity is unaffected (no per-token KV groups added). In per-request mode, the 64-token marker prepended to ON requests means ON and OFF requests do not share prefix cache trees; two ON requests branch normally. A conversation that is edited/branched to a shorter continuation can get part of its exact tail from approximated cache; the plugin counts these events; plain follow-up turns and regenerations are unaffected. | Cache snapshots record sequence state cleanly. |
 
@@ -89,4 +96,4 @@ The plugin maintains strict fallbacks to ensure existing setups remain operation
 1. **Missing Projector:** If no projector folder is present, the engine automatically serves stock Radiance without modification.
 2. **Incompatible Projector:** Any structural, dimension, or tokenizer mismatch causes the projector to be refused by name, immediately falling back to stock inference.
 3. **Model Variant Mismatches:** Differences in quantization encoding or weight anchors emit clear warnings naming both variants, but continue running KVA.
-4. **Engine Version Guard:** If the Radiance binary differs from release `1.0.8`, the plugin automatically forwards execution to the stock in-tree architecture on `$RADIANCE_HOME`, keeping the server functional in stock mode.
+4. **Engine Version Guard:** If the Radiance binary differs from release `1.0.8`, the plugin forwards execution to the engine's own in-tree Qwen4-Exp architecture (stock, KVA off, logged with both releases and the engine's sha256) — but only when that in-tree `.so` is on `$RADIANCE_HOME` behind this plugin's home. Otherwise the plugin declines and startup fails by name; a home given only via `--radiance-home` is invisible to plugins.
