@@ -751,6 +751,23 @@ TEST(the_approximate_decision_truth_table) {
     }
 }
 
+/* A.1 -- THE PLANNER'S OWN CONTRACT, with no adapter in front of it (kva_plan.h is model-agnostic): the
+ * tail-only straddle is a speed path. Quality and plumb on a straddling chunk whose adapter could
+ * straddle still take the masked path or the exact step, never the straddle. */
+TEST(the_planner_straddles_only_in_speed) {
+    using namespace qwen4exp_kva;
+    PlanIn in;
+    in.eligible = in.stream_ok = in.straddle_ok = true;
+    in.n_tok = 2048; in.n_seq = 1; in.q_prefill = 2048; in.n_ahead = 1024;
+    const PlanConfig pc;
+    for (int mode : {PLAN_PLUMB, PLAN_QUALITY}) {
+        in.mode = mode;
+        CHECK_EQ(plan_pass(in, pc).path, mode == PLAN_PLUMB ? PATH_MASKED : PATH_STOCK);
+    }
+    in.mode = PLAN_SPEED;
+    CHECK_EQ(plan_pass(in, pc).path, PATH_STRADDLE);
+}
+
 /* R73 -- KL MODE IS EXACT UNLESS THE SWITCH IS SET: a declare that sizes logits for every prompt
  * row (max_out_rows > 0) serves every pass stock, because bulk rows' logits are not the model's;
  * RADIANCE_KVA_SCORE_BULK=1 says the caller scores the exact tail only, and the pass approximates. */

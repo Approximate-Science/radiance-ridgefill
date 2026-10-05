@@ -41,8 +41,8 @@ namespace qwen4exp_kva {
 
 using namespace rad::arch;
 
-static_assert(MODE_OFF == PLAN_OFF && MODE_PLUMB == PLAN_PLUMB && MODE_SPEED == PLAN_SPEED &&
-              MODE_QUALITY == PLAN_QUALITY, "kva_config.h's Mode and kva_plan.h's PlanMode share one order");
+static_assert((int)MODE_OFF == PLAN_OFF && (int)MODE_PLUMB == PLAN_PLUMB && (int)MODE_SPEED == PLAN_SPEED &&
+              (int)MODE_QUALITY == PLAN_QUALITY, "kva_config.h's Mode and kva_plan.h's PlanMode share one order");
 
 /* The container's kva.mode is not a switch (PLAN-FIX §6.5): said once, by the real declare of
  * rank 0, so an operator who converted with --set kva.mode=... learns why nothing changed. */
