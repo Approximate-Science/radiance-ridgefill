@@ -1,3 +1,64 @@
+# Handoff 2026-10-04 23:50 (IMPL lane -> next worker)
+
+**State:** Stage A done (status table §5; the lever is zero-row probes, §2). **Stage A.1 is half done: built
+and statically tested at 5102d9c, NOT run on the engine.** Tree green (host `ctest -LE gpu` 2/2, HIP build).
+GPU lock not held.
+
+**A.1 = the coordinator's two fixes for R48 / "never slower than stock":**
+1. Speed straddling chunk: full late blocks over the tail rows [b, n) only; K/V, indexer, delta-net
+   front + split scan over all rows. **Built:** `arch/kva_layer.h:243` project_bulk, `:269` gdn_straddle,
+   `:284` attn_straddle (indexer whole, K/V + q path over all rows, per-row sparse gated attention from row b,
+   o-proj/ar over tail rows), `:314` straddle_layer (hc read/write, MoE via `moe_layer(..., from=b)`
+   `arch/kva_moe.h`); dispatched in `qwen4exp_kva.cpp` approximate_step. Taken only when speed, one prefill
+   sequence, no decoders, and every late attention layer is on the per-row sparse gated form (declare:
+   `kva_declare_masked.h:79`; keyed: reach > qsa_exact_to, `qwen4exp_kva.cpp:106` derive).
+2. Quality (all modes) guard: a masked pass runs only while it can stream (exact rows <=
+   `RADIANCE_KVA_STAGE_ROWS`, default 64, `kva_config.h:91`), else the exact step. Plumb always masked.
+   **Built** in `arch/kva_plan.h:76` plan_pass -- model-agnostic (PlanIn/PlanConfig, no model types) for the
+   coming core/adapter split (fix-246/PACKAGING.md).
+
+**Why these decisions** (evidence `evidence/stageA1/prof9216-*.log`, plugin b6979d4, `stepcost.py` in my
+scratchpad -- re-derive with `scripts/profile_steps.py`): in the masked straddle a 1,024-row tail touches every
+late expert, so streaming reads all of them inside the kernels over rank 1's x4 link (late MoE 453 ms kernel time
+vs 86 ms staged); masked-with-staging measured 0.86x of exact (Stage A session 3). **Ceiling on this box:** a
+straddle's tail needs every late expert's bytes, so it can at best equal an exact chunk -> speed 9,216 tops out
+near 1.34x here (band 1.35-1.50x reachable only on symmetric links; Dylan's PCIe rule: parity first). Stage A's
+R96 "no crossover" conclusion is WRONG (its prompts mixed whole bulk chunks with the straddle) -- replaced by
+this guard; fix §4's R96 row when re-measured.
+
+**Next steps (in order):** (a) A.1 mutants in the scratch-copy harness (tail range from 0; MoE over all rows;
+attention loop from 0; projector over all rows; straddle at short context; guard removed); (b) frozen home of
+HEAD; (c) KL oracle: speed on corpus/quick9-off1024 with TAIL_ONLY=1 vs TAIL_ONLY=0 + FORCE_STREAM=1 -> per-doc
+agreement at the GEMM-shape floor (different M changes split-K, so not bytes); (d) plumb byte-identity re-check
+(plumb stays masked: R94/R47 commands below); (e) TTFT speed + quality at 9,216 / 16,384 / 32,768 vs exact,
+interleaved, RK_REPS=7 reading the last 5 (exact's first reps run ~0.9 s slow at 9,216); (f) quality KL on
+quick9 (unchanged path: no straddles) and off1024 (straddles now exact -> dNLL should fall); (g) update §4/§5.
+
+**Commands:** host build `~/.local/bin/cmake --build build-host -j8 && (cd build-host && ctest -LE gpu)`; HIP
+`docker run --rm --security-opt label=disable -v ~/projects/inference/radiance:/rsrc:ro -v $PWD:/kva -w /kva
+radiance-build bash -c 'cmake --build /kva/build-hip && ctest --test-dir /kva/build-hip -LE gpu'`; frozen home
+`RK_RADIANCE_SRC=~/projects/inference/radiance scripts/frozen_home.sh <commit>`; every engine run under
+`flock ~/AI-Work/radiance-kva-plugin-20261004/gpu.lock` with `RK_MODEL=~/models/rad/qwen3.8-next-flash-fp8-iq4r-moe.rad
+RK_PLUGIN_HOME=$PWD/data/home-<commit>`; KL `RADIANCE_KVA_SCORE_BULK=1 RK_EXPECT_APPROX=67 scripts/grade.sh <mode>
+data/kld/ref-stage0 evidence/<dir>/<name>.json` (ref valid only on boot 75e3e39b…; off1024 ref
+data/kld/ref-off1024); scoring `scripts/kl_tail.py --corpus <corpus> --last 512|2047 A.json [B.json]`; TTFT
+`RK_DOCS=~/AI-Work/kva-flashnext-tests-data/samples/quick/ppl.jsonl RK_STAGE=<dir> scripts/serve.sh <mode> &&
+scripts/speed.sh <label> && scripts/stop.sh`; session scripts used for Stage A: my scratchpad session1-4.sh
+(templates: preflight, klog, grade/timed helpers) -- copy their shape.
+
+**Traps a fresh worker would repeat:** KL mode serves stock unless `RADIANCE_KVA_SCORE_BULK=1`;
+`RADIANCE_KVA_STAGE` takes `auto|stock` only (refused by name otherwise); the mover's h2d counts its own copies,
+not zero-copy reads; a capped n_ahead makes N unrecoverable from dumps (mask_rule.py takes lengths in send
+order); exact TTFT at 9,216 is bimodal for the first 1-4 reps; a refused container must be fully stopped before
+the next serve (R84 race); `RADIANCE_KVA=` empty counts as unset; profiled runs are never a TTFT source; the
+1,024-row final chunk of every prompt is unstaged (n_tok < 1025) and costs ~0.8 s on rank 1 in every arm;
+the builder refuses table ops with no weights and pins table runs (why §2's probes exist); `cast` and
+`moe_gemm_q` are in-tree ops (refusing them in the fake builder breaks the in-tree declare).
+
+**Open measurement list:** R48 (speed 9,216) and quality 9,216/16,384/32,768 after A.1; A.1 KL oracle; R96
+re-measured per straddle chunk (not whole prompts); R95 TTFT band (16K 1.07x under, 32K 1.38x over); Stage B
+(R53'-R61), C (R62-R68, DD-A), D (R69-R76, DD-D), E (R77-R91) untouched.
+
 # notes/impl.md — IMPL lane: PLAN-FIX v2 Stage A (device mask, row-exact tail, stager lever, guard)
 
 Owner: IMPL lane (2026-10-04, late evening). Plan: `~/AI-Work/radiance-kva-plugin-20261004/fix-246/`
