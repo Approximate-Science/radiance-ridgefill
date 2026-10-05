@@ -1,17 +1,33 @@
 /* kva_config.h -- what an operator can turn on the KVA plugin, read ONCE, at declare.
  *
- * Container metadata first (set by `rad-convert --set`), then environment overrides. step() reads
- * only the parsed Config and keyed batch fields, never the environment (HANDOVER §2.1, R15): a
- * replayed pass must issue what a fresh one would.
+ * step() reads only the parsed Config and keyed batch fields, never the environment (HANDOVER
+ * §2.1, R15/R99): a replayed pass must issue what a fresh one would.
  *
- *   meta kva.mode           off | plumb | speed | quality    env RADIANCE_KVA        default off
- *   meta kva.tail           exact tail T in tokens           env RADIANCE_KVA_TAIL   default 2048
- *                           correction strength alpha        env RADIANCE_KVA_ALPHA  default 1
- *                           row selection rule               env RADIANCE_KVA_ROWSEL class|random|all
- *   meta kva.rowsel.share   share of a chunk's class matches env RADIANCE_KVA_SHARE  default 0.25
- *   meta kva.rowsel.cap     compacted rows per chunk         (derived from share when unset or
- *                                                             when RADIANCE_KVA_SHARE is given)
- *   meta kva.rowsel.seed    seed of the random control                               default 0
+ * THE MODE COMES FROM THE ENVIRONMENT ONLY (PLAN-FIX §6.5, R81). A container's `kva.mode` is read
+ * only to say, once, that it is ignored: the default is `off`, so a container converted with a
+ * mode in it can never switch the trade on behind an operator's back.
+ *
+ *   env RADIANCE_KVA          off | plumb | speed | quality                      default off
+ *   meta kva.tail             exact tail T in tokens   env RADIANCE_KVA_TAIL     default 2048
+ *                             correction strength      env RADIANCE_KVA_ALPHA    default 1
+ *                             row selection rule       env RADIANCE_KVA_ROWSEL   class|random|all
+ *   meta kva.rowsel.share     share of the window's class matches kept exact
+ *                                                      env RADIANCE_KVA_SHARE    default 0.25
+ *   meta kva.rowsel.seed      seed of the random control                         default 0
+ *   env RADIANCE_KVA_STAGE    auto | stock: the stager lever (PLAN-FIX §6.1). auto issues the
+ *                             late routed down GEMMs through weightless alternate handles on an
+ *                             approximate pass whose exact rows are at most RADIANCE_KVA_STAGE_ROWS;
+ *                             stock never does (the tested fallback, R96)          default auto
+ *   env RADIANCE_KVA_STAGE_ROWS  that row threshold                    default: every pass (R96)
+ *   env RADIANCE_KVA_SCORE_BULK  1: approximate in KL mode too, whose logits on bulk rows are then
+ *                             not the model's -- score only the exact tail (PLAN-FIX §6.2, R73)
+ *
+ * DEBUG SWITCHES (gates only; each changes what an approximate pass computes, and says so):
+ *   RADIANCE_KVA_STRADDLE     split | end: the straddling chunk's correction between bulk and
+ *                             tail in a split scan (default), or once at the chunk end (R50)
+ *   RADIANCE_KVA_FORCE_SPLIT  N: the bulk ends N rows before every approximate chunk's end (R47)
+ *   RADIANCE_KVA_SHIFT_B      +-N rows added to every bulk end (R51)
+ *   RADIANCE_KVA_FORCE_ALT    1: the alternate down handles on every approximate pass (R94)
  *
  * WHICH COPY OF EACH FITTED TENSOR (the controls and the Stage 6 refit live in the same container
  * under suffixed names, because the disk has no room for a second 114 GiB container and
@@ -20,7 +36,7 @@
  *   env RADIANCE_KVA_PROJ         shipped -> kva.proj.L.{weight,bias}   refit -> kva.projr.L.*
  *   env RADIANCE_KVA_ST           shipped -> kva.st.L   swap -> kva.stswap.L (R24)   refit -> kva.str.L
  *   env RADIANCE_KVA_ROWSEL_TABLE class -> kva.rowsel.score   none -> kva.rowsel.score_none (R41)
- *                                 all   -> kva.rowsel.score_all (every id a match: R35)
+ *                                 all   -> kva.rowsel.score_all (every id a match: R35')
  *   env RADIANCE_KVA_DECLARE      all: declare EVERY kva.* tensor the model holds, which is what
  *                                 rad-convert must see (it writes only declared weights, and an
  *                                 --in-place append drops any old entry the declare did not name).
@@ -32,6 +48,7 @@
 
 #include <cerrno>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -39,16 +56,18 @@
 
 namespace qwen4exp_kva {
 
-enum Mode   { MODE_OFF = 0, MODE_PLUMB, MODE_SPEED, MODE_QUALITY };
-enum Rowsel { ROWSEL_CLASS = 0, ROWSEL_RANDOM, ROWSEL_ALL };
+enum Mode     { MODE_OFF = 0, MODE_PLUMB, MODE_SPEED, MODE_QUALITY };
+enum Rowsel   { ROWSEL_CLASS = 0, ROWSEL_RANDOM, ROWSEL_ALL };
+enum Stage    { STAGE_AUTO = 0, STAGE_STOCK };
+enum Straddle { STRADDLE_SPLIT = 0, STRADDLE_END };
 
-static const char* const kModeNames[]   = { "off", "plumb", "speed", "quality" };
-static const char* const kRowselNames[] = { "class", "random", "all" };
+static const char* const kModeNames[]     = { "off", "plumb", "speed", "quality" };
+static const char* const kRowselNames[]   = { "class", "random", "all" };
+static const char* const kStageNames[]    = { "auto", "stock" };
+static const char* const kStraddleNames[] = { "split", "end" };
 
 /* The shortest exact tail the method was ever run at (tcc's MIN_TAIL, KVA-FACTS §5). */
 constexpr int64_t kMinTail = 512;
-/* The compacted row count is padded to whole 64-row tiles (PLAN D12). */
-constexpr int64_t kCapQuantum = 64;
 
 struct Config {
     int         mode        = MODE_OFF;
@@ -59,12 +78,19 @@ struct Config {
     double      alpha       = 1.0;
     int         rowsel      = ROWSEL_CLASS;
     double      share       = 0.25;
-    int64_t     cap         = 0;
     int64_t     seed        = 0;
     const char* proj        = "kva.proj";
     const char* st          = "kva.st";
     const char* score       = "kva.rowsel.score";
     bool        declare_all = false;
+    int         stage       = STAGE_AUTO;
+    int64_t     stage_rows  = INT64_MAX;   /* R96 has not measured the crossover yet */
+    bool        score_bulk  = false;
+    int         straddle    = STRADDLE_SPLIT;
+    int64_t     force_split = 0;
+    int64_t     shift_b     = 0;
+    bool        force_alt   = false;
+    const char* meta_mode   = nullptr;     /* the container's kva.mode, if it has one: ignored */
 };
 
 /* The position of `s` in `names`, or -1. */
@@ -100,77 +126,90 @@ inline int bad_value(const char* what, const char* value, const char* allowed) {
     return RAD_E_INVAL;
 }
 
-/* A string setting: the environment's if set and non-empty, else the container's, else `dflt`. */
-inline const char* setting(const RadModelMeta* meta, const char* key, const char* env,
-                           const char* dflt) {
-    const char* e = env ? std::getenv(env) : nullptr;
-    if (e && *e) return e;
-    return key ? rad_meta_gets(meta, key, dflt) : dflt;
+/* The environment's value if set and non-empty, else null. */
+inline const char* env(const char* name) {
+    const char* e = std::getenv(name);
+    return e && *e ? e : nullptr;
 }
 
-/* An enumerated setting: its index in `names`, or a refusal naming every allowed value. */
-inline int read_choice(const RadModelMeta* meta, const char* key, const char* env,
-                       std::initializer_list<const char*> names, const char* allowed, int* out) {
-    const char* v = setting(meta, key, env, *names.begin());
+/* An enumerated environment switch: its index in `names` (the first when unset), or a refusal
+ * naming every allowed value. */
+inline int read_choice(const char* name, std::initializer_list<const char*> names,
+                       const char* allowed, int* out) {
+    const char* v = env(name);
+    if (!v) v = *names.begin();
     const int i = pick(v, names);
-    if (i < 0) return bad_value(env ? env : key, v, allowed);
+    if (i < 0) return bad_value(name, v, allowed);
     *out = i;
+    return RAD_OK;
+}
+
+/* An integer environment switch within [lo, hi]; unset leaves `out` alone. */
+inline int read_int(const char* name, int64_t lo, int64_t hi, const char* allowed, int64_t* out) {
+    const char* v = env(name);
+    if (!v) return RAD_OK;
+    if (!parse_int(v, out) || *out < lo || *out > hi) return bad_value(name, v, allowed);
     return RAD_OK;
 }
 
 inline int read_variants(Config* c) {
     int v = 0;
-    RAD_ARCH_TRY(read_choice(nullptr, nullptr, "RADIANCE_KVA_PROJ", { "shipped", "refit" },
-                             "shipped|refit", &v));
+    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_PROJ", { "shipped", "refit" }, "shipped|refit", &v));
     c->proj = v == 0 ? "kva.proj" : "kva.projr";
-    RAD_ARCH_TRY(read_choice(nullptr, nullptr, "RADIANCE_KVA_ST", { "shipped", "swap", "refit" },
+    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_ST", { "shipped", "swap", "refit" },
                              "shipped|swap|refit", &v));
     c->st = v == 0 ? "kva.st" : v == 1 ? "kva.stswap" : "kva.str";
-    RAD_ARCH_TRY(read_choice(nullptr, nullptr, "RADIANCE_KVA_ROWSEL_TABLE",
-                             { "class", "none", "all" }, "class|none|all", &v));
+    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_ROWSEL_TABLE", { "class", "none", "all" },
+                             "class|none|all", &v));
     c->score = v == 0 ? "kva.rowsel.score" : v == 1 ? "kva.rowsel.score_none"
                                                     : "kva.rowsel.score_all";
-    RAD_ARCH_TRY(read_choice(nullptr, nullptr, "RADIANCE_KVA_DECLARE", { "selected", "all" },
+    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_DECLARE", { "selected", "all" },
                              "all (rad-convert) or unset (serving)", &v));
     c->declare_all = v == 1;
     return RAD_OK;
 }
 
-/* The row share and the compacted row count. A share from the environment re-derives the cap (the
- * Stage 6 share sweep); otherwise a cap the container states wins over the derived one. Never
- * more than max_tok: every compacted issue is at M = cap and the ops are declared to max_tok. */
-inline int read_share(const RadModelMeta* meta, int64_t max_tok, Config* c) {
-    const char* e = std::getenv("RADIANCE_KVA_SHARE");
+/* The stager lever, the KL switch and the gate-only debug switches. */
+inline int read_switches(Config* c) {
+    int v = 0;
+    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_STAGE", { "auto", "stock" }, "auto|stock", &c->stage));
+    RAD_ARCH_TRY(read_int("RADIANCE_KVA_STAGE_ROWS", 0, INT64_MAX, "a row count", &c->stage_rows));
+    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_SCORE_BULK", { "0", "1" }, "1 or unset", &v));
+    c->score_bulk = v == 1;
+    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_STRADDLE", { "split", "end" }, "split|end",
+                             &c->straddle));
+    RAD_ARCH_TRY(read_int("RADIANCE_KVA_FORCE_SPLIT", 1, INT64_MAX, "a positive row count",
+                          &c->force_split));
+    RAD_ARCH_TRY(read_int("RADIANCE_KVA_SHIFT_B", INT64_MIN / 2, INT64_MAX / 2, "a row count",
+                          &c->shift_b));
+    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_FORCE_ALT", { "0", "1" }, "1 or unset", &v));
+    c->force_alt = v == 1;
+    return RAD_OK;
+}
+
+inline int read_config(const RadModelMeta* meta, Config* c) {
+    *c = Config{};
+    RAD_ARCH_TRY(read_choice("RADIANCE_KVA", { "off", "plumb", "speed", "quality" },
+                             "off|plumb|speed|quality", &c->mode));
+    c->meta_mode = rad_meta_gets(meta, "kva.mode", nullptr);
+    c->tail = rad_meta_geti(meta, "kva.tail", c->tail);
+    if (const char* t = env("RADIANCE_KVA_TAIL"); t && !parse_int(t, &c->tail))
+        return bad_value("RADIANCE_KVA_TAIL", t, "a token count");
+    const char* a = env("RADIANCE_KVA_ALPHA");
+    if (a && !(parse_real(a, &c->alpha) && c->alpha >= 0.0 && c->alpha <= 1.0))
+        return bad_value("RADIANCE_KVA_ALPHA", a, "a strength in [0, 1]");
+    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_ROWSEL", { "class", "random", "all" },
+                             "class|random|all", &c->rowsel));
     c->share = rad_meta_getf(meta, "kva.rowsel.share", c->share);
-    if (e && *e && !parse_real(e, &c->share)) return bad_value("RADIANCE_KVA_SHARE", e, "(0, 1]");
+    if (const char* s = env("RADIANCE_KVA_SHARE"); s && !parse_real(s, &c->share))
+        return bad_value("RADIANCE_KVA_SHARE", s, "(0, 1]");
     if (!(c->share > 0.0 && c->share <= 1.0)) {
         std::fprintf(stderr, "radiance: qwen4exp_kva: the row share is %g; it takes (0, 1]\n",
                      c->share);
         return RAD_E_INVAL;
     }
-    const int64_t meta_cap = rad_meta_geti(meta, "kva.rowsel.cap", 0);
-    const double  rows = std::ceil(c->share * (double)max_tok / (double)kCapQuantum);
-    c->cap = (e && *e) || meta_cap <= 0 ? (int64_t)rows * kCapQuantum : meta_cap;
-    if (c->cap > max_tok) c->cap = max_tok;
     c->seed = rad_meta_geti(meta, "kva.rowsel.seed", 0);
-    return RAD_OK;
-}
-
-inline int read_config(const RadModelMeta* meta, int64_t max_tok, Config* c) {
-    *c = Config{};
-    RAD_ARCH_TRY(read_choice(meta, "kva.mode", "RADIANCE_KVA",
-                             { "off", "plumb", "speed", "quality" }, "off|plumb|speed|quality",
-                             &c->mode));
-    c->tail = rad_meta_geti(meta, "kva.tail", c->tail);
-    const char* t = std::getenv("RADIANCE_KVA_TAIL");
-    if (t && *t && !parse_int(t, &c->tail))
-        return bad_value("RADIANCE_KVA_TAIL", t, "a token count");
-    const char* a = std::getenv("RADIANCE_KVA_ALPHA");
-    if (a && *a && !(parse_real(a, &c->alpha) && c->alpha >= 0.0 && c->alpha <= 1.0))
-        return bad_value("RADIANCE_KVA_ALPHA", a, "a strength in [0, 1]");
-    RAD_ARCH_TRY(read_choice(nullptr, nullptr, "RADIANCE_KVA_ROWSEL",
-                             { "class", "random", "all" }, "class|random|all", &c->rowsel));
-    RAD_ARCH_TRY(read_share(meta, max_tok, c));
+    RAD_ARCH_TRY(read_switches(c));
     return read_variants(c);
 }
 

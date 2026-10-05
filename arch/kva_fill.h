@@ -1,21 +1,18 @@
-/* kva_fill.h -- the in-tree blocks' own op handles, issued by hand in pieces.
+/* kva_fill.h -- the LEAN fill's pieces: the in-tree blocks' own op handles, issued by hand.
  *
- * A filled late layer runs only the part of its block that writes a cache: the delta net's input
- * projections and recurrence, the indexer's block-key half, and the attention's K/V path. The
- * in-tree GdnFP8 / QsaIndexer / AttnGatedFP8 step() functions take the whole batch and run the whole
- * block, so the pieces are spelled out here, each a verbatim copy of the in-tree lines it cites
- * (radiance 140987f), with the SAME handles and the SAME operands -- the stock wiring, including
- * `w.h` (= the model's `x`) as the input, because the projector writes its prediction there
- * (notes/arch.md §6, the a_x decision).
+ * The lean fill serves the one shape with no exact row at all -- a pure prefill step of ONE
+ * sequence whose whole chunk is bulk, in speed mode (PLAN-FIX §3) -- and runs only the part of each
+ * late block that writes a cache: the delta net's input projections and recurrence, the indexer's
+ * block-key half, and the attention's K/V path. The in-tree GdnFP8 / QsaIndexer / AttnGatedFP8
+ * step() functions take the whole batch and run the whole block, so the pieces are spelled out
+ * here, each a verbatim copy of the in-tree lines it cites (radiance 140987f), with the SAME
+ * handles and the SAME operands -- the stock wiring, including `w.h` (= the model's `x`) as the
+ * input, because the projector writes its prediction there (notes/arch.md §6, the a_x decision).
+ * Every other approximate shape takes the masked path (kva_layer.h), which runs the blocks whole.
  *
- * `plumb` issues every piece, with the real block input, and so reproduces the stock block op for op
- * (R14); `speed` issues the cache-writing pieces only. Two moves relative to the stock order, both
- * inside one block, both checked by tests/arch_static_test.cpp: the indexer's query prep follows its
- * block-key half, and the attention's K/V path precedes its query path. Each block's ops stay
- * contiguous -- transients with disjoint declared op ranges may share bytes (notes/arch.md §6).
- *
- * Every function assumes a pure prefill step of ONE sequence (n_seq_decode == 0), which is the only
- * step the plugin fills; the in-tree mixed-step offsets (D, DT) are therefore 0 and dropped.
+ * Every function assumes that one-sequence prefill step (n_seq_decode == 0, n_seq == 1); the
+ * in-tree mixed-step offsets (D, DT) are therefore 0 and dropped. Each block's ops stay contiguous
+ * -- transients with disjoint declared op ranges may share bytes (notes/arch.md §6).
  */
 #ifndef QWEN4EXP_KVA_FILL_H
 #define QWEN4EXP_KVA_FILL_H
@@ -61,20 +58,6 @@ inline void gdn_scan(RadCtx* c, const GdnFP8& d, const RadBatch* batch) {
               praw2(st_idx, RAD_I32, P, st_w));
 }
 
-/* rad_block_gdn_fp8.h:497-513 -- the block's output, which plumb needs and speed throws away. */
-inline void gdn_tail(RadCtx* c, const GdnFP8& d, int64_t T) {
-    const int64_t conv_dim = d.cfg.conv_dim(), v_dim = d.cfg.v_dim();
-    RAD_ISSUE_N(c, d.op_gnorm, T,
-                brow_slice(d.w.o.x, 0, T, v_dim),
-                bcol_at(d.w.in.x, 0, conv_dim + v_dim, conv_dim, v_dim, T),
-                RAD_W(d.w_out_norm), brow_slice(d.w.o.x, 0, T, v_dim));
-    d.q_o.step(c, T, 0, T);
-    d.out.step(c, d.w.o, d.w.h.x, T);
-    if (d.op_ar && !ar_taken(d.g, T, d.ar_out, d.ar_out_take))
-        RAD_ISSUE_N(c, d.op_ar, T * d.g.n_embd, brows(d.w.h.x, T), RAD_NONE);
-    if (d.op_add) RAD_ISSUE(c, d.op_add, brows(d.w.x, T), brows(d.w.h.x, T), brows(d.w.x, T));
-}
-
 /* ---------------------------------------------------------------- the QSA indexer */
 
 /* rad_qsa.h:324 and :345-390 -- the projection and the block-key half: the work list, the pooled
@@ -109,43 +92,6 @@ inline void qsa_keys(RadCtx* c, const QsaIndexer& q, const ActFP8& in, const Rad
                 kv_cache(q.c.kv_tail, q.layer), praw2(tlb->state_index, RAD_I32, S, tw));
 }
 
-/* rad_qsa.h:332-342 and :400-426 -- the query heads and the per-query selection the attention
- * reads. Plumb only: a filled layer's own attention never runs. */
-inline void qsa_select(RadCtx* c, const QsaIndexer& q, const RadBatch* batch) {
-    if (!q.on()) return;
-    const int64_t T = batch->n_tok, S = batch->n_seq;
-    const int64_t qw = q.c.heads * q.c.head_dim, nw = (q.c.heads + 1) * q.c.head_dim;
-    if (q.op_qprep && T <= q.qprep_rows && !rope_mixed(batch)) {
-        RAD_ISSUE_N(c, q.op_qprep, T,
-                    RAD_NONE, brows(q.w.qk, T), RAD_B(q.w.cos_sin), rope_pos1(batch, T),
-                    RAD_NONE, RAD_W(q.w_qn), RAD_NONE, brows(q.w.q, T), RAD_NONE);
-    } else {
-        for (int64_t h = 0; h < q.c.heads; ++h)
-            RAD_ISSUE_N(c, q.op_norm, T,
-                        bcol_at(q.w.qk, 0, nw, h * q.c.head_dim, q.c.head_dim, T), RAD_W(q.w_qn),
-                        bcol_at(q.w.q, 0, qw, h * q.c.head_dim, q.c.head_dim, T));
-        RAD_ISSUE_N(c, q.op_rope, T, brows(q.w.q, T), rope_posmc(q.g, batch, T));
-    }
-    const RadKVGroupBatch* bkb = kv_batch(batch, q.kv_bk);
-    const RadKVGroupBatch* atb = kv_batch(batch, q.c.kv_attn);
-    if (!bkb || !atb || !kv_batch(batch, q.c.kv_tail) || !q.c.emit_sel) return;
-    const int64_t reach = (int64_t)batch->max_ctx_len + batch->n_tok + batch->n_spec + q.c.ratio;
-    int64_t live = reach / q.c.ratio + 1;
-    if (live > q.c.max_blocks) live = q.c.max_blocks;
-    if (live < 1) live = 1;
-    RAD_ISSUE_N(c, q.op_score, T,
-                brows(q.w.q, T), kv_cache(q.kv_bk, q.layer),
-                praw2(bkb->block_table, RAD_I32, S, bkb->block_table_pitch),
-                praw(batch->cu_seqlens, RAD_I32, S + 1), brows(q.w.nc, S),
-                bcol_at(q.w.score, 0, q.c.max_blocks, 0, live, T));
-    RAD_ISSUE_N(c, q.op_select, T,
-                bcol_at(q.w.score, 0, q.c.max_blocks, 0, live, T),
-                praw2(atb->block_table, RAD_I32, S, atb->block_table_pitch),
-                brows(q.w.nc, S), praw(batch->positions, RAD_I32, T),
-                praw(batch->cu_seqlens, RAD_I32, S + 1),
-                brows(q.w.sel, T), brows(q.w.nsel, T), brows(q.w.sequ, T));
-}
-
 /* ---------------------------------------------------------------- the gated attention */
 
 /* rad_block_attn_gated_fp8.h:452-453, :476-477, :479, :482-484 -- k and v, k's norm and rotation,
@@ -161,110 +107,6 @@ inline void attn_kv(RadCtx* c, const AttnGatedFP8& a, const RadBatch* batch) {
     RAD_ISSUE(c, a.op_rope_k, brows(a.w.k, T), rope_posmc(a.g, batch, T));
     RAD_ISSUE(c, a.op_kv_store, brows(a.w.k, T), brows(a.w.v, T),
               praw(kvb ? kvb->slot_mapping : nullptr, RAD_I32, T), kv_cache(a.kv, a.layer));
-}
-
-/* rad_block_attn_gated_fp8.h:451, :474-475, :478, :486-562 -- the query path, the attention, the gate
- * and the output projection. Plumb only. */
-inline void attn_tail(RadCtx* c, const AttnGatedFP8& a, const RadBatch* batch) {
-    const RadKVGroupBatch* kvb = kv_batch(batch, a.kv);
-    const int64_t T = batch->n_tok, qw = a.g.q_dim(), hd = a.g.head_dim;
-    a.qg.step(c, a.w.h, a.w.qg, T);
-    RAD_ISSUE_N(c, a.op_q_norm, T * a.g.n_head, bcol(a.w.qg, 0, hd, T), RAD_W(a.w_q_norm), brows(a.w.q, T));
-    RAD_ISSUE(c, a.op_rope_q, brows(a.w.q, T), rope_posmc(a.g, batch, T));
-    const int64_t reach = (int64_t)batch->max_ctx_len + batch->max_q_len;
-    const bool sparse = a.qsa_sel && a.qsa_sequ &&
-                        (T == batch->n_seq || a.qsa_exact_to <= 0 || reach > a.qsa_exact_to);
-    const bool gated = sparse && a.op_attn_gq;
-    const int64_t chunk = gated ? a.qsa_gq_rows() : a.qsa_rows();
-    for (int64_t off = 0; sparse && off < T; off += chunk) {
-        const int64_t rows = (T - off) < chunk ? (T - off) : chunk;
-        if (gated)
-            RAD_ISSUE_N(c, a.op_attn_gq, 1, brow_slice(a.w.q, off, rows, qw), kv_cache(a.kv, a.layer),
-                        brow_slice(a.qsa_sel, off, rows, a.qsa_topk + 1),
-                        brow_slice(a.qsa_sequ, off, rows, 1), RAD_NONE, RAD_NONE, RAD_NONE,
-                        brow_slice(a.w.attn.x, off, rows, qw),
-                        bcol_at(a.w.qg, off, a.g.n_head * 2 * hd, hd, hd, rows),
-                        brow_slice(a.w.attn.cq(), off, rows, qw),
-                        brow_slice(a.w.attn.cs(), off, rows, fp8_blocks(qw)));
-        else
-            RAD_ISSUE_N(c, a.op_attn, 1, brow_slice(a.w.q, off, rows, qw), kv_cache(a.kv, a.layer),
-                        brow_slice(a.qsa_sel, off, rows, a.qsa_topk + 1),
-                        brow_slice(a.qsa_sequ, off, rows, 1), RAD_NONE, RAD_NONE, RAD_NONE,
-                        brow_slice(a.w.attn.x, off, rows, qw));
-    }
-    if (!sparse)
-        RAD_ISSUE_N(c, a.op_attn, batch->max_q_len, brows(a.w.q, T), kv_cache(a.kv, a.layer),
-                    praw2(kvb ? kvb->block_table : nullptr, RAD_I32, batch->n_seq,
-                          kvb ? kvb->block_table_pitch : 0),
-                    praw(kvb ? kvb->seqused : nullptr, RAD_I32, batch->n_seq), RAD_NONE, RAD_NONE,
-                    praw(batch->cu_seqlens, RAD_I32, batch->n_seq + 1), brows(a.w.attn.x, T));
-    if (a.op_sig) {
-        RAD_ISSUE_N(c, a.op_sig, T * a.g.n_head, bcol(a.w.qg, hd, hd, T), brows(a.w.gate, T));
-        RAD_ISSUE(c, a.op_mul, brows(a.w.attn.x, T), brows(a.w.gate, T), brows(a.w.attn.x, T));
-    } else if (!gated)
-        RAD_ISSUE_N(c, a.op_gq, T * a.g.n_head, bcol(a.w.qg, hd, hd, T), brows(a.w.attn.x, T),
-                    brows(a.w.attn.cq(), T), brows(a.w.attn.cs(), T), brows(a.w.attn.x, T));
-    a.o.step(c, a.w.attn, a.w.h.x, T);
-    if (a.op_ar && !ar_taken(a.g, T, a.ar_out, a.ar_out_take))
-        RAD_ISSUE_N(c, a.op_ar, T * a.g.n_embd, brows(a.w.h.x, T), RAD_NONE);
-    if (a.op_add) RAD_ISSUE(c, a.op_add, brows(a.w.x, T), brows(a.w.h.x, T), brows(a.w.x, T));
-}
-
-/* ---------------------------------------------------------------- quality mode's exact rows */
-
-/* rad_block_hc.h:360-376 with the STREAM swapped: the connection read over rows [0, rows) of `h`
- * (the exact rows' own wide stream, compacted) instead of the model's `b_h`. Every output is the
- * connection's own buffer, rows [0, rows) -- which is where MoeFP8::pass reads its input. */
-inline void hc_read_from(RadCtx* c, const HyperConn& hc, rad_buf h, int64_t rows) {
-    const int64_t n = hc.g.n_embd;
-    RAD_ISSUE_N(c, hc.op_read, rows,
-                brows(h, rows), RAD_W(hc.w_norm), RAD_W(hc.w_down), RAD_W(hc.w_up),
-                hc.c.inject ? RAD_W(hc.w_inj) : RAD_NONE,
-                brow_slice(hc.w.x.x, 0, rows, n),
-                hc.c.inject ? brow_slice(hc.w.inj, 0, rows, hc.c.hc) : RAD_NONE,
-                hc.c.quant ? brow_slice(hc.c.codes_i8 ? hc.w.x.q8 : hc.w.x.q, 0, rows, n) : RAD_NONE,
-                hc.c.quant ? brow_slice(hc.c.codes_i8 ? hc.w.x.s8 : hc.w.x.s, 0, rows,
-                                        fp8_blocks(n)) : RAD_NONE,
-                hc.c.rotate ? brow_slice(hc.w.rq, 0, rows, n) : RAD_NONE,
-                hc.c.rotate ? brow_slice(hc.w.rs, 0, rows, fp8_blocks(n)) : RAD_NONE);
-}
-
-/* rad_block_hc.h:378-397 with the stream swapped. `T` decides the wire and whether the gather and
- * the all-reduce ride in the write, exactly as the block in front decided with the same T. */
-inline void hc_write_into(RadCtx* c, const HyperConn& hc, rad_buf h, int64_t T, int64_t rows) {
-    if (!hc.op_write) return;
-    const int64_t n = hc.g.n_embd;
-    if (hc.takes_gather(T)) {
-        const int64_t k = hc.gsrc.top_k;
-        const bool shared = hc.gsrc.sh && hc.gsrc.sg;
-        RAD_ISSUE_N(c, ar_wire_is_exact(hc.g, T) ? hc.op_ar_gather_write : hc.op_ar_gather_write6,
-                    rows, brows(hc.gsrc.ye, rows * k), brow_slice(hc.gsrc.ew, 0, rows, k),
-                    brows(hc.gsrc.sorted, rows * k),
-                    shared ? brow_slice(hc.gsrc.sh, 0, rows, n) : RAD_NONE,
-                    shared ? brow_slice(hc.gsrc.sg, 0, rows, 1) : RAD_NONE,
-                    brow_slice(hc.w.x.x, 0, rows, n), brow_slice(hc.w.inj, 0, rows, hc.c.hc),
-                    brows(h, rows));
-        return;
-    }
-    RAD_ISSUE_N(c, hc.takes_ar(T) ? hc.ar_write(T) : hc.op_write, rows,
-                brow_slice(hc.w.x.x, 0, rows, n), brow_slice(hc.w.inj, 0, rows, hc.c.hc),
-                brows(h, rows));
-}
-
-/* rad_block_moe_fp8.h:1543-1576 over rows [0, rows) only: one pass (rows <= the block's pass size,
- * which cap is) and the routing report the heat engine reads. */
-inline void moe_rows(RadCtx* c, const MoeFP8& e, int64_t rows) {
-    e.pass(c, rows, 0, rows);
-    RadRouting r{};
-    r.expert_ids    = (const int32_t*)rad_buf_ptr(c, e.w.ids);
-    r.expert_w      = nullptr;
-    const int32_t* const counts = rad_route_counts(c, e.layer, e.c.n_expert);
-    r.expert_count  = counts ? counts : (const int32_t*)rad_buf_ptr(c, e.w.ecnt);
-    r.sorted_tok    = (const int32_t*)rad_buf_ptr(c, e.w.sorted);
-    r.expert_offset = (const int32_t*)rad_buf_ptr(c, e.w.eoff);
-    r.top_k         = e.c.top_k;
-    r.n_expert      = e.c.n_expert;
-    rad_route_report(c, e.layer, &r);
 }
 
 }  /* namespace qwen4exp_kva */

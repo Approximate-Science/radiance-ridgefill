@@ -25,6 +25,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <map>
 #include <sstream>
 #include <set>
 #include <string>
@@ -176,6 +177,9 @@ using rad::arch::bcol;
 using rad::arch::brows;
 using rad::arch::kv_cache;
 using rad::arch::praw2;
+using rad::arch::praw;
+using rad::arch::brow_slice;
+using rad::arch::MoeFP8;
 
 /* ==================================================================== fixtures */
 namespace {
@@ -531,9 +535,10 @@ TEST(speed_declares_the_selected_copy_and_its_kernel_ops) {
     }
 }
 
-/* Quality declares the selected row table and the kva_rowsel op over it, with the cap the share
- * derives (0.25 * 2048 = 512) and the rule the switch names. */
-TEST(quality_declares_the_selected_row_table_and_kva_rowsel) {
+
+/* Quality declares the selected row table and the kva_mask op over it, with the rule the switch
+ * names; no cap and no compacted-row buffers exist any more (PLAN-FIX DD-F). */
+TEST(quality_declares_the_selected_row_table_and_kva_mask) {
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
     Env env({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_ROWSEL_TABLE", "none"},
@@ -546,45 +551,256 @@ TEST(quality_declares_the_selected_row_table_and_kva_rowsel) {
     CHECK(weight(kva, "kva.rowsel.score_none") != nullptr);
     CHECK(weight(kva, "kva.rowsel.score") == nullptr);
     CHECK(weight(kva, "kva.rowsel.score_all") == nullptr);
-    int rowsel = 0;
+    int masks = 0;
     for (const RecOp& o : kva.ops) {
-        if (o.op != "kva_rowsel") continue;
-        ++rowsel;
+        CHECK(o.op != "kva_rowsel");
+        if (o.op != "kva_mask") continue;
+        ++masks;
         REQUIRE_EQ(o.w.size(), (size_t)1);
         CHECK_EQ(kva.weights[o.w[0] - 1].first, std::string("kva.rowsel.score_none"));
         for (const RecParam& p : o.p) {
-            if (p.key == "cap")  CHECK_EQ(p.ival, 512LL);
+            CHECK(p.key != "cap");
             if (p.key == "mode") CHECK_EQ(p.sval, std::string("random"));
             if (p.key == "M")    CHECK_EQ(p.ihi, 2048LL);
+            if (p.key == "share") CHECK_EQ(p.dval, 0.25);
         }
     }
-    CHECK_EQ(rowsel, 1);
+    CHECK_EQ(masks, 1);
+    for (const auto& [name, d] : kva.bufs)
+        CHECK(name != "kva_rows_idx" && name != "kva_h_rows" && name != "kva_x_rows" && name != "kva_y_rows");
 }
 
-/* ==================================================================== the fill path (Stage 3) */
+/* ==================================================================== the masked path: declare */
 
-/* ONE prefill chunk of one sequence, T rows, with `ahead` prompt tokens after it and `ctx` before.
- * 128 rows is past qk_fuse_rows (64), where the stock attention takes the unfused prologue too. */
-Batch one_prefill(const RadBuilder& bld, int64_t T, int64_t ahead, int32_t ctx) {
-    static int32_t ids[2048], pos[2048], cu[2] = {0, 0}, slot[2048], table[4096];
-    static int32_t used[1], state[3 * 64], qlen[1], ctxl[1], acc[1];
+/* Declares stock and KVA side by side on the served formats with every kva.* tensor held. */
+struct Pair {
+    RadBuilder stock, kva;
+    int        st = RAD_OK;
+};
+void declare_pair(Pair& p, const char* mode, int rank = 0, int world = 1, int64_t max_out_rows = 0) {
+    RadModelMeta meta = flash_next_meta();
+    RadBuildCtx c = served_ctx(rank, world);
+    c.max_out_rows = max_out_rows;
+    served(p.stock);
+    served(p.kva);
+    hold_kva(p.kva, {"kva.proj", "kva.st"});
+    hold_score(p.kva, "kva.rowsel.score");
+    REQUIRE_EQ(qwen4exp_fp8::declare(&p.stock, &meta, &c), RAD_OK);
+    Env env({{"RADIANCE_KVA", mode}});
+    p.st = qwen4exp_kva::declare(&p.kva, &meta, &c);
+}
+
+/* THE ALTERNATE IS op_dn WITHOUT ITS WEIGHTS (PLAN-FIX §6.1): for every routed layer from S-1, the
+ * same op, every parameter equal (the M range included), the same read and write sets -- and no
+ * weight at all, so the stager learns nothing from it. At TP2 the per-rank widths come through. */
+TEST(the_alternate_down_handle_is_op_dn_without_weights) {
+    for (int world : {1, 2})
+        for (const char* mode : {"plumb", "speed", "quality"}) {
+            Pair p;
+            declare_pair(p, mode, 0, world);
+            REQUIRE_EQ(p.st, RAD_OK);
+            const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
+            const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+            for (int l = 0; l < 8; ++l) {
+                CHECK_EQ(k.alt_dn[(size_t)l] != 0, l >= kSplit - 1);
+                if (l < kSplit - 1) continue;
+                const RecOp& alt = p.kva.ops[k.alt_dn[(size_t)l] - 1];
+                const RecOp& dn = p.kva.ops[m.layers[(size_t)l].mlp.op_dn - 1];
+                CHECK_EQ(alt.op, dn.op);
+                CHECK(alt.w.empty() && !dn.w.empty());
+                CHECK(alt.reads == dn.reads);
+                CHECK(alt.writes == dn.writes);
+                REQUIRE_EQ(alt.p.size(), dn.p.size());
+                for (size_t i = 0; i < dn.p.size(); ++i) {
+                    CHECK_EQ(alt.p[i].key, dn.p[i].key);
+                    CHECK_EQ(alt.p[i].ival, dn.p[i].ival);
+                    CHECK_EQ(alt.p[i].ihi, dn.p[i].ihi);
+                    CHECK_EQ(alt.p[i].sval, dn.p[i].sval);
+                }
+                CHECK(k.alt_dn[(size_t)l] > (rad_op)p.stock.ops.size());   /* after the graph */
+            }
+        }
+}
+
+/* R93 -- THE LEVER'S PREMISE: in every routed layer the last op naming one of the layer's EXPERT
+ * weights (the stager's unit, RadWeightGroup.expert >= 0) is its routed down GEMM -- the protected
+ * experts are layer weights and the calibration tap names none -- and the alternates name none. */
+TEST(each_routed_layers_last_expert_op_is_its_down_gemm) {
+    Pair p;
+    declare_pair(p, "quality");
+    REQUIRE_EQ(p.st, RAD_OK);
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
+    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+    std::vector<size_t> last(8, 0);
+    for (size_t i = 0; i < p.kva.ops.size(); ++i)
+        for (rad_weight w : p.kva.ops[i].w) {
+            const RadWeightDecl& d = p.kva.weights[w - 1].second;
+            if (d.group.expert >= 0 && d.group.layer >= 0 && d.group.layer < 8)
+                last[(size_t)d.group.layer] = std::max(last[(size_t)d.group.layer], i + 1);
+        }
+    for (int l = 0; l < 8; ++l) CHECK_EQ(last[(size_t)l], (size_t)m.layers[(size_t)l].mlp.op_dn);
+    for (int l = kSplit - 1; l < 8; ++l) CHECK(p.kva.ops[k.alt_dn[(size_t)l] - 1].w.empty());
+}
+
+/* Every buffer the masked path owns takes the whole program, and so does every in-tree buffer an op
+ * declared after the graph touches (PLAN D4): the mask and bounds always; the layer-S stream, the
+ * projected input with its codes and the routing ids when the mode projects. */
+TEST(the_masked_paths_buffers_take_the_whole_program) {
+    for (const char* mode : {"plumb", "speed", "quality"}) {
+        Pair p;
+        declare_pair(p, mode);
+        REQUIRE_EQ(p.st, RAD_OK);
+        const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
+        const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+        const bool project = std::strcmp(mode, "plumb") != 0;
+        CHECK(p.kva.concurrent.count(k.b_mask) && p.kva.concurrent.count(k.b_bounds));
+        CHECK_EQ(k.b_hs != 0, project);
+        CHECK_EQ(k.op_select != 0 && k.op_drop != 0 && k.op_cast != 0, project);
+        for (rad_buf h : {k.b_hs, k.xp.x, k.xp.q8, k.xp.s8, m.b_eids, m.b_h, m.a_x.x})
+            if (project) CHECK(p.kva.concurrent.count(h) == 1);
+        CHECK_EQ(k.xp.q8_fed, project && m.a_x.q8_fed);
+    }
+}
+
+/* ==================================================================== the decision (R52') */
+
+/* A step of sequences with query lengths `q`, the first `D` of them decoding, `ctx` tokens before
+ * each, the last followed by `ahead` prompt tokens. Every KV group gets its own slot rows. */
+struct Shape {
+    std::vector<int32_t> q;
+    int64_t D = 0, ahead = 0;
+    int32_t ctx = 4096;
+};
+Batch make_step(const RadBuilder& bld, const Shape& s) {
+    static int32_t ids[4096], pos[4096], cu[17], slot[4096], table[16 * 1024];
+    static int32_t used[16], state[64 * 48], qlen[16], ctxl[16], acc[16];
     Batch x = make_batch(bld, true);
-    for (size_t g = 0; g < x.kv.size(); ++g) {   /* every group its own slot rows */
+    for (size_t g = 0; g < x.kv.size(); ++g) {
         RadKVGroupBatch& k = x.kv[g];
         k.slot_mapping = slot; k.block_table = table; k.block_table_pitch = 1024;
-        k.seqused = used; k.state_index = state + 3 * g; k.state_index_pitch = 3; k.max_blocks = 1024;
+        k.seqused = used; k.state_index = state + 48 * g; k.state_index_pitch = 3; k.max_blocks = 1024;
     }
-    cu[1] = (int32_t)T;
-    for (int64_t i = 0; i < T; ++i) { ids[i] = (int32_t)(1000 + i); pos[i] = ctx + (int32_t)i; }
+    for (int i = 0; i < 64 * 48; ++i) state[i] = i % 7;
     RadBatch& b = x.b;
+    const int64_t n = (int64_t)s.q.size();
+    int64_t T = 0, DT = 0;
+    int32_t qd = 0, qp = 0, qmax = 0;
+    cu[0] = 0;
+    for (int64_t i = 0; i < n; ++i) {
+        for (int32_t j = 0; j < s.q[(size_t)i]; ++j) { ids[T + j] = 1000 + (int32_t)(T + j); pos[T + j] = s.ctx + j; }
+        T += s.q[(size_t)i];
+        cu[i + 1] = (int32_t)T;
+        qlen[i] = s.q[(size_t)i]; ctxl[i] = s.ctx; acc[i] = 0;
+        (i < s.D ? qd : qp) = std::max(i < s.D ? qd : qp, s.q[(size_t)i]);
+        qmax = std::max(qmax, s.q[(size_t)i]);
+        if (i < s.D) DT += s.q[(size_t)i];
+    }
     b.kv = x.kv.data();
-    b.n_tok = T; b.n_seq = 1; b.n_ahead = ahead;
+    b.phase = s.D == 0 ? RAD_PHASE_PREFILL : s.D == n ? RAD_PHASE_DECODE : RAD_PHASE_MIXED;
+    b.n_tok = T; b.n_seq = n; b.n_ahead = s.ahead;
     b.token_ids = ids; b.positions = pos; b.cu_seqlens = cu;
     b.n_out = 0; b.out_ids = nullptr;
     b.q_lens = qlen; b.ctx_lens = ctxl; b.num_accepted = acc;
-    b.max_q_len = (int32_t)T; b.max_ctx_len = ctx;
+    b.max_q_len = qmax; b.max_ctx_len = s.ctx;
+    b.n_seq_decode = s.D; b.n_tok_decode = DT;
+    b.max_q_len_decode = qd; b.max_q_len_prefill = qp;
     return x;
 }
+
+/* One row of the truth table: a mode, a shape and its edits, and the hand-computed answer
+ * (PLAN-FIX §2 with T = 2048, G = 64). `alt` is the default stage (auto, every pass). */
+struct Row {
+    const char* why;
+    const char* mode;
+    Shape       shape;
+    std::function<void(RadBatch&)> edit;
+    int         path;
+    int64_t     b, s_lb;
+    bool        alt;
+};
+
+TEST(the_approximate_decision_truth_table) {
+    using qwen4exp_kva::PATH_STOCK;
+    using qwen4exp_kva::PATH_LEAN;
+    using qwen4exp_kva::PATH_MASKED;
+    const auto none = [](RadBatch&) {};
+    const std::vector<Row> rows = {
+        {"whole bulk chunk, speed", "speed", {{2048}, 0, 2048}, none, PATH_LEAN, 2048, 0, false},
+        {"whole bulk chunk, quality", "quality", {{2048}, 0, 2048}, none, PATH_MASKED, 2048, 0, true},
+        {"whole bulk chunk, plumb", "plumb", {{2048}, 0, 2048}, none, PATH_MASKED, 2048, 0, true},
+        {"more than T ahead", "speed", {{2048}, 0, 4096}, none, PATH_LEAN, 2048, 0, false},
+        {"T-1 ahead: one tile exact", "speed", {{2048}, 0, 2047}, none, PATH_MASKED, 1984, 0, true},
+        {"half ahead", "speed", {{2048}, 0, 1024}, none, PATH_MASKED, 1024, 0, true},
+        {"64 ahead", "quality", {{2048}, 0, 64}, none, PATH_MASKED, 64, 0, true},
+        {"1 ahead: no bulk", "speed", {{2048}, 0, 1}, none, PATH_STOCK, 0, 0, false},
+        {"final chunk", "speed", {{2048}, 0, 0}, none, PATH_STOCK, 0, 0, false},
+        {"mode off", "off", {{2048}, 0, 2048}, none, PATH_STOCK, 0, 0, false},
+        {"draft pass", "speed", {{2048}, 0, 2048}, [](RadBatch& b) { b.draft_pass = 1; }, PATH_STOCK, 0, 0, false},
+        {"encoder pass", "speed", {{2048}, 0, 2048}, [](RadBatch& b) { b.enc = 1; }, PATH_STOCK, 0, 0, false},
+        {"media rows", "quality", {{2048}, 0, 2048}, [](RadBatch& b) { b.n_mm_rows = 5; }, PATH_STOCK, 0, 0, false},
+        {"mixed rope", "speed", {{2048}, 0, 2048},
+         [](RadBatch& b) { static int32_t rp[3]; b.rope_pos = rp; b.rope_mixed = 1; }, PATH_STOCK, 0, 0, false},
+        {"one decoder beside", "speed", {{1, 1984}, 1, 2048}, none, PATH_MASKED, 1985, 1, true},
+        {"eight decoders beside", "speed", {{1, 1, 1, 1, 1, 1, 1, 1, 1984}, 8, 2048}, none, PATH_MASKED, 1992, 8, true},
+        {"eight decoders, straddle", "quality", {{1, 1, 1, 1, 1, 1, 1, 1, 1984}, 8, 1000}, none, PATH_MASKED, 904, 8, true},
+        {"two prefills, last long", "speed", {{64, 1984}, 0, 2048}, none, PATH_MASKED, 2048, 64, true},
+        {"two prefills, last short", "speed", {{1984, 64}, 0, 2048}, none, PATH_MASKED, 2048, 64, true},
+        {"two prefills, no bulk above s_lb", "speed", {{1984, 64}, 0, 100}, none, PATH_STOCK, 0, 0, false},
+        {"three prefills and a decoder", "quality", {{1, 1024, 512, 448}, 1, 2048}, none, PATH_MASKED, 1985, 961, true},
+        {"pure decode", "speed", {{1, 1}, 2, 0}, none, PATH_STOCK, 0, 0, false},
+    };
+    for (const Row& r : rows) {
+        Pair p;
+        declare_pair(p, r.mode);
+        REQUIRE_EQ(p.st, RAD_OK);
+        Batch x = make_step(p.kva, r.shape);
+        r.edit(x.b);
+        const qwen4exp_kva::Pass got = qwen4exp_kva::derive(qwen4exp_kva::g_kva[0], &x.b);
+        if (got.path != r.path || got.b != r.b || got.s_lb != r.s_lb || got.alt != r.alt)
+            std::fprintf(stderr, "    row '%s': path %d b %lld s_lb %lld alt %d\n", r.why, got.path,
+                         (long long)got.b, (long long)got.s_lb, (int)got.alt);
+        CHECK_EQ(got.path, r.path);
+        CHECK_EQ(got.b, r.b);
+        CHECK_EQ(got.s_lb, r.s_lb);
+        CHECK_EQ(got.alt, r.alt);
+    }
+}
+
+/* R73 -- KL MODE IS EXACT UNLESS THE SWITCH IS SET: a declare that sizes logits for every prompt
+ * row (max_out_rows > 0) serves every pass stock, because bulk rows' logits are not the model's;
+ * RADIANCE_KVA_SCORE_BULK=1 says the caller scores the exact tail only, and the pass approximates. */
+TEST(kl_mode_serves_stock_unless_score_bulk) {
+    for (bool bulk : {false, true}) {
+        Env e(bulk ? std::initializer_list<std::pair<const char*, const char*>>{{"RADIANCE_KVA_SCORE_BULK", "1"}}
+                   : std::initializer_list<std::pair<const char*, const char*>>{});
+        Pair p;
+        declare_pair(p, "quality", 0, 1, 4096);
+        REQUIRE_EQ(p.st, RAD_OK);
+        Batch x = make_step(p.kva, {{128}, 0, 2048});
+        const qwen4exp_kva::Pass got = qwen4exp_kva::derive(qwen4exp_kva::g_kva[0], &x.b);
+        CHECK_EQ(got.path, bulk ? qwen4exp_kva::PATH_MASKED : qwen4exp_kva::PATH_STOCK);
+        CHECK_EQ(qwen4exp_kva::g_kva[0].out_rows_ok, bulk);
+    }
+}
+
+/* The stager lever's switch: stock never takes the alternates, and the row threshold gates auto. */
+TEST(the_stage_switch_and_threshold_gate_the_alternates) {
+    struct Case { const char* stage; const char* rows; Shape s; bool alt; };
+    for (const Case& c : {Case{"stock", nullptr, {{2048}, 0, 2047}, false},
+                          Case{"auto", "63", {{2048}, 0, 2047}, false},    /* 64 exact rows */
+                          Case{"auto", "64", {{2048}, 0, 2047}, true},
+                          Case{"auto", "8", {{1, 1, 1, 1, 1, 1, 1, 1, 1984}, 8, 2048}, true}}) {
+        Env e(c.rows ? std::initializer_list<std::pair<const char*, const char*>>{{"RADIANCE_KVA_STAGE", c.stage}, {"RADIANCE_KVA_STAGE_ROWS", c.rows}}
+                     : std::initializer_list<std::pair<const char*, const char*>>{{"RADIANCE_KVA_STAGE", c.stage}});
+        Pair p;
+        declare_pair(p, "quality");
+        REQUIRE_EQ(p.st, RAD_OK);
+        Batch x = make_step(p.kva, c.s);
+        CHECK_EQ(qwen4exp_kva::derive(qwen4exp_kva::g_kva[0], &x.b).alt, c.alt);
+    }
+}
+
+/* ==================================================================== issue sequences */
 
 struct Run {
     std::vector<RecIssue> issues;
@@ -613,8 +829,8 @@ int count(const std::string& s, const char* what) {
     return n;
 }
 
-/* Where each late layer's issues start: its connection read in a stock or plumb run, its projector
- * in a speed run; the mixer's read ends the last one. */
+/* Where each late layer's issues start: its connection read in a stock or masked run, its projector
+ * in a lean run; the mixer's read ends the last one. */
 std::vector<size_t> starts(const std::vector<RecIssue>& v, const std::vector<rad_op>& first, rad_op end) {
     std::vector<size_t> at;
     for (rad_op h : first) {
@@ -633,142 +849,294 @@ std::vector<RecIssue> slice(const std::vector<RecIssue>& v, size_t a, size_t b) 
                                  v.begin() + (long)std::min(b, v.size()));
 }
 
+/* What a masked pass adds to the in-tree step (PLAN-FIX §8), as switches the expectation reads. */
+struct Want {
+    int64_t b = 0, s_lb = 0, rho_rows = 0;
+    bool    alt = false, project = false, correct = false, rho = false, split = false;
+    bool    scored = false;
+};
+
+/* A late group's slot row for the step's last sequence (index row n_seq-1, pitch 3). */
+RadOperand last_row(const Batch& x, rad_kvgroup g) {
+    return praw2(x.b.kv[g - 1].state_index + (x.b.n_seq - 1) * 3, RAD_I32, 1, 3);
+}
+
+std::vector<RadOperand> correction_operands(const Batch& x, int l, int rank = 0) {
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
+    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    RadOperand heads = RAD_W(k.st[(size_t)l]);
+    heads.offset = (int64_t)rank * m.gcfg.n_head_v * m.gcfg.head_v * m.gcfg.head_k;
+    heads.rows = m.gcfg.n_head_v;
+    return {kv_cache(m.kv_state, l), last_row(x, m.kv_state), kv_cache(k.kv_applied, l),
+            last_row(x, k.kv_applied), heads, k.kv_rho ? kv_cache(k.kv_rho, l) : RAD_NONE,
+            k.kv_rho ? last_row(x, k.kv_rho) : RAD_NONE, brows(k.b_bounds, 2)};
+}
+
+/* The in-tree scan, as the masked layer issues it for the last sequence (and, before it, the
+ * other prefill sequences): cu and state rows narrowed, split at the bulk end when asked. */
+void push_scans(std::vector<RecIssue>& out, const RecIssue& scan, const Batch& x, int l, const Want& w,
+                int rank) {
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
+    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    const qwen4exp_fp8::Layer& lay = m.layers[(size_t)l];
+    const RadBatch& b = x.b;
+    const int32_t* st = b.kv[m.kv_state - 1].state_index;
+    const int64_t D = b.n_seq_decode, S = b.n_seq, P = S - D;
+    RecIssue r = scan;
+    if (P > 1) {
+        r.opd[7] = praw(b.cu_seqlens + D, RAD_I32, P);
+        r.opd[10] = praw2(st + D * 3, RAD_I32, P - 1, 3);
+        out.push_back(r);
+    }
+    r.opd[7] = w.split ? brow_slice(k.b_bounds, 0, 2, 1) : praw(b.cu_seqlens + S - 1, RAD_I32, 2);
+    r.opd[10] = praw2(st + (S - 1) * 3, RAD_I32, 1, 3);
+    out.push_back(r);
+    if (w.rho)
+        out.push_back({k.op_rho[(size_t)l],
+                       {bcol(lay.gdn.w.ab, 0, lay.gdn.cfg.n_head_v, w.rho_rows), brows(k.b_mask, w.rho_rows),
+                        RAD_W(lay.gdn.w_a_log), RAD_W(lay.gdn.w_dt_bias), kv_cache(k.kv_rho, l),
+                        last_row(x, k.kv_rho), brows(k.b_bounds, 1)}, w.rho_rows});
+    if (w.correct) out.push_back({k.op_apply[(size_t)l], correction_operands(x, l, rank), 1});
+    if (!w.split) return;
+    r.opd[7] = brow_slice(k.b_bounds, 2, 2, 1);
+    out.push_back(r);
+}
+
+/* The projected block input, its codes and the select, right after the connection read. */
+void push_projection(std::vector<RecIssue>& out, const Batch& x, int l, const Want& w, int rank) {
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
+    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    const int64_t T = x.b.n_tok, rows = w.b - w.s_lb, n = m.g.n_embd, wide = m.hccfg.hc * n;
+    out.push_back({k.op_proj[(size_t)l], {brow_slice(k.b_hs, w.s_lb, rows, wide), RAD_W(k.proj_w[(size_t)l]),
+                   RAD_W(k.proj_b[(size_t)l]), RAD_NONE, brow_slice(k.xp.x, w.s_lb, rows, n)}, rows});
+    out.push_back({k.quant.op, {brow_slice(k.xp.x, w.s_lb, rows, n), brow_slice(k.xp.q8, w.s_lb, rows, n),
+                   brow_slice(k.xp.s8, w.s_lb, rows, n / 128)}, rows});
+    out.push_back({k.op_select, {brows(k.b_mask, T), brows(k.xp.x, T), brows(k.xp.q8, T), brows(k.xp.s8, T),
+                   brows(m.a_x.x, T), brows(m.a_x.q8, T), brows(m.a_x.s8, T)}, T});
+}
+
+/* The routing with the bulk rows' slots dropped: the fused top-k+sort becomes the pair, with the
+ * drop between (the fused form has no point between the two). */
+void push_route(std::vector<RecIssue>& out, const RecIssue& r, const qwen4exp_fp8::Layer& lay,
+                const Batch& x, int rank) {
+    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    const MoeFP8& e = lay.mlp;
+    const int64_t T = x.b.n_tok, kk = e.c.top_k;
+    const RecIssue drop{k.op_drop, {brows(k.b_mask, T), brow_slice(e.w.ids, 0, T, kk)}, T};
+    if (r.op == e.op_topk) { out.push_back(r); out.push_back(drop); return; }
+    out.push_back({e.op_topk, {r.opd[0], r.opd[1], r.opd[2]}, r.n});
+    out.push_back(drop);
+    out.push_back({e.op_scatter, {r.opd[1], r.opd[3], r.opd[4], r.opd[5]}, r.n});
+}
+
+void push_layer(std::vector<RecIssue>& out, const std::vector<RecIssue>& seg, const Batch& x, int l,
+                const Want& w, int rank) {
+    const qwen4exp_fp8::Layer& lay = qwen4exp_fp8::g_model[rank].layers[(size_t)l];
+    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    for (RecIssue r : seg) {
+        if (r.op == lay.hc_mix.op_read) {
+            out.push_back(r);
+            if (w.project) push_projection(out, x, l, w, rank);
+        } else if (!lay.full && r.op == lay.gdn.op_conv_prep) {
+            if (w.correct) out.push_back({k.op_undo[(size_t)l], correction_operands(x, l, rank), 1});
+            out.push_back(r);
+        } else if (!lay.full && r.op == lay.gdn.op_scan) {
+            push_scans(out, r, x, l, w, rank);
+        } else if (w.project && (r.op == lay.mlp.op_topk || r.op == lay.mlp.op_topk_scatter)) {
+            push_route(out, r, lay, x, rank);
+        } else {
+            if (w.alt && r.op == lay.mlp.op_dn) r.op = k.alt_dn[(size_t)l];
+            out.push_back(r);
+        }
+    }
+}
+
+/* THE ORACLE FOR EVERY MASKED PASS: the in-tree step's own issues on this batch, with exactly the
+ * substitutions PLAN-FIX §8 names -- layer S-1's down GEMM on the alternate, the mask (and the
+ * stream copy) before layer S, and in each late layer the projection selected in after the
+ * connection read, the correction around the last sequence's scan, the bulk rows dropped from the
+ * routing and the down GEMM on the alternate. Built from qwen4exp_fp8::step, not from the plugin. */
+std::vector<RecIssue> masked_expected(const Batch& x, const Want& w, int rank = 0) {
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
+    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    const RadBatch& b = x.b;
+    const int64_t T = b.n_tok;
+    const std::vector<RecIssue> stock = run_step(qwen4exp_fp8::step, b, rank).issues;
+    std::vector<rad_op> reads;
+    for (int l = kSplit; l < 8; ++l) reads.push_back(m.layers[(size_t)l].hc_mix.op_read);
+    const std::vector<size_t> at = starts(stock, reads, m.mixer.op_read);
+    std::vector<RecIssue> out;
+    for (size_t i = 0; i < at[0]; ++i) {
+        RecIssue r = stock[i];
+        if (w.alt && r.op == m.layers[kSplit - 1].mlp.op_dn) r.op = k.alt_dn[kSplit - 1];
+        out.push_back(r);
+    }
+    out.push_back({k.op_mask, {praw(b.cu_seqlens + b.n_seq - 1, RAD_I32, 2), praw(b.token_ids, RAD_I32, w.b),
+                   praw(b.positions, RAD_I32, w.b), w.scored ? RAD_W(k.score) : RAD_NONE,
+                   brows(k.b_mask, T), brows(k.b_bounds, 4)}, w.b});
+    if (w.project) {
+        const int64_t wide = m.hccfg.hc * m.g.n_embd, rows = w.b - w.s_lb;
+        out.push_back({k.op_cast, {brow_slice(m.b_h, w.s_lb, rows, wide), brow_slice(k.b_hs, w.s_lb, rows, wide)}, rows});
+    }
+    for (int l = kSplit; l < 8; ++l)
+        push_layer(out, slice(stock, at[(size_t)(l - kSplit)], at[(size_t)(l - kSplit + 1)]), x, l, w, rank);
+    for (size_t i = at.back(); i < stock.size(); ++i) out.push_back(stock[i]);
+    return out;
+}
+
+/* Prints the first difference, so a failing case says where. */
+int differ_at(const std::vector<RecIssue>& got, const std::vector<RecIssue>& want) {
+    const int n = differ(got, want);
+    for (size_t i = 0; n && i < std::max(got.size(), want.size()); ++i)
+        if (i >= got.size() || i >= want.size() || !same_issue(got[i], want[i])) {
+            std::fprintf(stderr, "    first difference at issue %zu of %zu/%zu: op %u vs %u\n", i,
+                         got.size(), want.size(), i < got.size() ? got[i].op : 0u,
+                         i < want.size() ? want[i].op : 0u);
+            break;
+        }
+    return n;
+}
+
+/* PLUMB IS THE STOCK STEP THROUGH THE MASKED PATH: with the stager lever off (stage stock) it is the
+ * in-tree step plus the one kva_mask issue (mode all: every row exact, no projection, no correction,
+ * no drop); with the lever on, each down GEMM from layer S-1 is the alternate handle with the same
+ * operands (R94's static half); with a forced split, each late delta-net layer's scan is two scans
+ * over the bounds pairs (R47's static half). A 64-row chunk keeps the fused top-k (no drop). */
+TEST(plumb_is_the_stock_step_through_the_masked_path) {
+    struct Case { const char* stage; const char* force; int64_t T; bool alt, split; };
+    for (const Case& c : {Case{"stock", nullptr, 128, false, false}, Case{"auto", nullptr, 128, true, false},
+                          Case{"auto", "64", 128, true, true}, Case{"stock", nullptr, 64, false, false}}) {
+        Env e(c.force ? std::initializer_list<std::pair<const char*, const char*>>{{"RADIANCE_KVA_STAGE", c.stage}, {"RADIANCE_KVA_FORCE_SPLIT", c.force}}
+                      : std::initializer_list<std::pair<const char*, const char*>>{{"RADIANCE_KVA_STAGE", c.stage}});
+        Pair p;
+        declare_pair(p, "plumb");
+        REQUIRE_EQ(p.st, RAD_OK);
+        Batch x = make_step(p.kva, {{(int32_t)c.T}, 0, 2048});
+        Want w;
+        w.b = c.split ? c.T - 64 : c.T;
+        w.alt = c.alt;
+        w.split = c.split;
+        const Run got = run_step(qwen4exp_kva::step, x.b);
+        CHECK_EQ(differ_at(got.issues, masked_expected(x, w)), 0);
+        CHECK_EQ(count(got.log, "kva: approximate step"), 1);
+        CHECK_EQ(got.device_calls, 0);
+    }
+}
+
+/* QUALITY MASKS ROWS IN PLACE THROUGH THE IN-TREE LAYER (PLAN-FIX §3): a whole bulk chunk at TP1
+ * and on rank 0 of TP2 (where the writes carry the all-reduce), and a 64-row chunk (whose stock
+ * routing is the fused form). The correction scales by the decay sums over [s, b). */
+TEST(quality_masks_rows_in_place_through_the_in_tree_layer) {
+    for (auto [world, T] : {std::pair<int, int32_t>{1, 128}, {2, 128}, {1, 64}}) {
+        Pair p;
+        declare_pair(p, "quality", 0, world);
+        REQUIRE_EQ(p.st, RAD_OK);
+        Batch x = make_step(p.kva, {{T}, 0, 2048});
+        Want w;
+        w.b = T; w.rho_rows = T;
+        w.alt = w.project = w.correct = w.rho = w.scored = true;
+        const Run got = run_step(qwen4exp_kva::step, x.b);
+        CHECK_EQ(differ_at(got.issues, masked_expected(x, w)), 0);
+        CHECK_EQ(count(got.log, "kva: approximate step"), 1);
+        CHECK_EQ(got.device_calls, 0);
+    }
+}
+
+/* #6 -- THE STRADDLING CHUNK (PLAN-FIX §4, DD-C): 64 tokens ahead of a 128-row chunk with T = 2048,
+ * so the bulk ends at row 64. split: scan [s, b), decay sums over [s, b), apply, scan [b, e); end:
+ * one scan, decay sums over the whole chunk, apply after. Speed mode on the same shape is masked
+ * too (the lean fill has no exact rows) and applies without decay sums. */
+TEST(a_straddling_chunk_splits_the_last_scan_at_the_bulk_end) {
+    struct Case { const char* mode; const char* straddle; bool split, rho; int64_t rho_rows; };
+    for (const Case& c : {Case{"quality", "split", true, true, 64}, Case{"quality", "end", false, true, 128},
+                          Case{"speed", "split", true, false, 0}}) {
+        Env e({{"RADIANCE_KVA_STRADDLE", c.straddle}});
+        Pair p;
+        declare_pair(p, c.mode);
+        REQUIRE_EQ(p.st, RAD_OK);
+        Batch x = make_step(p.kva, {{128}, 0, 1984});
+        Want w;
+        w.b = 64; w.rho_rows = c.rho_rows;
+        w.alt = w.project = w.correct = true;
+        w.rho = c.rho;
+        w.split = c.split;
+        w.scored = !std::strcmp(c.mode, "quality");
+        const Run got = run_step(qwen4exp_kva::step, x.b);
+        CHECK_EQ(differ_at(got.issues, masked_expected(x, w)), 0);
+        CHECK(has(got.log, c.split ? ", split)" : ", end)"));
+    }
+}
+
+/* R53' SUBSET -- DECODERS AND OTHER PREFILLS BESIDE THE APPROXIMATED CHUNK: the in-tree decode half
+ * and the other prefill sequences' scan are issued as stock; only the last sequence is corrected
+ * (M = 1 on its own index row), and its bulk superset starts at s_lb. */
+TEST(a_mixed_step_corrects_only_the_last_sequence) {
+    struct Case { Shape s; int64_t b, s_lb; };
+    for (const Case& c : {Case{{{1, 1, 128}, 2, 2048}, 130, 2}, Case{{{64, 128}, 0, 2048}, 192, 64},
+                          Case{{{1, 64, 128}, 1, 2048}, 193, 65}}) {
+        Pair p;
+        declare_pair(p, "quality");
+        REQUIRE_EQ(p.st, RAD_OK);
+        Batch x = make_step(p.kva, c.s);
+        Want w;
+        w.b = c.b; w.s_lb = c.s_lb; w.rho_rows = c.b;
+        w.alt = w.project = w.correct = w.rho = w.scored = true;
+        const Run got = run_step(qwen4exp_kva::step, x.b);
+        CHECK_EQ(differ_at(got.issues, masked_expected(x, w)), 0);
+        CHECK_EQ(count(got.log, "kva: approximate step"), 1);
+    }
+}
+
+/* A ONE-SEQUENCE CHUNK OFF THE DELTA NET'S TILE FAILS THE STEP BY NAME: the scheduler never cuts one,
+ * and splitting a tile would be silently wrong. A forced split off the tile (R47's negative
+ * control) is served, and said at declare. */
+TEST(a_chunk_off_the_tile_fails_the_step_by_name) {
+    Pair p;
+    declare_pair(p, "quality");
+    REQUIRE_EQ(p.st, RAD_OK);
+    Batch x = make_step(p.kva, {{100}, 0, 2048});
+    RadCtx c;
+    c.batch = &x.b;
+    g_ctx = &c;
+    qwen4exp_kva::step(&c, &x.b);
+    g_ctx = nullptr;
+    CHECK(has(c.step_fail, "tile"));
+    CHECK(c.issues.empty());
+    Env e({{"RADIANCE_KVA_FORCE_SPLIT", "100"}});
+    Pair q;
+    std::string err = stderr_of([&] { declare_pair(q, "plumb"); });
+    REQUIRE_EQ(q.st, RAD_OK);
+    CHECK(has(err, "OFF the delta net's tile"));
+    Batch y = make_step(q.kva, {{128}, 0, 2048});
+    const Run got = run_step(qwen4exp_kva::step, y.b);
+    CHECK(!got.issues.empty());
+}
+
+/* ==================================================================== the lean fill */
+
 void add_linear(std::set<rad_op>& s, const rad::arch::LinearFP8& l) {
     for (rad_op h : {l.op, l.op_q, l.op_m1}) if (h) s.insert(h);
 }
 
-/* The handles of the pieces the fill issues for late layer `l`: the delta net's projections and
- * recurrence, or the indexer's block-key half (`keys`) and the attention's K/V path (`kv`). */
-struct Pieces { std::set<rad_op> gdn, keys, select, kv; };
+/* The handles of the pieces the lean fill issues for late layer `l`: the delta net's projections
+ * and recurrence, or the indexer's block-key half (`keys`) and the attention's K/V path (`kv`). */
+struct Pieces { std::set<rad_op> gdn, keys, kv; };
 Pieces pieces(const qwen4exp_fp8::Layer& l) {
     Pieces p;
     add_linear(p.gdn, l.gdn.in);
     for (rad_op h : {l.gdn.op_ab, l.gdn.op_conv_prep, l.gdn.op_kkt, l.gdn.op_scan}) p.gdn.insert(h);
     add_linear(p.keys, l.qsa.proj);
     for (rad_op h : {l.qsa.op_work, l.qsa.op_bkey, l.qsa.op_tail}) p.keys.insert(h);
-    for (rad_op h : {l.qsa.op_qprep, l.qsa.op_norm, l.qsa.op_rope, l.qsa.op_score, l.qsa.op_select})
-        if (h) p.select.insert(h);
     add_linear(p.kv, l.attn.kp);
     add_linear(p.kv, l.attn.vp);
     for (rad_op h : {l.attn.op_k_norm, l.attn.op_rope_k, l.attn.op_kv_store}) p.kv.insert(h);
     return p;
 }
 
-/* Declares stock and KVA side by side on the served formats with every kva.* tensor held. */
-struct Pair {
-    RadBuilder stock, kva;
-    int        st = RAD_OK;
-};
-void declare_pair(Pair& p, const char* mode, int rank = 0, int world = 1) {
-    RadModelMeta meta = flash_next_meta();
-    RadBuildCtx c = served_ctx(rank, world);
-    served(p.stock);
-    served(p.kva);
-    hold_kva(p.kva, {"kva.proj", "kva.st"});
-    hold_score(p.kva, "kva.rowsel.score");
-    REQUIRE_EQ(qwen4exp_fp8::declare(&p.stock, &meta, &c), RAD_OK);
-    Env env({{"RADIANCE_KVA", mode}});
-    p.st = qwen4exp_kva::declare(&p.kva, &meta, &c);
-}
-
-/* kva_state_correct's operand list for late layer l: each KV operand with its own group's rows. */
-std::vector<RadOperand> seg_opd_correct(const qwen4exp_fp8::Model& m, const qwen4exp_kva::Kva& k,
-                                        const Batch& bk, int l, bool nd) {
-    RadOperand heads = RAD_W(k.st[(size_t)l]);
-    heads.offset = (int64_t)m.g.rank * m.gcfg.n_head_v * m.gcfg.head_v * m.gcfg.head_k;
-    heads.rows = m.gcfg.n_head_v;
-    auto rows_of = [&](rad_kvgroup g) { return praw2(bk.b.kv[g - 1].state_index, RAD_I32, 1, 3); };
-    return {kv_cache(m.kv_state, l), rows_of(m.kv_state), kv_cache(k.kv_applied, l),
-            rows_of(k.kv_applied), heads, nd ? kv_cache(k.kv_rho, l) : RAD_NONE,
-            nd ? rows_of(k.kv_rho) : RAD_NONE};
-}
-
-/* ONLY a prefill chunk of ONE sequence with T prompt tokens after it is filled; a mixed step, two
- * prefills, a draft pass, a speculative step and a chunk inside the last T all issue the stock
- * sequence exactly. The approximate one logs its one line on rank 0 alone. */
-TEST(only_single_sequence_bulk_chunks_are_approximated) {
-    Pair p;
-    declare_pair(p, "speed");
-    REQUIRE_EQ(p.st, RAD_OK);
-    const std::vector<std::function<void(RadBatch&)>> stock_shapes = {
-        [](RadBatch& b) { b.n_ahead = 2047; },                                  /* inside the tail */
-        [](RadBatch& b) { b.n_seq = 2; },                                       /* two prefills */
-        [](RadBatch& b) { b.phase = RAD_PHASE_MIXED; b.n_seq = 2; b.n_seq_decode = 1; b.n_tok_decode = 1; },
-        [](RadBatch& b) { b.n_spec = 1; },                                      /* a verify step */
-        [](RadBatch& b) { b.phase = RAD_PHASE_DECODE; },                        /* decode by phase */
-    };
-    for (const auto& shape : stock_shapes) {
-        Batch bs = one_prefill(p.stock, 128, 2048, 128);
-        Batch bk = one_prefill(p.kva, 128, 2048, 128);
-        shape(bs.b);
-        shape(bk.b);
-        const Run want = run_step(qwen4exp_fp8::step, bs.b);
-        const Run got = run_step(qwen4exp_kva::step, bk.b);
-        CHECK_EQ(differ(got.issues, want.issues), 0);
-        CHECK_EQ(count(got.log, "kva: approximate step"), 0);
-    }
-    Batch bk = one_prefill(p.kva, 128, 2048, 128);
-    const Run r0 = run_step(qwen4exp_kva::step, bk.b, 0);
-    const Run r1 = run_step(qwen4exp_kva::step, bk.b, 1);
-    CHECK_EQ(count(r0.log, "kva: approximate step"), 1);
-    CHECK_EQ(count(r1.log, "kva: approximate step"), 0);
-    CHECK_EQ(r0.device_calls, 0);
-}
-
-/* PLUMB IS THE STOCK STEP, issue for issue and operand for operand, with exactly two moves, both
- * inside one late attention layer's block: the indexer's query prep and selection after its
- * block-key half, and the attention's K/V path ahead of its query path. Every other position --
- * the prologue, layers below S, each late delta-net layer, every connection and MoE, the
- * epilogue -- is identical. Dense (short context) and sparse (past the QSA exactness bound). */
-TEST(plumb_reproduces_the_stock_step_with_two_moves_inside_a_block) {
-    Pair p;
-    declare_pair(p, "plumb");
-    REQUIRE_EQ(p.st, RAD_OK);
-    CHECK_EQ(p.kva.ops.size(), p.stock.ops.size());   /* plumb adds no op */
-    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
-    for (int32_t ctx : {128, 4096}) {
-        Batch bs = one_prefill(p.stock, 128, 2048, ctx);
-        Batch bk = one_prefill(p.kva, 128, 2048, ctx);
-        const Run want = run_step(qwen4exp_fp8::step, bs.b);
-        const Run got = run_step(qwen4exp_kva::step, bk.b);
-        REQUIRE_EQ(got.issues.size(), want.issues.size());
-        std::vector<rad_op> reads;
-        for (int l = kSplit; l < 8; ++l) reads.push_back(m.layers[(size_t)l].hc_mix.op_read);
-        const std::vector<size_t> at = starts(want.issues, reads, m.mixer.op_read);
-        CHECK_EQ(differ(slice(got.issues, 0, at[0]), slice(want.issues, 0, at[0])), 0);
-        CHECK_EQ(differ(slice(got.issues, at.back(), got.issues.size()),
-                        slice(want.issues, at.back(), want.issues.size())), 0);
-        for (int l = kSplit; l < 8; ++l) {
-            const qwen4exp_fp8::Layer& lay = m.layers[(size_t)l];
-            std::vector<RecIssue> seg = slice(want.issues, at[(size_t)(l - kSplit)], at[(size_t)(l - kSplit + 1)]);
-            if (lay.full) {
-                /* the documented order: read, keys, select, K/V, the rest of the block, the rest */
-                const Pieces pc = pieces(lay);
-                const rad_op write = lay.hc_mix.op_write;
-                bool after_write = false;
-                std::vector<std::pair<int, RecIssue>> keyed;
-                for (const RecIssue& i : seg) {
-                    after_write = after_write || i.op == write;
-                    const int g = i.op == lay.hc_mix.op_read ? 0 : pc.keys.count(i.op) ? 1
-                                : pc.select.count(i.op) ? 2 : pc.kv.count(i.op) ? 3 : after_write ? 5 : 4;
-                    keyed.push_back({g, i});
-                }
-                std::stable_sort(keyed.begin(), keyed.end(),
-                                 [](const auto& a, const auto& b) { return a.first < b.first; });
-                seg.clear();
-                for (const auto& k : keyed) seg.push_back(k.second);
-            }
-            CHECK_EQ(differ(slice(got.issues, at[(size_t)(l - kSplit)], at[(size_t)(l - kSplit + 1)]), seg), 0);
-        }
-        CHECK_EQ(count(got.log, "kva: approximate step"), 1);
-    }
-}
-
-/* SPEED FILLS A LATE LAYER WITH ITS CACHE-WRITING OPS AND NOTHING ELSE: the projector into `x`,
- * the quantiser, then the stock block's own delta-net projections and recurrence -- or indexer
- * block-key half and K/V path -- in stock order with stock operands. No connection read or
- * write, no MoE, no query path, no attention, no output projection for layers >= S. Below S and
- * after the late layers the step is the stock one. */
+/* THE LEAN FILL (speed, one sequence, whole chunk bulk) FILLS A LATE LAYER WITH ITS CACHE-WRITING
+ * OPS AND NOTHING ELSE: the projector into `x`, the quantiser, then the stock block's own delta-net
+ * projections and recurrence -- or indexer block-key half and K/V path -- in stock order with stock
+ * operands. No connection read or write, no MoE, no query path, no mask, no alternate. */
 TEST(speed_fills_late_layers_with_their_cache_writing_ops_only) {
     Pair p;
     declare_pair(p, "speed");
@@ -777,11 +1145,9 @@ TEST(speed_fills_late_layers_with_their_cache_writing_ops_only) {
     const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
     REQUIRE(k.quant.op != 0);                          /* the served formats need codes */
     CHECK(m.a_x.q8_fed);
-    for (rad_buf h : {m.b_h, m.a_x.x, m.a_x.cq(), m.a_x.cs()}) CHECK(p.kva.concurrent.count(h) == 1);
-    Batch bs = one_prefill(p.stock, 128, 2048, 4096);
-    Batch bk = one_prefill(p.kva, 128, 2048, 4096);
-    const Run want = run_step(qwen4exp_fp8::step, bs.b);
-    const Run got = run_step(qwen4exp_kva::step, bk.b);
+    Batch x = make_step(p.kva, {{128}, 0, 2048});
+    const Run want = run_step(qwen4exp_fp8::step, x.b);
+    const Run got = run_step(qwen4exp_kva::step, x.b);
     std::vector<rad_op> reads, projs;
     for (int l = kSplit; l < 8; ++l) {
         reads.push_back(m.layers[(size_t)l].hc_mix.op_read);
@@ -792,6 +1158,7 @@ TEST(speed_fills_late_layers_with_their_cache_writing_ops_only) {
     CHECK_EQ(differ(slice(got.issues, 0, gs[0]), slice(want.issues, 0, ws[0])), 0);
     CHECK_EQ(differ(slice(got.issues, gs.back(), got.issues.size()),
                     slice(want.issues, ws.back(), want.issues.size())), 0);
+    for (const RecIssue& r : got.issues) CHECK(r.op != k.op_mask && r.op != k.alt_dn[kSplit - 1]);
     for (int l = kSplit; l < 8; ++l) {
         const size_t i = (size_t)(l - kSplit);
         const qwen4exp_fp8::Layer& lay = m.layers[(size_t)l];
@@ -810,23 +1177,19 @@ TEST(speed_fills_late_layers_with_their_cache_writing_ops_only) {
                 keep.push_back(r);
         CHECK(keep.size() >= (lay.full ? 9u : 5u));
         if (!lay.full) {
-            /* Stage 4: undo right before the conv/scan, apply right after, on this layer's slots. */
-            const RadOperand state = kv_cache(m.kv_state, l), applied = kv_cache(k.kv_applied, l);
-            const RadOperand st_idx = praw2(bk.b.kv[m.kv_state - 1].state_index, RAD_I32, 1, 3);
-            const RadOperand ap_idx = praw2(bk.b.kv[k.kv_applied - 1].state_index, RAD_I32, 1, 3);
-            RadOperand heads = RAD_W(k.st[(size_t)l]);   /* rank 0 of 1: every head, from 0 */
-            heads.rows = m.gcfg.n_head_v;
-            const std::vector<RadOperand> opd = {state, st_idx, applied, ap_idx, heads, RAD_NONE, RAD_NONE};
-            const RecIssue undo{k.op_undo[(size_t)l], opd, 1};
-            const RecIssue apply{k.op_apply[(size_t)l], opd, 1};
+            /* Stage 4: undo right before the conv/scan, apply right after, on this layer's slots;
+             * no bounds on the lean path (its sequence's whole chunk is bulk). */
+            std::vector<RadOperand> opd = correction_operands(x, l);
+            opd[7] = RAD_NONE;
             size_t conv = 0;
             while (conv < keep.size() && keep[conv].op != lay.gdn.op_conv_prep) ++conv;
-            keep.insert(keep.begin() + (long)conv, undo);
-            keep.push_back(apply);   /* the scan is the block's last cache-writing piece */
+            keep.insert(keep.begin() + (long)conv, RecIssue{k.op_undo[(size_t)l], opd, 1});
+            keep.push_back(RecIssue{k.op_apply[(size_t)l], opd, 1});
         }
         CHECK_EQ(differ(slice(seg, 2, seg.size()), keep), 0);
     }
     CHECK_EQ(count(got.log, "kva: approximate step"), 1);
+    CHECK(has(got.log, "lean"));
     CHECK_EQ(got.device_calls, 0);
 }
 
@@ -856,7 +1219,7 @@ TEST(the_correction_is_declared_and_issued_only_when_held) {
         for (const RecOp& o : kva.ops)
             if (o.op == "kva_state_correct")
                 for (const RecParam& q : o.p) if (q.key == "alpha") CHECK_EQ(q.dval, 0.5);
-        Batch bk = one_prefill(kva, 128, 2048, 128);
+        Batch bk = make_step(kva, {{128}, 0, 2048});
         const Run r = run_step(qwen4exp_kva::step, bk.b);
         int corrections = 0;
         for (const RecIssue& i : r.issues)
@@ -879,13 +1242,13 @@ TEST(at_tp2_each_rank_corrects_its_own_heads) {
         REQUIRE(w != nullptr);
         CHECK_EQ(w->shard, RAD_SHARD_NONE);
         CHECK_EQ(w->shape[0], m.gcfg.n_head_v * 2);
-        Batch bk = one_prefill(p.kva, 128, 2048, 128);
+        Batch bk = make_step(p.kva, {{128}, 0, 2048});
         const Run r = run_step(qwen4exp_kva::step, bk.b, rank);
         int seen = 0;
         for (const RecIssue& i : r.issues) {
             if (i.op != k.op_undo[kSplit] && i.op != k.op_apply[kSplit]) continue;
             ++seen;
-            REQUIRE_EQ(i.opd.size(), (size_t)7);
+            REQUIRE_EQ(i.opd.size(), (size_t)8);
             CHECK_EQ(i.opd[4].handle, k.st[kSplit]);
             CHECK_EQ(i.opd[4].rows, m.gcfg.n_head_v);
             CHECK_EQ(i.opd[4].offset, (int64_t)rank * m.gcfg.n_head_v * m.gcfg.head_v * m.gcfg.head_k);
@@ -894,136 +1257,24 @@ TEST(at_tp2_each_rank_corrects_its_own_heads) {
     }
 }
 
-/* plumb runs the late layers exactly and issues no correction, so it places none. */
+/* plumb runs the late layers exactly and issues no correction, so it places none; it declares no
+ * projector op, no select, no drop and no stream copy either (it still declares the projector's
+ * weights: S is the lowest projected layer). */
 TEST(plumb_declares_no_correction) {
     Pair p;
     declare_pair(p, "plumb");
     REQUIRE_EQ(p.st, RAD_OK);
     CHECK(weight(p.kva, "kva.st.4") == nullptr);
     CHECK(weight(p.kva, "kva.proj.4.weight") != nullptr);
-}
-
-/* ==================================================================== quality mode (Stage 5) */
-
-/* What an in-tree helper issues, on a scratch context: the oracle for the hand-issued copies. */
-template <class F>
-std::vector<RecIssue> issues_by(F f) {
-    RadCtx cx;
-    f(&cx);
-    return cx.issues;
-}
-
-/* QUALITY RUNS THE SELECTED ROWS EXACTLY ON cap COMPACTED ROWS. Per approximate chunk: kva_rowsel
- * once (token ids and absolute positions), the selected rows' wide stream gathered into h_R. Per
- * late layer: the projector over all rows; the connection read over h_R's cap rows into x_R
- * (the in-tree read's operands with the stream and outputs swapped); x_R scattered over the
- * projection; the codes; the WHOLE block over all n_tok rows (stock issues; for a delta-net
- * layer with undo, decay sums and apply inside it); the block output gathered to y_R; the
- * connection write into h_R at cap rows; the feed-forward read, the MoE pass and its write at
- * cap rows -- each equal to the in-tree helper's own issues with only the stream swapped.
- * TP1 and rank 0 of TP2 (where the writes carry the all-reduce). */
-TEST(quality_runs_the_selected_rows_exactly_on_cap_compacted_rows) {
-    for (int world : {1, 2}) {
-        Pair p;
-        declare_pair(p, "quality", 0, world);
-        REQUIRE_EQ(p.st, RAD_OK);
-        qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
-        const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
-        const int64_t T = 128, cap = k.cfg.cap;
-        CHECK_EQ(cap, (int64_t)512);
-        REQUIRE(k.op_rowsel && k.op_gather_h && k.op_scatter_x && k.op_gather_y && k.kv_rho);
-        for (rad_buf h : {k.b_rows, k.b_mask, k.b_hr, k.b_xr, k.b_injr, k.b_yr, m.b_ab})
-            CHECK(p.kva.concurrent.count(h) == 1);
-        Batch bs = one_prefill(p.stock, T, 2048, 4096);
-        Batch bk = one_prefill(p.kva, T, 2048, 4096);
-        const Run want = run_step(qwen4exp_fp8::step, bs.b);
-        const Run got = run_step(qwen4exp_kva::step, bk.b);
-        std::vector<rad_op> reads, projs;
-        for (int l = kSplit; l < 8; ++l) {
-            reads.push_back(m.layers[(size_t)l].hc_mix.op_read);
-            projs.push_back(k.op_proj[(size_t)l]);
-        }
-        const std::vector<size_t> ws = starts(want.issues, reads, m.mixer.op_read);
-        const std::vector<size_t> gs = starts(got.issues, projs, m.mixer.op_read);
-        REQUIRE(gs[0] >= 2 && gs[0] < got.issues.size());
-        CHECK_EQ(differ(slice(got.issues, 0, gs[0] - 2), slice(want.issues, 0, ws[0])), 0);
-        const RecIssue& sel = got.issues[gs[0] - 2];
-        CHECK_EQ(sel.op, k.op_rowsel);
-        CHECK_EQ(sel.n, T);
-        REQUIRE_EQ(sel.opd.size(), (size_t)5);
-        CHECK(sel.opd[0].raw == bk.b.token_ids && sel.opd[1].raw == bk.b.positions);
-        CHECK_EQ(sel.opd[2].handle, k.score);
-        CHECK_EQ(sel.opd[3].handle, k.b_rows);
-        CHECK_EQ(sel.opd[4].handle, k.b_mask);
-        const RecIssue& gat = got.issues[gs[0] - 1];
-        CHECK_EQ(gat.op, k.op_gather_h);
-        CHECK_EQ(gat.n, cap);
-        CHECK(gat.opd[0].handle == m.b_h && gat.opd[1].handle == k.b_rows && gat.opd[2].handle == k.b_hr);
-        CHECK_EQ(differ(slice(got.issues, gs.back(), got.issues.size()),
-                        slice(want.issues, ws.back(), want.issues.size())), 0);
-        for (int l = kSplit; l < 8; ++l) {
-            const size_t i = (size_t)(l - kSplit);
-            const qwen4exp_fp8::Layer& lay = m.layers[(size_t)l];
-            const std::vector<RecIssue> seg = slice(got.issues, gs[i], gs[i + 1]);
-            REQUIRE(seg.size() > 4);
-            std::vector<RecIssue> want_seg;
-            want_seg.push_back(seg[0]);                                     /* the projector */
-            CHECK_EQ(seg[0].op, k.op_proj[(size_t)l]);
-            /* the read over h_R into x_R / inj_R, codes absent */
-            std::vector<RecIssue> rd = issues_by([&](RadCtx* cx) { lay.hc_mix.read(cx, cap, 0, cap); });
-            REQUIRE_EQ(rd.size(), (size_t)1);
-            rd[0].opd[0] = brows(k.b_hr, cap);
-            rd[0].opd[5] = brows(k.b_xr, cap);
-            rd[0].opd[6] = brows(k.b_injr, cap);
-            for (int o = 7; o < 11; ++o) rd[0].opd[(size_t)o] = RAD_NONE;
-            want_seg.push_back(rd[0]);
-            want_seg.push_back({k.op_scatter_x, {brows(k.b_xr, cap), brows(k.b_rows, cap),
-                                                 brows(m.a_x.x, T)}, cap});
-            REQUIRE(seg.size() > 3);
-            want_seg.push_back(seg[3]);                                     /* the codes */
-            CHECK_EQ(seg[3].op, k.quant.op);
-            /* the whole block over all rows: the stock issues between the read and the write */
-            const std::vector<RecIssue> stock_seg = slice(want.issues, ws[i], ws[i + 1]);
-            size_t wpos = 1;
-            const rad_op wr = lay.hc_mix.takes_ar(T) ? lay.hc_mix.ar_write(T) : lay.hc_mix.op_write;
-            while (wpos < stock_seg.size() && stock_seg[wpos].op != wr) ++wpos;
-            REQUIRE(wpos < stock_seg.size());
-            for (size_t j = 1; j < wpos; ++j) {
-                const RecIssue& r = stock_seg[j];
-                if (!lay.full && r.op == lay.gdn.op_conv_prep)
-                    want_seg.push_back({k.op_undo[(size_t)l], seg_opd_correct(m, k, bk, l, false), 1});
-                want_seg.push_back(r);
-                if (!lay.full && r.op == lay.gdn.op_scan) {
-                    want_seg.push_back({k.op_rho[(size_t)l],
-                        {bcol(lay.gdn.w.ab, 0, lay.gdn.cfg.n_head_v, T), brows(k.b_mask, T),
-                         RAD_W(lay.gdn.w_a_log), RAD_W(lay.gdn.w_dt_bias), kv_cache(k.kv_rho, l),
-                         praw2(bk.b.kv[k.kv_rho - 1].state_index, RAD_I32, 1, 3)}, T});
-                    want_seg.push_back({k.op_apply[(size_t)l], seg_opd_correct(m, k, bk, l, true), 1});
-                }
-            }
-            want_seg.push_back({k.op_gather_y, {brows(m.a_x.x, T), brows(k.b_rows, cap),
-                                                brows(k.b_yr, cap)}, cap});
-            std::vector<RecIssue> mw = issues_by([&](RadCtx* cx) { lay.hc_mix.write(cx, T, 0, cap); });
-            REQUIRE_EQ(mw.size(), (size_t)1);
-            mw[0].opd = {brows(k.b_yr, cap), brows(k.b_injr, cap), brows(k.b_hr, cap)};
-            want_seg.push_back(mw[0]);
-            std::vector<RecIssue> fr = issues_by([&](RadCtx* cx) { lay.hc_ffn.read(cx, cap, 0, cap); });
-            fr[0].opd[0] = brows(k.b_hr, cap);
-            want_seg.push_back(fr[0]);
-            for (const RecIssue& r : issues_by([&](RadCtx* cx) { lay.mlp.pass(cx, cap, 0, cap); }))
-                want_seg.push_back(r);
-            std::vector<RecIssue> fw = issues_by([&](RadCtx* cx) { lay.hc_ffn.write(cx, cap, 0, cap); });
-            REQUIRE_EQ(fw.size(), (size_t)1);
-            fw[0].opd.back() = brows(k.b_hr, cap);
-            want_seg.push_back(fw[0]);
-            CHECK_EQ(differ(seg, want_seg), 0);
-        }
-        CHECK_EQ(count(got.log, "kva: approximate step"), 1);
-        CHECK_EQ(got.device_calls, 0);
+    for (size_t i = p.stock.ops.size(); i < p.kva.ops.size(); ++i) {
+        const std::string& op = p.kva.ops[i].op;
+        CHECK(op == "kva_mask" || op == "moe_gemm_q");
     }
 }
 
 /* ==================================================================== Stage 6 captures */
+
+
 
 /* A scratch directory, removed with the object. */
 struct TempDir {
@@ -1086,8 +1337,8 @@ TEST(capture_records_an_exact_chunk_and_issues_the_stock_sequence) {
     REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
     CHECK_EQ(kva.ops.size(), stock.ops.size());
     CHECK_EQ(qwen4exp_kva::g_kva[0].split, (int64_t)kSplit);
-    Batch bs = one_prefill(stock, 128, 300, 4100);   /* positions 4100..4227 */
-    Batch bk = one_prefill(kva, 128, 300, 4100);
+    Batch bs = make_step(stock, {{128}, 0, 300, 4100});   /* positions 4100..4227 */
+    Batch bk = make_step(kva, {{128}, 0, 300, 4100});
     const Run want = run_step(qwen4exp_fp8::step, bs.b);
     const Run got = run_step(qwen4exp_kva::step, bk.b);
     CHECK_EQ(differ(got.issues, want.issues), 0);
@@ -1141,7 +1392,7 @@ TEST(capture_records_an_exact_chunk_and_issues_the_stock_sequence) {
     /* rank 1, and a two-sequence step: the stock step, nothing read */
     const Run r1 = run_step(qwen4exp_kva::step, bk.b, 1);
     CHECK_EQ(r1.device_calls, 0);
-    Batch two = one_prefill(kva, 128, 300, 4100);
+    Batch two = make_step(kva, {{128}, 0, 300, 4100});
     two.b.n_seq = 2;
     CHECK_EQ(run_step(qwen4exp_kva::step, two.b).device_calls, 0);
     CHECK_EQ(count(slurp(dir.path / "capture.jsonl"), "\n"), 1);
@@ -1159,7 +1410,7 @@ TEST(state_capture_copies_each_late_state_before_the_apply) {
     REQUIRE_EQ(p.st, RAD_OK);
     std::vector<std::vector<RecIssue>> plain;   /* the same chunks without the switch */
     for (int64_t ahead : {2048, 100}) {
-        Batch ref = one_prefill(p.kva, 128, ahead, 2048);
+        Batch ref = make_step(p.kva, {{128}, 0, ahead, 2048});
         plain.push_back(run_step(qwen4exp_kva::step, ref.b).issues);
     }
     const RadModelMeta meta = flash_next_meta();
@@ -1175,7 +1426,7 @@ TEST(state_capture_copies_each_late_state_before_the_apply) {
     REQUIRE(k.op_state_read != 0);
     CHECK(kva.concurrent.count(k.b_state) == 1);
     for (int64_t ahead : {2048, 100}) {   /* approximate, then exact */
-        Batch bk = one_prefill(kva, 128, ahead, 2048);
+        Batch bk = make_step(kva, {{128}, 0, ahead, 2048});
         const std::vector<RecIssue>& want = plain[ahead == 2048 ? 0 : 1];
         const Run got = run_step(qwen4exp_kva::step, bk.b);
         std::vector<RecIssue> reads, rest;
@@ -1217,19 +1468,21 @@ TEST(state_capture_copies_each_late_state_before_the_apply) {
 
 
 /* Speed declares the projector per late layer and one quantiser, after the whole in-tree graph and
- * nothing in between: the in-tree op list is a prefix of the KVA one. */
+
+/* Every op a serving mode adds is declared after the whole in-tree graph and nothing in between:
+ * the in-tree op list is a prefix of the KVA one. Speed adds the projector per late layer, one
+ * quantiser, the correction pair per late delta-net layer, the mask, the stream copy, the select,
+ * the drop and one alternate down handle per routed layer from S-1. */
 TEST(speed_adds_its_ops_after_the_in_tree_graph) {
     Pair p;
     declare_pair(p, "speed");
     REQUIRE_EQ(p.st, RAD_OK);
     REQUIRE(p.kva.ops.size() > p.stock.ops.size());
     for (size_t i = 0; i < p.stock.ops.size(); ++i) CHECK_EQ(p.kva.ops[i].op, p.stock.ops[i].op);
-    int proj = 0, quant = 0, correct = 0;
+    std::map<std::string, int> n;
     for (size_t i = p.stock.ops.size(); i < p.kva.ops.size(); ++i) {
         const RecOp& o = p.kva.ops[i];
-        proj += o.op == "gemm_nt_bias";
-        quant += o.op == "quant_act_i8g";
-        correct += o.op == "kva_state_correct";
+        ++n[o.op];
         if (o.op != "gemm_nt_bias") continue;
         for (const RecParam& q : o.p) {
             if (q.key == "N") CHECK_EQ(q.ival, 2560LL);
@@ -1237,18 +1490,27 @@ TEST(speed_adds_its_ops_after_the_in_tree_graph) {
             if (q.key == "M") CHECK_EQ(q.ihi, 2048LL);
         }
     }
-    CHECK_EQ(proj, 8 - kSplit);
-    CHECK_EQ(quant, 1);
-    CHECK_EQ(correct, 2 * 3);
+    CHECK_EQ(n["gemm_nt_bias"], 8 - kSplit);
+    CHECK_EQ(n["quant_act_i8g"], 1);
+    CHECK_EQ(n["kva_state_correct"], 2 * 3);
+    CHECK_EQ(n["kva_mask"], 1);
+    CHECK_EQ(n["cast"], 1);
+    CHECK_EQ(n["kva_select"], 1);
+    CHECK_EQ(n["kva_drop_rows"], 1);
+    CHECK_EQ(n["moe_gemm_q"], 8 - kSplit + 1);
+    CHECK_EQ(n["kva_rho_update"], 0);
+    int total = 0;
+    for (const auto& [op, c] : n) total += c;
+    CHECK_EQ(total, (int)(p.kva.ops.size() - p.stock.ops.size()));
 }
 
 /* A SIZING DECLARE describes the same graph with only rows smaller and leaves the step's state
- * alone (radiance core/engine_bringup.cpp:598-660); the cap stays the real declare's. Its weight
- * list is the real one name for name -- which is what lets the quality path reuse the real
- * declare's in-tree weight handles (A_log, dt_bias) under a sizing declare -- and its buffers are
- * the real ones with only dim 0 smaller. */
+ * alone (radiance core/engine_bringup.cpp:598-660). Its weight list is the real one name for name
+ * -- which is what lets the masked path reuse the real declare's in-tree weight handles (A_log,
+ * dt_bias, the experts' tables) under a sizing declare -- and its buffers are the real ones with
+ * only dim 0 smaller. */
 TEST(a_sizing_declare_matches_the_real_one) {
-    for (const char* mode : {"speed", "quality"}) {
+    for (const char* mode : {"plumb", "speed", "quality"}) {
         Pair p;
         declare_pair(p, mode);
         REQUIRE_EQ(p.st, RAD_OK);
@@ -1272,8 +1534,7 @@ TEST(a_sizing_declare_matches_the_real_one) {
                 const RecParam& a = p.kva.ops[i].p[j];
                 const RecParam& q = small.ops[i].p[j];
                 const bool cap = (p.kva.ops[i].op == "qsa_work" && a.key == "work") ||
-                                 (p.kva.ops[i].op == "attn_paged_gate_quant" && a.key == "max_seqs") ||
-                                 (p.kva.ops[i].op == "kva_rowsel" && a.key == "cap");
+                                 (p.kva.ops[i].op == "attn_paged_gate_quant" && a.key == "max_seqs");
                 if (a.kind == RAD_P_RANGE || (cap && q.ival <= a.ival)) continue;
                 fixed_differ += a.ival != q.ival || a.sval != q.sval || a.dval != q.dval;
             }
@@ -1292,7 +1553,7 @@ TEST(a_sizing_declare_matches_the_real_one) {
         CHECK(small.kv_groups == p.kva.kv_groups);
         CHECK_EQ(qwen4exp_fp8::g_model[0].g.max_tok, 2048);
         CHECK_EQ(qwen4exp_kva::g_kva[0].op_proj.size(), (size_t)8);
-        CHECK(qwen4exp_kva::g_kva[0].op_proj[kSplit] != 0);
+        CHECK(qwen4exp_kva::g_kva[0].alt_dn[kSplit] != 0);
     }
 }
 
@@ -1309,13 +1570,20 @@ int refused(std::initializer_list<std::pair<const char*, const char*>> env, RadB
     return st;
 }
 
+/* R84: a tail longer than a step refuses with both numbers and names the operator route. */
 TEST(a_tail_longer_than_a_step_is_refused_with_both_numbers) {
     RadBuilder b;
     hold_kva(b, {"kva.proj", "kva.st"});
     std::string err;
     CHECK(refused({{"RADIANCE_KVA", "speed"}, {"RADIANCE_KVA_TAIL", "4096"}}, b, &err) < 0);
     CHECK(has(err, "4096") && has(err, "2048"));
-    CHECK(!has(err, "not implemented"));
+    RadBuilder b2;
+    hold_kva(b2, {"kva.proj", "kva.st"});
+    CHECK(refused({{"RADIANCE_KVA", "speed"}}, b2, &err, 1024) < 0);
+    CHECK(has(err, "2048") && has(err, "1024"));
+    RadBuilder b3;
+    hold_kva(b3, {"kva.proj", "kva.st"});
+    CHECK_EQ(refused({{"RADIANCE_KVA", "speed"}, {"RADIANCE_KVA_TAIL", "1024"}}, b3, &err, 1024), RAD_OK);
 }
 
 TEST(a_tail_below_the_measured_minimum_is_refused) {
@@ -1334,24 +1602,22 @@ TEST(quality_without_the_row_table_is_refused) {
     CHECK(has(err, "kva.rowsel.score"));
 }
 
-TEST(speed_with_a_correction_and_no_kva_so_is_refused_by_name) {
-    RadBuilder b;
-    hold_kva(b, {"kva.proj", "kva.st"});
-    b.refuse = {"kva_state_correct"};
-    std::string err;
-    CHECK_EQ(refused({{"RADIANCE_KVA", "speed"}}, b, &err), RAD_E_UNSUPPORTED);
-    CHECK(has(err, "kva_state_correct") && has(err, "kva.so"));
-    CHECK(!has(err, "not implemented"));
-}
-
-TEST(quality_with_no_kva_so_is_refused_by_name) {
-    RadBuilder b;
-    hold_kva(b, {"kva.proj", "kva.st"});
-    hold_score(b, "kva.rowsel.score");
-    b.refuse = {"kva_rowsel"};
-    std::string err;
-    CHECK_EQ(refused({{"RADIANCE_KVA", "quality"}}, b, &err), RAD_E_UNSUPPORTED);
-    CHECK(has(err, "kva_rowsel") && has(err, "kva.so"));
+/* Each kva.so op a mode issues is refused by name when no kernel library serves it -- plumb's mask
+ * included. (`cast` and `moe_gemm_q` are in-tree ops too: refusing them fails the in-tree declare
+ * first, which is its own refusal.) */
+TEST(a_mode_whose_kva_op_no_kernel_serves_is_refused_by_name) {
+    struct Case { const char* mode; const char* op; };
+    for (const Case& c : {Case{"speed", "kva_state_correct"}, Case{"quality", "kva_mask"},
+                          Case{"plumb", "kva_mask"}, Case{"speed", "kva_select"},
+                          Case{"speed", "kva_drop_rows"}, Case{"quality", "kva_rho_update"}}) {
+        RadBuilder b;
+        hold_kva(b, {"kva.proj", "kva.st"});
+        hold_score(b, "kva.rowsel.score");
+        b.refuse = {c.op};
+        std::string err;
+        CHECK_EQ(refused({{"RADIANCE_KVA", c.mode}}, b, &err), RAD_E_UNSUPPORTED);
+        CHECK(has(err, c.op) && has(err, "kva.so"));
+    }
 }
 
 TEST(a_mode_with_no_projector_held_is_refused) {
@@ -1371,32 +1637,50 @@ TEST(a_projector_with_a_hole_is_refused) {
 }
 
 TEST(a_switch_with_an_unknown_value_is_refused_naming_the_values) {
-    RadBuilder b;
-    std::string err;
-    CHECK_EQ(refused({{"RADIANCE_KVA", "fast"}}, b, &err), RAD_E_INVAL);
-    CHECK(has(err, "off|plumb|speed|quality"));
-    RadBuilder b2;
-    CHECK_EQ(refused({{"RADIANCE_KVA_ST", "flipped"}, {"RADIANCE_KVA", "speed"}}, b2, &err),
-             RAD_E_INVAL);
-    CHECK(has(err, "shipped|swap|refit"));
+    struct Case { const char* name; const char* value; const char* allowed; };
+    for (const Case& c : {Case{"RADIANCE_KVA", "fast", "off|plumb|speed|quality"},
+                          Case{"RADIANCE_KVA_ST", "flipped", "shipped|swap|refit"},
+                          Case{"RADIANCE_KVA_STAGE", "never", "auto|stock"},
+                          Case{"RADIANCE_KVA_STRADDLE", "middle", "split|end"},
+                          Case{"RADIANCE_KVA_SCORE_BULK", "yes", "1 or unset"},
+                          Case{"RADIANCE_KVA_FORCE_SPLIT", "0", "a positive row count"},
+                          Case{"RADIANCE_KVA_FORCE_ALT", "2", "1 or unset"}}) {
+        RadBuilder b;
+        hold_kva(b, {"kva.proj"});
+        std::string err;
+        const bool mode = !std::strcmp(c.name, "RADIANCE_KVA");
+        CHECK_EQ(mode ? refused({{c.name, c.value}}, b, &err)
+                      : refused({{"RADIANCE_KVA", "speed"}, {c.name, c.value}}, b, &err), RAD_E_INVAL);
+        CHECK(has(err, c.allowed) && has(err, c.name));
+    }
 }
 
-/* The share sweep's override re-derives the cap: ceil(share * max_tok / 64) * 64, never above
- * max_tok. */
-TEST(the_row_cap_derives_from_the_share) {
+/* R81 -- THE DEFAULT IS OFF AND THE CONTAINER'S kva.mode IS NOT A SWITCH: a container that still says
+ * kva.mode=quality, with RADIANCE_KVA unset, declares exactly the in-tree graph, and rank 0's real
+ * declare says once that the metadata mode is ignored. */
+TEST(the_container_mode_is_ignored_and_said_so) {
+    static const char* keys[kN + 1];
+    static const char* vals[kN + 1];
+    for (int i = 0; i < kN; ++i) { keys[i] = kKeys[i]; vals[i] = kVals[i]; }
+    keys[kN] = "kva.mode";
+    vals[kN] = "quality";
     RadModelMeta meta = flash_next_meta();
-    for (auto [share, want] : {std::pair<const char*, int64_t>{"0.25", 512}, {"0.10", 256},
-                               {"0.5", 1024}, {"1", 2048}}) {
-        Env env({{"RADIANCE_KVA_SHARE", share}});
-        qwen4exp_kva::Config cfg;
-        REQUIRE_EQ(qwen4exp_kva::read_config(&meta, 2048, &cfg), RAD_OK);
-        CHECK_EQ(cfg.cap, want);
+    meta.n_kv = kN + 1; meta.kv_key = keys; meta.kv_val = vals;
+    for (int rank : {0, 1}) {
+        RadBuildCtx c = served_ctx(rank, 2);
+        RadBuilder stock, kva;
+        served(stock);
+        served(kva);
+        hold_kva(kva, {"kva.proj", "kva.st"});
+        hold_score(kva, "kva.rowsel.score");
+        REQUIRE_EQ(qwen4exp_fp8::declare(&stock, &meta, &c), RAD_OK);
+        int st = RAD_E_INVAL;
+        const std::string err = stderr_of([&] { st = qwen4exp_kva::declare(&kva, &meta, &c); });
+        REQUIRE_EQ(st, RAD_OK);
+        check_same_graph(stock, kva);
+        CHECK_EQ(qwen4exp_kva::g_kva[rank].cfg.mode, (int)qwen4exp_kva::MODE_OFF);
+        CHECK_EQ(count(err, "kva.mode=quality is ignored"), rank == 0 ? 1 : 0);
     }
-    qwen4exp_kva::Config cfg;
-    REQUIRE_EQ(qwen4exp_kva::read_config(&meta, 2000, &cfg), RAD_OK);
-    CHECK_EQ(cfg.cap, (int64_t)512);   /* ceil(500 / 64) * 64 */
-    Env bad({{"RADIANCE_KVA_SHARE", "1.5"}});
-    CHECK_EQ(qwen4exp_kva::read_config(&meta, 2048, &cfg), RAD_E_INVAL);
 }
 
 /* The fill feeds blocks their input already normed and skips the n-gram layer: a split at or below

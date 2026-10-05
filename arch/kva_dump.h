@@ -16,8 +16,10 @@
  *   <dir>/boundary.p<P>.npy  f32 [n_tok, hc*n_embd]: the residual stream entering layer S of the
  *                            approximate chunk whose first row is at absolute position P (R17)
  *   <dir>/boundary.jsonl     one line per such file: {"chunk_start", "n_tok", "file", "token_ids"}
- *   <dir>/rows.jsonl         quality mode, one line per approximate chunk: {"chunk_start", "n_tok",
- *                            "rows_idx", "token_ids"} -- the format tools/rows_compare.py reads (R39)
+ *   <dir>/mask.jsonl         one line per masked approximate chunk: {"chunk_start", "n_tok",
+ *                            "n_ahead", "b", "s_lb", "bounds", "mask"} (R45)
+ *   <dir>/rows.jsonl         the same chunks: {"chunk_start", "n_tok", "rows_idx", "token_ids"},
+ *                            rows_idx = the window's exact rows -- what tools/rows_compare.py reads (R39)
  */
 #ifndef QWEN4EXP_KVA_DUMP_H
 #define QWEN4EXP_KVA_DUMP_H
@@ -114,20 +116,33 @@ inline void dump_boundary(RadCtx* c, const std::string& dir, rad_buf b_h, int64_
               dump_ids_json(ids) + "}");
 }
 
-/* R39: the rows kva_rowsel kept in this chunk (chunk-relative, ascending, -1 padded). */
-inline void dump_rows(RadCtx* c, const std::string& dir, rad_buf rows_idx, int64_t cap,
-                      const RadBatch* b) {
-    int32_t start = -1;
-    std::vector<int32_t> ids, rows((size_t)cap);
-    if (!dump_chunk(c, b, &start, &ids) ||
-        !dump_read(c, rows.data(), rad_buf_ptr(c, rows_idx), cap * 4)) {
+/* R45 / R39: the device mask of a masked approximate chunk. mask.jsonl carries the whole mask (one
+ * character a row, '1' = approximated) with the host's b and s_lb and the device's bounds, which is
+ * what R45 compares with the rule's transcription; rows.jsonl carries the window's exact rows in the
+ * format tools/rows_compare.py reads (chunk-relative, ascending). */
+inline void dump_mask(RadCtx* c, const std::string& dir, rad_buf mask, rad_buf bounds,
+                      const RadBatch* b, int64_t bulk_end, int64_t s_lb) {
+    int32_t start = -1, bnd[4] = {};
+    std::vector<int32_t> ids, m((size_t)b->n_tok), exact;
+    if (!dump_chunk(c, b, &start, &ids) || !dump_read(c, m.data(), rad_buf_ptr(c, mask), b->n_tok * 4) ||
+        !dump_read(c, bnd, rad_buf_ptr(c, bounds), 16)) {
         std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_DUMP: device read failed\n");
         return;
     }
-    dump_line(dir + "/rows.jsonl",
-              "{\"chunk_start\": " + std::to_string(start) + ", \"n_tok\": " +
-              std::to_string(b->n_tok) + ", \"rows_idx\": " + dump_ids_json(rows) +
-              ", \"token_ids\": " + dump_ids_json(ids) + "}");
+    std::string bits((size_t)b->n_tok, '0');
+    for (int64_t i = 0; i < b->n_tok; ++i) {
+        bits[(size_t)i] = m[(size_t)i] ? '1' : '0';
+        if (i >= bnd[0] && i < bnd[1] && !m[(size_t)i]) exact.push_back((int32_t)i);
+    }
+    const std::string head = "{\"chunk_start\": " + std::to_string(start) + ", \"n_tok\": " +
+                             std::to_string(b->n_tok);
+    dump_line(dir + "/mask.jsonl",
+              head + ", \"n_ahead\": " + std::to_string(b->n_ahead) + ", \"b\": " +
+              std::to_string(bulk_end) + ", \"s_lb\": " + std::to_string(s_lb) + ", \"bounds\": [" +
+              std::to_string(bnd[0]) + ", " + std::to_string(bnd[1]) + ", " + std::to_string(bnd[2]) +
+              ", " + std::to_string(bnd[3]) + "], \"mask\": \"" + bits + "\"}");
+    dump_line(dir + "/rows.jsonl", head + ", \"rows_idx\": " + dump_ids_json(exact) +
+                                       ", \"token_ids\": " + dump_ids_json(ids) + "}");
 }
 
 /* ================================================================== Stage 6 captures
