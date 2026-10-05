@@ -137,19 +137,22 @@ inline std::string sha256_file(const char* path) {
 
 /* ---------------------------------------------------------------- finding the files */
 
-/* The object that defines rad_issue -- the engine binary, or the library the core lives in. The
- * main program's name as dladdr reports it is argv[0], which may be bare; /proc/self/exe is it. */
-inline std::string engine_object() {
-    Dl_info i{};
-    if (!dladdr((void*)&rad_issue, &i) || !i.dli_fname || !std::strchr(i.dli_fname, '/'))
-        return "/proc/self/exe";
-    return i.dli_fname;
-}
-
 inline std::string real_path(const std::string& p) {
     char out[PATH_MAX];
     return realpath(p.c_str(), out) ? std::string(out) : std::string();
 }
+
+/* The object that defines rad_issue -- the engine binary, or the library the core lives in. The
+ * main program's name as dladdr reports it is argv[0], which may be bare; /proc/self/exe is it. */
+inline std::string engine_object() {
+    Dl_info i{};
+    if (!dladdr((void*)&rad_issue, &i) || !i.dli_fname || !std::strchr(i.dli_fname, '/')) {
+        const std::string exe = real_path("/proc/self/exe");
+        return exe.empty() ? std::string("/proc/self/exe") : exe;
+    }
+    return i.dli_fname;
+}
+
 
 /* The in-tree architecture this plugin shadows: architectures/qwen4exp_fp8.so in a $RADIANCE_HOME
  * entry (split as the engine splits it, startup.cpp:96-108) that is not this file itself. */
