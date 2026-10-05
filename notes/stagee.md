@@ -356,3 +356,21 @@ round's stock 9,981 / 19,393 ms; tables: `evidence/stagee/scripts/s4table.py evi
   from `git show 1a53237^:evidence` (no session had started; nothing written in between).
 - Verification: S4 builds its frozen home from b316096 (the host suite, static case set included, runs in that build;
   falls back to 6a68dde if it fails) and measures everything on it; its mutants run on that source.
+
+## 17. S4 correctness half on 5a3115b (2026-10-05 19:58-20:18Z, boot 75e3e39b; evidence/stagee/s4/session.log)
+- Frozen home **5a3115b** (= 6a68dde's reductions + main merged + the static fixes + the straddle line): `ctest -LE gpu`
+  3/3 (arch_static with every case: R74 media, straddle downgrade, int8 vs bf16 on the decoders path, B's set). arch
+  14b7d304…, kva.so ff82ad62…. (S4's first attempt at 19:33Z and D1's at 19:34Z aborted at this step on 6a68dde/
+  b316096: two cases read the pre-6a68dde log text, and the merge's 1,024-row gate sent small static chunks to stock.)
+- **off ident = R3.** **KL rows byte-identical**: bf16 speed and quality T2048 = A′'s R144 rows (one slot, correction
+  and row table in host memory, merged code); int8 speed and quality T2048 = S1's int8-ring rows (codes from b_h at
+  layer S, no h_S). 67 approximate steps each.
+- **Plugin VRAM a rank (startup line): bf16 50.0 MiB, int8 25.4 MiB** -- the ring's one slot, nothing else uploaded;
+  host-mapped 1,228 / 637 MiB (maps, correction, row table). Arena: h_S 40 MiB (bf16 or MTP only), x_P + codes ~15 MiB,
+  int8 stream codes 20 MiB.
+- **B's 8192/10 config starts and serves** (quality, bf16: the larger slot): 9K prompt 7,253 ms, 8 decoders; pinned
+  pool 9,782 / 9,735 slots.
+- GPU-time audit (orchestrator ~20:15Z) applied from here: KL identity needs 2 runs (bf16 quality + int8 speed) next
+  time; mutants run beside a correctness-only session (D2), never under timing or as a session's tail -- S4's tail
+  finds no mutant scripts (renamed `mutant_*.py`); int8 arms first in D1/D2, bf16 arms skipped if
+  `evidence/stagee/INT8_ONLY` exists (Dylan's decision pending).
