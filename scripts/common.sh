@@ -69,6 +69,15 @@ export RK_PORT RK_IMAGE RK_PLUGIN_HOME RK_EVIDENCE
 #                                 (config.cpp:51)
 : "${RK_FLAGS:=--tp 2 --kv-cache-dtype fp8 --tp-wire exact --max-num-batched-tokens 2048 --no-prefix-cache --num-speculative-tokens 0 --max-model-len 49152 --gpu-headroom-mib 3072 --placement expert_tiered --host-pool-mib 12288 --expert-vs-cache-ratio 0.82}"
 
+# THE CACHE PROFILE (Stage C, HANDOVER-FIX §4): RK_CACHE_DIR=<host dir> serves with fnserve.sh's
+# prefix-cache flags instead of --no-prefix-cache -- finished turns copied to a 4 GiB host tier and on
+# to disk under the mounted dir (radiance scripts/fnserve.sh:102-103; RK_CACHE_HOST_MIB /
+# RK_CACHE_DISK_MIB override the sizes). Everything else in RK_FLAGS stays, so a cache run differs
+# from the measured baseline by the cache alone.
+if [ -n "${RK_CACHE_DIR:-}" ]; then
+    RK_FLAGS="$(printf '%s' "$RK_FLAGS" | sed 's/ *--no-prefix-cache//') --prefix-cache-host-mib ${RK_CACHE_HOST_MIB:-4096} --prefix-cache-dir /kvcache --prefix-cache-disk-mib ${RK_CACHE_DISK_MIB:-32768}"
+fi
+
 # rk_die -- print to stderr, naming the missing thing, and exit non-zero.
 rk_die() {
     printf 'radiance-kva: %s\n' "$*" >&2
@@ -137,6 +146,7 @@ rk_docker_prefix() {
         -p "127.0.0.1:$RK_PORT:$RK_PORT" \
         --ulimit memlock=-1 \
         -v "$(dirname "$(readlink -f "$RK_MODEL")")":/models:ro
+    [ -z "${RK_CACHE_DIR:-}" ] || printf '%s\n' -v "$RK_CACHE_DIR":/kvcache
     if [ "$1" = exact ]; then
         printf '%s\n' -e RADIANCE_HOME=/opt/radiance/share/radiance
     else

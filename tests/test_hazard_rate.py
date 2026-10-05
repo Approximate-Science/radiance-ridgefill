@@ -240,3 +240,14 @@ def test_the_corpus_predictions_are_exactly_what_hazard_rate_flags(tmp_path, cap
         assert flagged[t["id"] + "/B"]["overlap"] == t["B"]["predicted_tail_from_cache"]
     assert s["rate"] == pytest.approx(2 / 6)
     assert "AGREE" in out
+
+def test_unnamed_plugin_lines_pair_with_flagged_requests_in_order():
+    rows = [{"id": "a", "prompt_len": 5000, "cache_n": 4096}, {"id": "b", "prompt_len": 9000, "cache_n": 0},
+            {"id": "c", "prompt_len": 6561, "cache_n": 6144}]
+    plugin = {"lines": 2, "positions_total": 1144 + 1631, "by_request": {}, "unnamed": [1144, 1631], "unparsed": []}
+    s = H.summarize(rows, plugin, 2048)
+    assert [r["plugin_positions"] for r in s["per_request"]] == [1144, None, 1631]
+    assert s["cross_check"]["agree"]
+    plugin["unnamed"] = [1144, 1630]
+    plugin["positions_total"] = 1144 + 1630
+    assert not H.summarize(rows, plugin, 2048)["cross_check"]["agree"]

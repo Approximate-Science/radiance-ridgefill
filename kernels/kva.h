@@ -52,6 +52,7 @@ enum { SC_STATE = 0, SC_STATE_IDX, SC_APPLIED, SC_APPLIED_IDX, SC_C, SC_ND, SC_N
 enum { SR_STATE = 0, SR_STATE_IDX, SR_OUT };
 enum { SL_MASK = 0, SL_X_SRC, SL_Q_SRC, SL_S_SRC, SL_X, SL_Q, SL_S };
 enum { DR_MASK = 0, DR_IDS };
+enum { HZ_CU = 0, HZ_POS, HZ_BOUNDS, HZ_SPAN, HZ_META, HZ_META_IDX, HZ_COUNT };
 
 /* kva_select's (source, destination) pairs: x, then the optional q codes and s scales. */
 enum { KVA_SELECT_PAIRS = 3 };
@@ -206,6 +207,45 @@ typedef struct KvaStateRead {
     int64_t        n_seq, n_head, sd0, sd1;
 } KvaStateRead;
 
+/* kva_hazard (DD-A's exact instrument, PLAN-FIX §5.4). A sequence's meta slot (a LINEAR group, so it
+ * is zeroed at admission and snapshotted with every checkpoint) holds {last approximated position +
+ * 1, positions counted up to}. */
+typedef struct KvaHazard {
+    const int32_t* cu_last;                  /* [2] {s, e} of the step's last sequence */
+    const int32_t* positions; int64_t pos_stride;
+    const int32_t* bounds;                   /* optional {s, b'}: record this pass's last bulk position */
+    int64_t        span;                     /* T - n_ahead, the span operand's extent; 0 = absent */
+    float*         meta;    int64_t meta_slot, meta_states;
+    const int32_t* meta_idx;
+    float*         count;                    /* [1], accumulated hazard rows */
+} KvaHazard;
+
+/* THE HAZARD RULE. The pass's last sequence starts at position P with q rows and n_ahead more to
+ * come, so its exact tail is [P + q + n_ahead - T, ...): `before` = span - q of those tail positions
+ * lie BEFORE this pass, i.e. came from the prefix cache. Any of them at or below the slot's last
+ * approximated position was approximated by the request that wrote the snapshot -- a hazard row
+ * (counted once: the slot remembers how far it counted). Then, on an approximate pass, the slot
+ * records this pass's last bulk position. A sequence's own earlier bulk always ends before its own
+ * tail, so outside a branch the count is 0. */
+KVA_HD inline void kva_hazard_step(const KvaHazard* g) {
+    const int32_t slot = g->meta_idx[0];
+    if (slot < 0 || slot >= g->meta_states) return;
+    float* m = g->meta + slot * g->meta_slot;
+    const int64_t s = g->cu_last[0], e = g->cu_last[1];
+    if (g->span > 0 && e > s) {
+        const int64_t p0 = g->positions[s * g->pos_stride], before = g->span - (e - s);
+        const int64_t counted = (int64_t)m[1], last = (int64_t)m[0];
+        const int64_t lo = p0 - before > counted ? p0 - before : counted;
+        const int64_t hi = p0 < last ? p0 : last;
+        if (before > 0 && hi > lo) {
+            g->count[0] += (float)(hi - lo);
+            m[1] = (float)hi;
+        }
+    }
+    if (g->bounds && g->bounds[1] > g->bounds[0])
+        m[0] = (float)(g->positions[(int64_t)(g->bounds[1] - 1) * g->pos_stride] + 1);
+}
+
 /* One kva_select pair, in BYTES (the op is dtype-agnostic). `word` is the widest load -- 16, 4
  * or 1 bytes -- that every address, pitch and row width of the pair is a multiple of; 0 = the pair
  * is absent. */
@@ -240,6 +280,7 @@ int kva_correct_parse(const RadArgs* a, KvaCorrect* out);
 int kva_state_read_parse(const RadArgs* a, KvaStateRead* out);
 int kva_select_parse(const RadArgs* a, KvaSelect* out);
 int kva_drop_parse(const RadArgs* a, KvaDrop* out);
+int kva_hazard_parse(const RadArgs* a, KvaHazard* out);
 
 /* host_ref.cpp: the host rows (oracles). */
 int kva_mask_host(const RadArgs* a, RadStream s);
@@ -248,6 +289,7 @@ int kva_correct_host(const RadArgs* a, RadStream s);
 int kva_state_read_host(const RadArgs* a, RadStream s);
 int kva_select_host(const RadArgs* a, RadStream s);
 int kva_drop_host(const RadArgs* a, RadStream s);
+int kva_hazard_host(const RadArgs* a, RadStream s);
 
 /* forward.cpp: kva_gemm_nt_bias's rows -- the engine's own gemm_nt_bias rows from the libraries
  * already loaded (libr4d device, libref host); none when neither is. */
@@ -262,6 +304,7 @@ int kva_correct_device(const RadArgs* a, RadStream s);
 int kva_state_read_device(const RadArgs* a, RadStream s);
 int kva_select_device(const RadArgs* a, RadStream s);
 int kva_drop_device(const RadArgs* a, RadStream s);
+int kva_hazard_device(const RadArgs* a, RadStream s);
 
 #ifdef __cplusplus
 }

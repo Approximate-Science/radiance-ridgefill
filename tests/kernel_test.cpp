@@ -308,7 +308,7 @@ static bool described_operands(const RadKernelInfo* row, const std::vector<RadPa
 }
 
 static const char* const kOps[] = { "kva_mask", "kva_select", "kva_drop_rows", "kva_rho_update",
-                                    "kva_state_correct", "kva_state_read" };
+                                    "kva_state_correct", "kva_state_read", "kva_hazard" };
 
 /* Rows whose launch is still a stub (R8). Emptied as each row was implemented (all six were stubs
  * at the Stage 1 commit, 43bfeda); with none left the case skips and says R8 is retired. */
@@ -737,6 +737,72 @@ TEST(mask_window_clamping, "host") {
         CHECK_EQ(step.rc, RAD_OK);
         CHECK(step.mask == want && step.bounds == none.bounds);
     }
+}
+
+/* One kva_hazard call on a 4-slot meta pool; `meta` in and out, the count accumulated. The last
+ * sequence is [s, e) of the step; positions are first_pos + row. bounds absent when b <= 0. */
+struct HazardCall {
+    int32_t s = 0, e = 64, first_pos = 0, slot = 1;
+    int64_t span = 0, b = 0;
+    float   m0 = 0, m1 = 0, count = 0;
+};
+struct HazardOut { int rc = 0; float m0 = 0, m1 = 0, count = 0; };
+
+static HazardOut run_hazard(const RadKernelInfo* row, const HazardCall& c) {
+    const int64_t n = c.e > 1 ? c.e : 1;
+    Buf cu = make(RAD_I32, { 2 }), pos = make(RAD_I32, { n }), bounds = make(RAD_I32, { 4 });
+    Buf span = make(RAD_I32, { c.span > 0 ? c.span : 1 }), meta = make(RAD_F32, { 4, 1, 1, 2 });
+    Buf idx = make(RAD_I32, { 1, 1 }), cnt = make(RAD_F32, { 1 });
+    seti(cu, 0, c.s); seti(cu, 1, c.e);
+    for (int64_t i = 0; i < n; ++i) seti(pos, i, c.first_pos + (int32_t)i);
+    seti(bounds, 0, c.s); seti(bounds, 1, (int32_t)c.b); seti(bounds, 2, (int32_t)c.b); seti(bounds, 3, c.e);
+    for (int64_t i = 0; i < 8; ++i) setf(meta, i, 0.0f);
+    setf(meta, 2 * 1, c.m0); setf(meta, 2 * 1 + 1, c.m1);   /* slot 1 */
+    seti(idx, 0, c.slot);
+    setf(cnt, 0, c.count);
+    HazardOut o;
+    o.rc = run_group(row, { &cu, &pos, c.b > 0 ? &bounds : nullptr, c.span > 0 ? &span : nullptr, &meta, &idx, &cnt },
+                     { pint("M", 1) });
+    o.m0 = getf(meta, 2); o.m1 = getf(meta, 3); o.count = getf(cnt, 0);
+    return o;
+}
+
+/* DD-A -- THE BRANCH HAZARD (PLAN-FIX §5.2): a producer approximated up to position 4,095 of a 6,144
+ * token request (T 2,048); a consumer resumes from its checkpoint at P = 4,096 and ends at N2 = 5,000:
+ * min(N1 - N2, T - (N2 - P)) = 1,144 of its tail positions were approximated -- counted once, and the
+ * slot remembers it; the consumer's next pass counts nothing again. A request's own earlier bulk lies
+ * before its own tail (0). A pass with bounds records its last bulk position; without the span it
+ * counts nothing; a slot outside the pool is left alone; cu_last out of order is refused. */
+TEST(hazard_semantics, "host") {
+    const RadKernelInfo* row = find_row("kva_hazard", RAD_DOMAIN_HOST);
+    REQUIRE(row != nullptr);
+    HazardCall c;
+    c.s = 0; c.e = 904; c.first_pos = 4096; c.span = 2048; c.m0 = 4096;   /* final chunk, n_ahead 0 */
+    HazardOut o = run_hazard(row, c);
+    CHECK_EQ(o.rc, RAD_OK);
+    CHECK_EQ(o.count, 1144.0f);
+    CHECK_EQ(o.m1, 4096.0f);
+    c.m1 = o.m1; c.count = o.count; c.first_pos = 4096 + 904;            /* a later pass of the same request */
+    CHECK_EQ(run_hazard(row, c).count, 1144.0f);
+    HazardCall own;                                                       /* no branch: own bulk ends before own tail */
+    own.e = 2048; own.first_pos = 4096; own.span = 2048; own.m0 = 4096;
+    CHECK_EQ(run_hazard(row, own).count, 0.0f);
+    HazardCall rec;                                                       /* an approximate pass, whole bulk */
+    rec.e = 2048; rec.first_pos = 2048; rec.b = 2048;
+    o = run_hazard(row, rec);
+    CHECK(o.count == 0.0f && o.m0 == 4096.0f);
+    rec.b = 0;                                                            /* bounds empty-window: no record */
+    CHECK_EQ(run_hazard(row, rec).m0, 0.0f);
+    HazardCall none = c;
+    none.span = 0; none.count = 0; none.m1 = 0;
+    CHECK_EQ(run_hazard(row, none).count, 0.0f);
+    HazardCall out = c;
+    out.slot = 9; out.count = 0; out.m1 = 0;
+    o = run_hazard(row, out);
+    CHECK(o.count == 0.0f && o.m1 == 0.0f);
+    HazardCall bad = c;
+    bad.s = 10; bad.e = 5;
+    CHECK_EQ(run_hazard(row, bad).rc, RAD_E_INVAL);
 }
 
 /* transcribed from kva.h's kva_row_hash, to pin the random rule's key (seed, absolute position). */
@@ -1502,6 +1568,28 @@ TEST(mask_device_matches_host, "gpu") {
     CHECK(ones(other) == ones(once) && other.mask != once.mask);
     std::fprintf(stderr, "  %d configurations (%d layouts with a window, %d with s > 0): device mask and bounds == host\n",
                  runs, windows, shifted);
+}
+
+/* kva_hazard's device leg: device == host on meta and count over branch, continuation and record
+ * shapes. */
+TEST(hazard_device_matches_host, "gpu") {
+    if (!group_runnable()) return;
+    const RadKernelInfo* dev = find_row("kva_hazard", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("kva_hazard", RAD_DOMAIN_HOST);
+    REQUIRE(dev && host);
+    Rng r{ 7 };
+    int runs = 0;
+    for (int i = 0; i < 64; ++i) {
+        HazardCall c;
+        c.e = 1 + (int32_t)r.below(2048); c.s = (int32_t)r.below((uint64_t)c.e);
+        c.first_pos = (int32_t)r.below(40000); c.span = (int64_t)r.below(3000);
+        c.b = r.below(2) ? c.s + (int64_t)r.below((uint64_t)(c.e - c.s + 1)) : 0;
+        c.m0 = (float)r.below(45000); c.m1 = (float)r.below(40000); c.count = (float)r.below(100);
+        const HazardOut h = run_hazard(host, c), d = run_hazard(dev, c);
+        CHECK(h.rc == RAD_OK && d.rc == RAD_OK && h.m0 == d.m0 && h.m1 == d.m1 && h.count == d.count);
+        ++runs;
+    }
+    std::fprintf(stderr, "  %d hazard configurations: device meta and count == host\n", runs);
 }
 
 /* What the device row does with operands the host row refuses: cu_last out of order (it cannot

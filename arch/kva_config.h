@@ -26,6 +26,12 @@
  *                             rows inside an ON server, and A.1's 64-row guard cost 331 ms at 9,216
  *                             and ran every T 2560 chunk exact. A threshold stays available for a
  *                             machine where the link makes streaming many rows lose    default unlimited
+ *   env RADIANCE_KVA_CKPT_FLOOR  T_ck (DD-A): a chunk that writes a prefix-cache checkpoint keeps its
+ *                             last T_ck rows exact (rounded up to the delta net's tile), so a request
+ *                             that resumes from that checkpoint and branches has at least T_ck exact
+ *                             rows before its resume point. Costs T_ck/2,048 of the bulk rows on
+ *                             checkpoint chunks; 0 = off (Dylan decides the value after Stage C's
+ *                             branch numbers, R65/R66)                                   default 0
  *   env RADIANCE_KVA_MIN_BULK_ROWS  a pass approximates only when it has at least this many bulk rows
  *                             (b - s_lb), else it runs the stock step. Default 0 with the projector in
  *                             VRAM; 1,024 with it in host memory, where EVERY approximate pass streams
@@ -119,7 +125,8 @@ struct Config {
     bool        ring        = true;        /* host placement: stage each layer's map through VRAM */
     int         stage       = STAGE_AUTO;
     int64_t     stage_rows  = INT64_MAX;   /* always stream: notes/impl.md A.1 R96, the guard's trade */
-    int64_t     min_bulk_rows = -1;        /* -1: the placement's default, resolved in read_config */
+    int64_t     min_bulk_rows = -1;
+    int64_t     ckpt_floor  = 0;           /* RADIANCE_KVA_CKPT_FLOOR (T_ck) */        /* -1: the placement's default, resolved in read_config */
     bool        score_bulk  = false;
     int         straddle    = STRADDLE_SPLIT;
     int64_t     force_split = 0;
@@ -213,6 +220,7 @@ inline int read_switches(Config* c) {
     RAD_ARCH_TRY(read_choice("RADIANCE_KVA_STAGE", { "auto", "stock" }, "auto|stock", &c->stage));
     RAD_ARCH_TRY(read_int("RADIANCE_KVA_STAGE_ROWS", 0, INT64_MAX, "a row count", &c->stage_rows));
     RAD_ARCH_TRY(read_int("RADIANCE_KVA_MIN_BULK_ROWS", 0, INT64_MAX, "a row count", &c->min_bulk_rows));
+    RAD_ARCH_TRY(read_int("RADIANCE_KVA_CKPT_FLOOR", 0, INT64_MAX / 2, "a row count", &c->ckpt_floor));
     RAD_ARCH_TRY(read_choice("RADIANCE_KVA_SCORE_BULK", { "0", "1" }, "1 or unset", &v));
     c->score_bulk = v == 1;
     RAD_ARCH_TRY(read_choice("RADIANCE_KVA_STRADDLE", { "split", "end" }, "split|end",
