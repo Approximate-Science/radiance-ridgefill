@@ -175,3 +175,78 @@ each). The real rows touch ~143–152 other experts. Output is unaffected (a zer
 but the late MoE does ~3× the rows it needs and pins experts 0–9 hot in every late layer. Possible lever (Stage 8 / ARCH): an
 M = k issue is not allowed (host never reads k), but the padding could be routed to nothing (mask in the router) or the cap
 lowered toward the observed max k.
+(d) **R39 — GREEN** (H5-jaccard refuted: above band; H5-rows-share confirmed). `RADIANCE_KVA_ST=shipped RADIANCE_KVA_DUMP=/dump
+RK_DOCKER_EXTRA="-v <repo>/data/r39/dump:/dump" grade.sh quality … evidence/stage5/kld-quality-dump.json`: 67 steps, **67 lines in
+rows.jsonl** (no chunk replayed or missing); its `.rows` are byte-identical to the undumped run (e). Then
+`tools/rows_compare.py compare --corpus corpus/quick9.jsonl --dump data/r39/dump/rows.jsonl --tokenizer <tcc checkpoint> --sidecar
+data/sidecar/kva-sidecar.safetensors --freq <freq> --fnlev-root <research repo> --out evidence/stage5/r39-rows-compare.json`:
+```
+ppl/8k/0 whole 355 chunked 355 both 347 J 0.9559 share 5.78%   ppl/16k/2 whole 887 chunked 887 both 862 J 0.9452 share 6.19%
+ppl/8k/1 whole 299 chunked 299 both 294 J 0.9671 share 4.87%   ppl/16k/3 whole 881 chunked 881 both 853 J 0.9384 share 6.15%
+ppl/8k/2 whole 246 chunked 246 both 231 J 0.8851 share 4.00%   ppl/32k/0 whole 1494 chunked 1493 both 1413 J 0.8977 share 4.86%
+ppl/16k/0 whole 906 chunked 906 both 848 J 0.8797 share 6.32%  ppl/32k/1 whole 1660 chunked 1660 both 1591 J 0.9202 share 5.40%
+ppl/16k/1 whole 971 chunked 971 both 899 J 0.8619 share 6.77%
+mean Jaccard 0.9168 over 9 docs (engine dump); in-chunk rows 5.61% of bulk rows; dump_equals_simulated=True on all 9 docs
+```
+Rows per chunk (67 chunks): mean 114.9, median 113, min 78, max 184 (8.98% of 2048); **0 truncations** at cap 512. The engine's
+rows equal the Python rule run per chunk on every doc (an end-to-end R33 on all 67 chunks), and equal SIDECAR's offline preview.
+(e) **R38 — GREEN** (H5-quality-vs-speed confirmed; H5-quality-nll refuted, above band). `RADIANCE_KVA_ST=shipped grade.sh quality …
+evidence/stage5/kld-quality.json`: 67 steps; ppl ratio **1.0238**, top-1 88.32%, KL mean 0.0677, p99 0.506. Paired vs speed+st:
+```
+ppl/16k/0 -0.020462  ppl/16k/1 -0.021228  ppl/16k/2 -0.031265  ppl/16k/3 -0.022387  ppl/32k/0 -0.021414
+ppl/32k/1 -0.031816  ppl/8k/0  -0.010931  ppl/8k/1  -0.012304  ppl/8k/2  -0.005396
+mean difference B - A: -0.019689  (95% CI [-0.024990, -0.014301])      all 9 docs improve
+```
+vs exact: +0.0236 [0.0115, 0.0363] nats.
+(f) **R37 — GREEN by the requirement's test** (CI excludes 0; H5-class-vs-random refuted on magnitude). `RADIANCE_KVA_ROWSEL=random`
+(count-matched k, hash(seed, position)) → `evidence/stage5/kld-random.json`: ppl ratio 1.0287, top-1 88.39%, KL mean 0.0655.
+Paired quality(class) − random: **−0.0047 [−0.0094, −0.0005]** (7 of 9 docs favour class; ppl/32k/1 +0.0063 favours random) — just
+short of the −0.005…−0.012 band, CI overlapping it. Random has the LOWER mean KL (0.0655 vs 0.0677) and higher top-1: class rows win
+on tail NLL only (rare tokens are the high-NLL ones), not on distribution distance. R39 Jaccard 0.917 beside it.
+(g) **R40 — measured; H5-quality-ttft REFUTED: quality mode is slower than exact.** `serve.sh quality` + `speed.sh quality`, then
+`serve.sh speed` + `speed.sh speed-st2` (both ST=shipped) → `evidence/stage5/speed-{quality,speed-st2}.json`:
+
+| length | exact (stage 0) | quality | speed+st (same session) | quality vs exact | quality vs speed+st |
+|---|---|---|---|---|---|
+| 9,216 | 5,923.2 | 7,441.3 (6,588–7,470) | 4,907.5 | **0.80x** | 0.66x |
+| 16,384 | 10,002.6 | 10,971.8 (10,960–10,987) | 6,429.8 | **0.91x** | 0.59x |
+| 32,768 | 19,788.6 | 20,686.6 (19,965–21,455) | 10,158.1 | **0.96x** | 0.49x |
+
+**Why (measured; causality not yet proved by an ablation):** under `--placement expert_tiered` a pass of more than 1,024 tokens stages
+each routed layer's WHOLE non-resident expert set onto the card before the layer's MoE (radiance `core/place/stager.cpp`
+begin_pass/before_op: armed by the pass's n_tok, staged by layer, independent of which experts are routed). Quality mode issues all 24
+late MoE layers on every approximate chunk (at M = cap, ~150 of 512 experts touched), so it pays the full late-layer staging that
+speed mode skips — and the 1.22 GiB projector has cut residency by 6.5%, so each layer stages more than in exact.
+- host→device bytes per quick9 KL run (rank 0 mover, end-of-run line): exact **427.65 GiB**, speed+st 290.58, quality **515.72**,
+  quality/none-table 515.08, quality/all-rows 529.19 (rank 1 within 0.5%): quality moves 21% MORE than exact, and its h2d does not
+  depend on the rows selected.
+- profiled per-layer stall on the slower rank (rank 0's wait in the ffn `ar_gather_hc_write` for rank 1, approximate step 3):
+  early layers (MoE at 2,048 rows) 25.6 ms/layer, late layers in quality (MoE at 512 rows) 22.9 ms/layer — a MoE layer costs the same
+  wall time whatever its rows, as a per-layer bulk copy would. Rank 1 is the card behind the Gen4 x4 upstream link.
+- the quality-only ops are small by comparison: kva_rho_update 18 × 0.86–0.97 ms, kva_rowsel 0.9–1.0 ms, gathers/scatters < 1 ms
+  per chunk.
+Decision for the orchestrator/Dylan (not tuned here): quality mode's speed needs the late MoE on approximate chunks to fetch only the
+routed experts (or the stager held off for those passes, or the padding rows kept out of the router); as built it is a quality mode
+at exact-or-worse TTFT. tcc's 1.33x came from an engine that fetched experts on demand.
+
+## Results table (all same boot 75e3e39b…, home-f60f893 except exact; quick9 KL, 9 docs × 2,047 tail positions; TTFT median of 5)
+
+| arm | ppl ratio vs exact | ΔNLL vs exact [95% CI] | top-1 | KL mean / p99 | TTFT 9216 / 16384 / 32768 ms (speedup vs exact) | approx steps |
+|---|---|---|---|---|---|---|
+| exact | 1.0000 | — (floor: KL 1.15e-7) | 100% | 1.15e-7 / 6.9e-7 | 5,923 / 10,003 / 19,789 | 0 |
+| fill (speed, no st) | 1.0636 | +0.0617 [0.0440, 0.0800] | 87.21% | 0.0818 / 0.624 | 5,422 / 6,357 / 10,107 (1.09 / 1.57 / 1.96x)¹ | 67 |
+| fill + st (speed) | 1.0442 | +0.0432 [0.0277, 0.0602] | 87.46% | 0.0770 / 0.578 | 4,871 / 6,374 / 10,117 (1.22 / 1.57 / 1.96x)² | 67 |
+| swap (neg. control) | 1.0717 | +0.0692 [0.0504, 0.0892] | 86.27% | 0.0982 / 0.730 | — | 67 |
+| quality (class) | 1.0238 | +0.0236 [0.0115, 0.0363] | 88.32% | 0.0677 / 0.506 | 7,441 / 10,972 / 20,687 (0.80 / 0.91 / 0.96x) | 67 |
+| random (control) | 1.0287 | +0.0283 [0.0160, 0.0411] | 88.39% | 0.0655 / 0.504 | — | 67 |
+| all rows, share 1 | 1.0000 | 0 (rows = exact, bytes) | 100% | 1.15e-7 / 6.9e-7 | — | 67 |
+
+¹ Stage 3's earlier fill session (home-35adbe3): 4,928 / 6,419 / 10,163. ² Second session after quality: 4,908 / 6,430 / 10,158.
+Paired arm-vs-arm: st − fill −0.0185 [−0.0217, −0.0148]; swap − fill +0.0075 [+0.0037, +0.0113]; quality − (fill+st) −0.0197
+[−0.0250, −0.0143]; class − random −0.0047 [−0.0094, −0.0005]. Byte identities: fill(f60f893) = fill(35adbe3); alpha 0 = fill;
+quality/none-table = fill+st; quality/all-rows = exact; quality with dump = quality.
+
+## Verdicts entered (labbook `~/AI-Work/radiance-kva-plugin-20261004/labbook`, chain verified, head `4b7ee60f…` + this run's last)
+H4-st-paired confirmed · H4-st-nll refuted (above band) · H4-swap confirmed · H4-st-ttft confirmed (by op-level decomposition) ·
+H5-quality-vs-speed confirmed · H5-quality-nll refuted (above band) · H5-class-vs-random refuted (−0.0047, just outside band; CI
+excludes 0) · H5-rows-share confirmed · H5-jaccard refuted (0.917, above band) · H5-quality-ttft refuted (0.91x, slower than exact).
