@@ -35,6 +35,7 @@
 #include "kva_fill.h"
 #include "kva_moe.h"
 #include "kva_layer.h"
+#include "kva_hazard.h"
 #include "kva_guard.h"
 
 namespace qwen4exp_kva {
@@ -350,6 +351,8 @@ static void step(RadCtx* c, const RadBatch* batch) {
     else if (capture) capture_step(c, k, batch);
     else              qwen4exp_fp8::step(c, batch);
     if (approx && rad_rank(c) == 0) log_pass(k, batch, p);
+    hazard_issue(c, k, batch, p);
+    hazard_log(c);
     if (states) finish_state(c, k, batch, sd, approx);
     if (mixed_states) capture_mixed(c, k, batch, approx);
     if (!k.logits_dir.empty() && batch->n_out > 0 && batch->draft_pass == 0) {

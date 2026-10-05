@@ -155,6 +155,36 @@ static int take_upload(const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva
     return RAD_OK;
 }
 
+/* DD-A's branch-hazard instrument, the declare half (the issue half and the log: kva_hazard.h). */
+/* One f32 counter a rank, host-mapped so the host reads what the device adds without a copy op.
+ * Allocated at the first real declare and kept for the process (4 bytes). */
+static void* g_hazard_dev[MAX_RANKS];
+static float g_hazard_logged[MAX_RANKS];
+
+static int decl_hazard(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva& k) {
+    if (k.cfg.mode != MODE_SPEED && k.cfg.mode != MODE_QUALITY) return RAD_OK;
+    for (int64_t l = k.split; l < m.g.n_layer && k.meta_layer < 0; ++l)
+        if (!m.layers[(size_t)l].full) k.meta_layer = (int)l;
+    if (k.meta_layer < 0) return RAD_OK;
+    RadKVGroupDecl d{};
+    d.kind = RAD_KV_LINEAR;
+    d.dtype = RAD_F32;
+    d.n_head_kv = 1;
+    d.state_dim[0] = 1;
+    d.state_dim[1] = 2;   /* {last approximated position + 1, positions counted below} */
+    k.kv_meta = rad_decl_kv_group(b, k.nm.f("kv_kva_meta"), &d);
+    if (!k.kv_meta || rad_bind_layer_kv(b, k.meta_layer, k.kv_meta) < 0) return RAD_E_INVAL;
+    k.op_hazard = RAD_OP(b, "kva_hazard", RAD_PARAMS(RAD_RANGE("M", 1, 1)), RAD_NOWEIGHTS);
+    if (!k.op_hazard) return ctx->shape_probe ? RAD_OK : RAD_E_UNSUPPORTED;
+    if (!ctx->shape_probe && !g_hazard_dev[ctx->rank]) {
+        g_hazard_dev[ctx->rank] = rad_dev_alloc(sizeof(float), RAD_MEM_HOST_MAPPED);
+        float* h = g_hazard_dev[ctx->rank] ? (float*)rad_dev_host_ptr(g_hazard_dev[ctx->rank]) : nullptr;
+        if (!h) return RAD_E_NOMEM;
+        *h = 0.0f;
+    }
+    return RAD_OK;
+}
+
 /* The selected set, its ops and its refusals. Under a sizing declare nothing is refused or copied:
  * the real declare already decided, and its handles are the ones issued. With no usable projector
  * nothing at all is declared: the engine serves the in-tree graph. */
@@ -168,6 +198,7 @@ static int decl_selected(RadBuilder* b, const RadModelMeta* meta, const qwen4exp
     if (k.cfg.mode != MODE_PLUMB) RAD_ARCH_TRY(decl_fill(b, m, ctx, k));
     const char* missing = decl_masked(b, m, ctx, k);
     if (!missing) missing = decl_kernel_ops(b, m, ctx, k);
+    if (!missing && decl_hazard(b, m, ctx, k) != RAD_OK) missing = "kva_hazard";
     if (missing && !probe) {
         std::fprintf(stderr, "radiance: qwen4exp_kva: mode %s issues '%s' and no kernel library "
                              "serves it -- kva.so is missing from $RADIANCE_HOME or declines this "
