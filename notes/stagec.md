@@ -114,9 +114,17 @@ approximates those positions -- so the two differ by design and identity is the 
 |---|---|---|
 | R62 | **green**: turn-2 `cache_n` = stock's, 10/10 conversations, quality and speed | C1 |
 | R63 | **not run** (snapshot/restore of the correction state at ≤ 1 ulp needs a capture of the pre-apply state after a restore; R62/R65 show restores working end to end) | -- |
-| R64 | **redefined** (each vs exact, cached ≤ no-cache); the original form shown unsatisfiable by design (C1); the new form's session `sessions/c4.sh` + `tools/turns_kld_corpus.py` written, **not run** | C1, c4.sh |
+| R64 | **redefined** (each vs exact, cached ≤ no-cache); original form unsatisfiable by design (C1). **Not measured**: the KL-mode instrument (c4) cannot see the cache -- the engine forces the prefix cache off in KL mode (`core/engine_bringup.cpp:442-453`), both runs came out identical. Next instrument: `RADIANCE_KVA_DUMP_LOGITS` on cache / no-cache / exact HTTP servers, turn 2's generated tokens, per-token KL vs exact until the texts diverge (gate 1's tooling) | C1, C4 |
 | R65 | **green**: T_ck 0 on 9 real branches (device = oracle = records); T_ck 512: device = oracle − 512 on all 9. Answer agreement and the negative control **not run** | C2, C3 |
 | R66 | **not run** unless C3 ran (session written: exact / speed T_ck 0, 512, 1,024 / quality 0, 512, 16K + 32K, cache servers) | c3.sh |
 | R68 | **green**: superset flags exactly the 9 branches, per-request AGREE with the device after the in-order pairing fix | C2 |
 | static | 56 arch cases / 680,943 checks, kernel host 851 + GPU 1,158 (incl. kva_hazard device == host); mutants F1-F5, H1-H8 caught | §1, C1 |
 | R6/R7 | **green** at 041ab13 | C1 |
+
+## 5. Session C4 (19:46-19:58Z) -- R64 (redefined) attempt: the instrument cannot see the cache
+`tools/turns_kld_corpus.py` (quick9-off1024 docs as turn 1, quick9 docs, which extend them, as turn 2;
+reference `data/stageC/ref-turns` recorded on exact), quality with `RK_CACHE_DIR` and without: identical
+results (134 approximate steps each, every turn-2 dNLL/KL equal to the last digit). The cache run's log
+says `prefix cache: disabled by --no-prefix-cache` although the flag was not passed: the engine turns the
+prefix cache off in KL mode by design (`core/engine_bringup.cpp:442-453`, "a prefix hit would start a
+document past positions the reference holds"). R64 needs the HTTP instrument above.
