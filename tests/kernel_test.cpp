@@ -1883,14 +1883,27 @@ TEST(int8_forward_on_stored_planes_matches_libref_on_canonical_ones, "gpu") {
             fill_sentinel(y_dev);
             CHECK_EQ(run_group(ref, { &a, &as, &w, &ws, &y_ref }, p), RAD_OK);
             CHECK_EQ(run_group(row, { &a, &as, &sw, &sws, &y_dev }, p), RAD_OK);
-            /* int32 within a 128-K block on both sides, the blocks folded in f32 in different orders,
-             * one bf16 rounding of the result each: within two bf16 ulps of the larger output. */
+            /* int32 within a 128-K block on both sides, the 80 block sums folded in f32 in different
+             * orders, one bf16 rounding of the result each: two bf16 ulps of the larger output, plus an
+             * absolute 2^-9 of the output's RMS for the outputs a fold cancels to near zero (a wrong
+             * layout or scale errs by the RMS itself). */
+            double rms = 0;
+            for (int64_t i = 0; i < M * N; ++i) rms += (double)getf(y_ref, i) * getf(y_ref, i);
+            rms = std::sqrt(rms / (double)(M * N));
+            double run_worst = 0;
+            int64_t at = -1, over = 0;
             for (int64_t i = 0; i < M * N; ++i) {
                 const double x = getf(y_ref, i), y = getf(y_dev, i);
-                const double tol = std::ldexp(std::max(std::fabs(x), std::fabs(y)), -7) + 1e-6;
-                worst = std::max(worst, std::fabs(x - y) / tol);
-                if (std::fabs(x - y) > tol) { CHECK(std::fabs(x - y) <= tol); break; }
+                const double tol = std::ldexp(std::max(std::fabs(x), std::fabs(y)), -7) + std::ldexp(rms, -9);
+                if (std::fabs(x - y) / tol > run_worst) { run_worst = std::fabs(x - y) / tol; at = i; }
+                over += std::fabs(x - y) > tol;
             }
+            std::fprintf(stderr, "    %s M %lld: worst %.3g of the bound at [%lld, %lld] (ref %.6g, device %.6g, rms %.4g), "
+                         "%lld of %lld over\n", row->name, (long long)M, run_worst, (long long)(at / N), (long long)(at % N),
+                         at >= 0 ? getf(y_ref, at) : 0.0, at >= 0 ? getf(y_dev, at) : 0.0, rms, (long long)over,
+                         (long long)(M * N));
+            CHECK_EQ(over, 0);
+            worst = std::max(worst, run_worst);
             ++runs;
         }
     std::fprintf(stderr, "  %d runs (%zu forwarded int8 rows, M 1/64/2048 as each admits; N %lld, K %lld): "
