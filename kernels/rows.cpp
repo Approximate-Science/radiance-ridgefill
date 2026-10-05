@@ -1,7 +1,10 @@
 /* rows.cpp -- the kva kernel library's op schemas, its row table and its operand descriptions.
  *
  * NEW OPS, none of them in docs/OPS.md, so this plugin FIXES their schemas (the first plugin in
- * hierarchy order to declare an op does) and nothing else in the engine knows them. Each has a
+ * hierarchy order to declare an op does) and nothing else in the engine knows them. The fitted
+ * tensors (projector, correction, score table) are IN operands, not weights: they live in memory
+ * the arch plugin fills from the projector folder (PACKAGING.md §0), so nothing here asks the
+ * container for them. kva_gemm_nt_bias's rows are the engine's own gemm_nt_bias rows (forward.cpp). Each has a
  * host row -- plain C++, the oracle the device row is tested against (tests/kernel_test.cpp) --
  * and, in a HIP build, a device row. The plan they implement is PLAN.md §5 of the KVA plugin build
  * and PLAN-FIX v2 Stage A (the device mask; schemas in notes/impl.md §1).
@@ -38,7 +41,7 @@
  * token_ids' extent, which is per issue and is what a recorded pass replays. */
 static const RadParamSpec pMask[] = { P_INT("M"), P_F64("share"), P_INT("seed"), P_STR("mode") };
 static const RadOperandSpec oMask[] = { OPD("cu_last"), OPD("token_ids"), OPD("positions"),
-                                        WGT_O("score"), OUT("mask"), OUT("bounds"), OUT_O("zeros") };
+                                        OPD_O("score"), OUT("mask"), OUT("bounds"), OUT_O("zeros") };
 
 static const RadParamSpec pSelect[] = { P_INT("M") };
 static const RadOperandSpec oSelect[] = { OPD("mask"), OPD("x_src"), OPD_O("q_src"), OPD_O("s_src"),
@@ -56,8 +59,13 @@ static const RadParamSpec pCorrect[] = { P_INT("M"), P_STR("mode"), P_F64("alpha
 /* Each KV operand is followed by its own group's slot index, as gdn_recurrent_update pairs
  * `state` with `state_idx`: the groups need not share a slot per sequence. */
 static const RadOperandSpec oCorrect[] = { INOUT("state"), OPD("state_idx"), INOUT("applied"),
-                                           OPD("applied_idx"), WGT("C"), OPD_O("ND"),
+                                           OPD("applied_idx"), OPD("C"), OPD_O("ND"),
                                            OPD_O("nd_idx"), OPD_O("bounds") };
+
+/* libr4d's gemm_nt_bias (r4d_rows.cpp:1519-1529, docs/OPS.md:343) with `b` and `bias` as inputs. */
+static const RadParamSpec pGemm[] = { P_INT("M"), P_INT("N"), P_INT("K"), P_STR("dtype"),
+                                      { "act", RAD_P_STR, RAD_OPTIONAL, RAD_PROLE_NONE } };
+static const RadOperandSpec oGemm[] = { OPD("a"), OPD("b"), OPD("bias"), OPD_O("res"), OUT("y") };
 
 static const RadParamSpec pStateRead[] = { P_INT("M"), P_INT("n_head"), P_INT("sd0"), P_INT("sd1") };
 static const RadOperandSpec oStateRead[] = { OPD("state"), OPD("state_idx"), OUT("out") };
@@ -112,7 +120,7 @@ static const RadOpSchema kSchemas[] = {
   "(1 also while D is 0); state += s * C; applied = s. Nothing is added when the scale is 0, so "
   "alpha 0 leaves the state's bits alone. state [n_states, n_head, sd0, sd1] f32 with the strides "
   "the operand carries (linear slots may be padded); applied [n_states, n_head, ...] one f32 a "
-  "head; C [n_head, sd0, sd1] f32; ND as kva_rho_update's, optional. `alpha` is read in apply "
+  "head; C [n_head, sd0, sd1] f32, dense (any rank of that many elements); ND as kva_rho_update's, optional. `alpha` is read in apply "
   "mode and ignored in undo. Optional `bounds` i32 [>=2] (kva_mask's {s, b', ...}): when "
   "bounds[1] <= bounds[0] (the step's last sequence had no bulk row) the op writes nothing, in "
   "either mode; otherwise it is the op without bounds." },
@@ -122,6 +130,12 @@ static const RadOpSchema kSchemas[] = {
   "outside the pool reads zeros. state [n_states, n_head, sd0, sd1] f32 at the strides the "
   "operand carries (linear slots may be padded); out f32, written densely from its first element "
   "as [n_seq, n_head, sd0, sd1] (any contiguous operand at least that big)." },
+{ "kva_gemm_nt_bias", ARR(pGemm), ARR(oGemm),
+  "gemm_nt_bias (docs/OPS.md) with the weight `b` [N, K] and `bias` [N] as IN operands -- memory "
+  "the caller owns, e.g. a projector loaded from a folder rather than the container: y = res + "
+  "act(a @ b^T + bias), rounded to bf16 after the biased product, after the activation and after "
+  "the residual. Its rows are the engine's own gemm_nt_bias rows (libr4d's device row, libref's "
+  "host row), offered only when that library is loaded." },
 };
 
 /* ================================================================== operand descriptions
@@ -312,7 +326,8 @@ static const RadPluginInfo kInfo = {
     "device), kva_select (approximated rows take their source rows), kva_drop_rows (approximated "
     "rows select no ids), kva_rho_update (decayed approximated share per GDN head), "
     "kva_state_correct (GDN terminal-state correction), kva_state_read (GDN state slot copy-out "
-    "for the correction refit). A host row (the oracle) and, in a HIP build, a device row each.",
+    "for the correction refit), kva_gemm_nt_bias (the engine's gemm_nt_bias with its weight as an "
+    "input). A host row (the oracle) and, in a HIP build, a device row each.",
     KVA_BUILD_TARGET
 };
 
@@ -323,7 +338,14 @@ extern "C" int rad_kernel_schema_count(void) { return (int)(sizeof kSchemas / si
 extern "C" const RadOpSchema* rad_kernel_schema_at(int i) {
     return i >= 0 && i < rad_kernel_schema_count() ? &kSchemas[i] : nullptr;
 }
-extern "C" int rad_kernel_count(void) { return (int)(sizeof kKernels / sizeof kKernels[0]); }
+/* This library's own rows, then the forwarded gemm rows (forward.cpp), which exist only when their
+ * source library is loaded -- counted at the first call, which the loader makes after it has
+ * dlopened every plugin. */
+static const int kOwnRows = (int)(sizeof kKernels / sizeof kKernels[0]);
+extern "C" int rad_kernel_count(void) { return kOwnRows + kva_forward_count(); }
 extern "C" const RadKernelInfo* rad_kernel_at(int i) {
-    return i >= 0 && i < rad_kernel_count() ? &kKernels[i] : nullptr;
+    if (i >= 0 && i < kOwnRows) return &kKernels[i];
+    return kva_forward_at(i - kOwnRows);
 }
+/* A forwarded row keeps its source's promise; this library's own rows make none (abi/rad_abi.h:591). */
+extern "C" int rad_kernel_concurrent(int i) { return i >= kOwnRows ? kva_forward_concurrent(i - kOwnRows) : 0; }

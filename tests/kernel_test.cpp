@@ -1,8 +1,12 @@
 /* kernel_test.cpp -- the kva kernel library, seen the way the engine sees it: dlopen'd, its rows
  * found by op and domain, called through RadArgs with the operands in schema order.
  *
- *   kernel_test <path/to/kva.so> host   cases that need no card (host rows, the oracles)
- *   kernel_test <path/to/kva.so> gpu    device rows against the host rows (needs a ROCm device)
+ *   kernel_test <path/to/kva.so> host [lib.so ...]   cases that need no card (host rows, the oracles)
+ *   kernel_test <path/to/kva.so> gpu  [lib.so ...]   device rows against the host rows (needs a ROCm device)
+ *
+ * The trailing libraries are loaded FIRST, as the engine's loader has every plugin mapped before it
+ * reads kva.so's rows: libr4d and libref, whose gemm_nt_bias rows kva_gemm_nt_bias forwards to
+ * (kernels/forward.cpp). Without them that op has no row, which one case checks.
  *
  * A case that cannot run prints SKIP and its reason and asserts nothing. The binary exits 77
  * (ctest's skip code) when nothing was checked at all, 1 on any failure, 0 otherwise -- a binary
@@ -62,6 +66,7 @@ static const RadKernelInfo* (*g_kernel_at)(int);
 static int (*g_schema_count)(void);
 static const RadOpSchema* (*g_schema_at)(int);
 static std::string g_group;
+static std::vector<void*> g_preloaded;   /* the trailing libraries, in argument order */
 
 static const RadKernelInfo* find_row(const char* op, int domain) {
     for (int i = 0; i < g_kernel_count(); ++i) {
@@ -388,7 +393,7 @@ TEST(params_carry_no_role, "both") {
             CHECK_EQ(role, RAD_PROLE_NONE);                                 /* and in fact none */
         }
     }
-    CHECK_EQ(g_schema_count(), (int)(sizeof kOps / sizeof kOps[0]));
+    CHECK_EQ(g_schema_count(), (int)(sizeof kOps / sizeof kOps[0]) + 1);   /* + kva_gemm_nt_bias */
 }
 
 /* ================================================================== op runners
@@ -1677,14 +1682,95 @@ TEST(drop_rows_device_matches_host, "gpu") {
     std::fprintf(stderr, "  %d configurations: device ids == host bytewise\n", runs);
 }
 
+/* ================================================================== kva_gemm_nt_bias (R140)
+ * The forwarded rows: present exactly when their source library is loaded, carrying the source
+ * row's hooks, and writing the bytes gemm_nt_bias writes with the weight as a plain input. */
+
+/* gemm_nt_bias's row in `domain` from the preloaded library named `plugin`, or null. */
+static const RadKernelInfo* source_gemm(const char* plugin, int domain) {
+    for (void* h : g_preloaded) {
+        auto info = (const RadPluginInfo* (*)(void))dlsym(h, "rad_plugin_info");
+        auto count = (int (*)(void))dlsym(h, "rad_kernel_count");
+        auto at = (const RadKernelInfo* (*)(int))dlsym(h, "rad_kernel_at");
+        if (!info || !count || !at || std::strcmp(info()->name, plugin) != 0) continue;
+        for (int i = 0; i < count(); ++i)
+            if (at(i)->domain == domain && !std::strcmp(at(i)->op, "gemm_nt_bias")) return at(i);
+    }
+    return nullptr;
+}
+
+static const char* gemm_source() { return g_group == "gpu" ? "libr4d" : "libref"; }
+
+TEST(gemm_forward_offers_no_row_without_its_source, "host") {
+    if (!g_preloaded.empty()) { skip("source libraries preloaded; the kva_kernels_alone run checks this"); return; }
+    CHECK(find_schema("kva_gemm_nt_bias") != nullptr);
+    CHECK(find_row("kva_gemm_nt_bias", RAD_DOMAIN_HOST) == nullptr);
+    CHECK(find_row("kva_gemm_nt_bias", RAD_DOMAIN_DEVICE) == nullptr);
+}
+
+TEST(gemm_forward_is_the_source_row, "both") {
+    if (!group_runnable()) return;
+    const RadKernelInfo* src = source_gemm(gemm_source(), group_domain());
+    if (!src) { skip("the source library is not preloaded"); return; }
+    const RadKernelInfo* row = find_row("kva_gemm_nt_bias", group_domain());
+    REQUIRE(row != nullptr);
+    CHECK(row->launch == src->launch && row->describe == src->describe);
+    CHECK(row->init == src->init && row->fini == src->fini && row->scratch == src->scratch);
+    CHECK(row->constraints == src->constraints && row->n_constraints == src->n_constraints);
+    CHECK(row->opd_shape == src->opd_shape && row->priority == src->priority);
+    CHECK(row->layout == nullptr && row->relayout == nullptr && row->n_tunables == 0);
+}
+
+/* A, W, bias (bf16 or f32) and res drawn at random; the forwarded row with W and bias as plain
+ * tensors against the source row, every output byte. */
+static void gemm_once(const RadKernelInfo* fwd, const RadKernelInfo* src, int64_t M, int64_t N,
+                      int64_t K, bool bias_f32, bool res, Rng& r, size_t* bytes) {
+    Buf a = make(RAD_BF16, { M, K }), w = make(RAD_BF16, { N, K });
+    Buf bias = make(bias_f32 ? RAD_F32 : RAD_BF16, { N }), rs = make(RAD_BF16, { M, N });
+    for (Buf* b : { &a, &w, &bias, &rs })
+        for (int64_t i = 0; i < rad_tensor_numel(&b->t); ++i) setf(*b, i, r.normal());
+    Buf y1 = make(RAD_BF16, { M, N }), y2 = y1;
+    fill_sentinel(y1); fill_sentinel(y2);
+    const std::vector<RadParam> p = { pint("M", M), pint("N", N), pint("K", K), pstr("dtype", "bf16") };
+    CHECK_EQ(run_group(src, { &a, &w, &bias, res ? &rs : nullptr, &y1 }, p), RAD_OK);
+    CHECK_EQ(run_group(fwd, { &a, &w, &bias, res ? &rs : nullptr, &y2 }, p), RAD_OK);
+    CHECK(y1.bytes == y2.bytes);
+    *bytes += y2.bytes.size();
+}
+
+TEST(gemm_forward_matches_its_source_bytewise, "both") {
+    if (!group_runnable()) return;
+    const RadKernelInfo* src = source_gemm(gemm_source(), group_domain());
+    if (!src) { skip("the source library is not preloaded"); return; }
+    const RadKernelInfo* fwd = find_row("kva_gemm_nt_bias", group_domain());
+    REQUIRE(fwd != nullptr);
+    /* The projector's own shape on the card (N 2560, K 10240); a small one for the naive host row. */
+    const bool gpu = g_group == "gpu";
+    const int64_t N = gpu ? 2560 : 48, K = gpu ? 10240 : 136;
+    Rng r{ 140 };
+    size_t bytes = 0;
+    int runs = 0;
+    for (int64_t M : { 1, 64, gpu ? 2048 : 130 })
+        for (int variant = 0; variant < 2; ++variant, ++runs)
+            gemm_once(fwd, src, M, N, K, variant == 1, variant == 1, r, &bytes);
+    std::fprintf(stderr, "  %d runs (M 1, 64, %d; N %lld, K %lld; bf16 and f32 bias, with and without res), "
+                 "%zu output bytes: forwarded == %s's gemm_nt_bias bytewise\n", runs, gpu ? 2048 : 130,
+                 (long long)N, (long long)K, bytes, gemm_source());
+}
+
 /* ================================================================== main */
 
 int main(int argc, char** argv) {
-    if (argc != 3 || (std::strcmp(argv[2], "host") && std::strcmp(argv[2], "gpu"))) {
-        std::fprintf(stderr, "usage: %s <kva.so> host|gpu\n", argv[0]);
+    if (argc < 3 || (std::strcmp(argv[2], "host") && std::strcmp(argv[2], "gpu"))) {
+        std::fprintf(stderr, "usage: %s <kva.so> host|gpu [source.so ...]\n", argv[0]);
         return 2;
     }
     g_group = argv[2];
+    for (int i = 3; i < argc; ++i) {
+        void* s = dlopen(argv[i], RTLD_NOW | RTLD_LOCAL);
+        if (!s) { std::fprintf(stderr, "cannot load %s: %s\n", argv[i], dlerror()); return 1; }
+        g_preloaded.push_back(s);
+    }
     void* h = dlopen(argv[1], RTLD_NOW | RTLD_LOCAL);
     if (!h) { std::fprintf(stderr, "cannot load %s: %s\n", argv[1], dlerror()); return 1; }
     g_kernel_count = (int (*)(void))dlsym(h, "rad_kernel_count");

@@ -241,6 +241,12 @@ int kva_state_read_host(const RadArgs* a, RadStream s);
 int kva_select_host(const RadArgs* a, RadStream s);
 int kva_drop_host(const RadArgs* a, RadStream s);
 
+/* forward.cpp: kva_gemm_nt_bias's rows -- the engine's own gemm_nt_bias rows from the libraries
+ * already loaded (libr4d device, libref host); none when neither is. */
+int kva_forward_count(void);
+const RadKernelInfo* kva_forward_at(int i);
+int kva_forward_concurrent(int i);
+
 /* mask.hip, rho.hip, state_correct.hip, select.hip: the device rows. */
 int kva_mask_device(const RadArgs* a, RadStream s);
 int kva_rho_device(const RadArgs* a, RadStream s);
