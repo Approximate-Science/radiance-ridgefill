@@ -6,6 +6,9 @@ library, and `tools/kva_projector.py`, which builds the projector folder the plu
 `<model dir>/projector/`. The model file stays exactly as published (the old container append is retired:
 `tools/dev/README.md`).
 
+The plugin is a model-independent core (`arch/kva_*.h`) and one adapter per model (`arch/qwen4exp_*`);
+adding a model is docs/ADDING-A-MODEL.md.
+
 ## Build
 
 Two inputs: an **installed radiance** and a **source checkout of the same release**. The arch plugin
