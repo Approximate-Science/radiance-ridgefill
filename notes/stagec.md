@@ -34,3 +34,29 @@ inherits its "counted" mark (rare: a branch of a branch).
 formula min(N1−N2, T−(N2−P)) = 1,144 for N1 6,144 / N2 5,000 / P 4,096, counted once, continuation 0,
 record-only pass, out-of-pool slot, refusal). Mutants (scratch copy, `evidence/stageC/mutants-*.txt`):
 F1-F5 (floor) and H1-H8 (hazard wiring) all caught.
+
+## 2. Session C1 (17:55-18:13Z; `evidence/stageC/session1.log`, `sessions/c1.sh`; home `data/home-041ab13`:
+## arch dabbe9f5…, kva.so d550da69…; projector in host memory; boot 75e3e39b…)
+- **kva.so device leg** (card 0000:13:00.0): 64 `kva_hazard` configurations device meta and count == host;
+  1,158 GPU checks, ctest gpu 1/1.
+- **R6/R7 green** at 041ab13: off ident = R3's six hashes.
+- **R62 GREEN** (`tools/turns.py`, 10 append-only conversations 8K-32K, cache servers): turn-2 `cache_n`
+  is stock's in every conversation for quality AND speed (8,192 / 12,288 / ... / 32,768; 8,192 for the
+  9,216 one); 89 of each mode's 90 approximate steps wrote a checkpoint; `kva: hazard` lines: 0 (the
+  append-only negative half of R68).
+- **R64 as written cannot hold, by construction** (not a plugin defect): quality with the cache vs
+  quality without it give different turn-2 answers (8 of 8 non-empty differ; 2 are empty in every run).
+  With the cache, turn 2 keeps turn 1's own exact tail (positions N1 − T ... N1, e.g. 6,144-8,191)
+  exact -- that is D-a's point; a no-cache recompute of the longer turn-2 prompt approximates those same
+  positions, because they now lie before ITS tail. Same tokens, different rows exact. The cached answer
+  has MORE exact rows. A meaningful R64 compares each against exact (KL), not against each other.
+- **R65 / R68, first corpus (12 triples; 8 skipped as too short)**: the device counter is right on all 36
+  requests -- the one B that resumed at its predicted checkpoint (`branch/003/B`, cache_n 14,336 = P)
+  logged **1,696 positions = the oracle min(N1−N2, T−(N2−P)) = 1,696**; the other 35 have true hazard 0
+  and logged 0. But the corpus formed only 1 branch: (a) 20 triples cycle over 9 documents, so later
+  A's resumed from an earlier same-document A (`hazard_rate.py`'s superset rule flags those 6 A's;
+  producer and consumer lengths differ by < 40 tokens, so the cached tail rows were exact in the producer
+  -- true hazard 0, as the device says); (b) 10 of 12 B's hit an earlier checkpoint than the corpus
+  predicted (engine checkpoint retention), so none of their tail came from cache. `hazard_rate.py
+  --require-match` therefore reports DISAGREE (its superset vs the device's exact count). Rerun planned
+  with one document per triple and enough `--checkpoint-slots`.
