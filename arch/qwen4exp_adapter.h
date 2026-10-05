@@ -76,6 +76,27 @@ inline int declare_model(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
     return k.quant.declare(b, g, m.a_x, g.n_embd);
 }
 
+/* The projected block input's code pair, mirroring the model's a_x (int8 when the trunk is fed int8
+ * codes, E4M3 otherwise, none for a bf16 model), so kva_select can copy a projected row's codes over
+ * an exact row's and no linear re-quantises anything: the declare_codes hook. */
+inline int declare_codes(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
+    const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[ctx->rank];
+    Geom g = m.g;
+    g.max_tok = ctx->max_tok;
+    if (m.a_x.cq()) RAD_ARCH_TRY(k.xp.declare_qs(b, k.nm, g, "kva_x_proj", g.n_embd, 0, m.a_x.q8_fed));
+    k.xp.q8_fed = m.a_x.q8_fed;
+    return RAD_OK;
+}
+
+/* What a late attention layer lacks for speed's tail-only straddle -- the per-row sparse attention (the
+ * indexer's selection and its sequence map) and the fused sparse attention + gate -- or nullptr. */
+inline const char* straddle_missing(const AttnGatedFP8& a) {
+    if (!a.qsa_sel) return "the indexer's selection (qsa_sel)";
+    if (!a.qsa_sequ) return "the indexer's sequence map (qsa_sequ)";
+    if (!a.op_attn_gq) return "the fused sparse attention + gate (attn_paged_gate_quant)";
+    return nullptr;
+}
+
 /* The fit facts the method was measured at on this model (KVA-FACTS §5). */
 constexpr int64_t kAdapterMinTail = 512, kAdapterDefaultTail = 2048;
 
@@ -94,6 +115,7 @@ inline KvaAdapter adapter_of(const qwen4exp_fp8::Model& m) {
     a.split_lo = m.ple_layer + 1;  /* -1 (no PLE) gives 0: no constraint */
     a.probe_depth = 3;             /* the probes ride behind layer S-3's gate-up (notes/impl.md §2) */
     a.top_k = m.moecfg.top_k;
+    a.buf_route_ids = m.b_eids;
     for (const qwen4exp_fp8::Layer& l : m.layers) {
         a.n_expert = std::max(a.n_expert, l.mlp.c.n_expert);
         a.n_ff_exp = std::max(a.n_ff_exp, l.mlp.c.n_ff_exp);
@@ -101,6 +123,8 @@ inline KvaAdapter adapter_of(const qwen4exp_fp8::Model& m) {
         a.ext_in.push_back((l.full ? l.attn.ext_in : l.gdn.ext_in) ? 1 : 0);
         a.calibrated.push_back(l.mlp.op_gram_gu ? 1 : 0);
         a.routed.push_back(l.mlp.c.n_expert > 0 ? 1 : 0);
+        a.straddle_lack.push_back(l.full ? straddle_missing(l.attn) : nullptr);
+        a.qsa_exact_to.push_back(l.full ? l.attn.qsa_exact_to : 0);
     }
     a.min_tail = kAdapterMinTail;
     a.default_tail = kAdapterDefaultTail;
@@ -113,6 +137,7 @@ inline KvaAdapter adapter_of(const qwen4exp_fp8::Model& m) {
     a.buf_x_s = m.a_x.cs();
     a.buf_logits = m.b_logits;
     a.declare_model = &declare_model;
+    a.declare_codes = &declare_codes;
     a.decl_state_ops = &decl_state_ops;
     return a;
 }

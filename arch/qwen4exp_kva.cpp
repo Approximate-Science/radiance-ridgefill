@@ -97,9 +97,9 @@ static int declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* c
         v->assign(m.layers.size(), RAD_NONE);
     for (auto* v : { &k.op_undo, &k.op_apply, &k.op_rho, &k.op_proj })
         v->assign(m.layers.size(), 0);
-    if (k.cfg.mode == MODE_OFF) RAD_ARCH_TRY(capture_split(b, m, meta, k));
+    if (k.cfg.mode == MODE_OFF) RAD_ARCH_TRY(capture_split(b, meta, k));
     else                        RAD_ARCH_TRY(decl_selected(b, meta, m, ctx, k));
-    if (!k.state_dir.empty()) RAD_ARCH_TRY(decl_state_read(b, m, ctx, k));
+    if (!k.state_dir.empty()) RAD_ARCH_TRY(decl_state_read(b, ctx, k));
     return RAD_OK;
 }
 

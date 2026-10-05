@@ -46,12 +46,18 @@ struct KvaAdapter {
      * fill hands it one, check_fill); the block runs the MoE calibration tap the core never issues;
      * the FFN is routed (probes, streaming, the drop arm). */
     std::vector<uint8_t> full, ext_in, calibrated, routed;
+    /* per attention layer: what it lacks for speed's tail-only straddle (nullptr = nothing), and the
+     * rows its sparse attention keeps exact (the straddle must reach past them, derive) */
+    std::vector<const char*> straddle_lack;
+    std::vector<int64_t> qsa_exact_to;
     /* buffers the core issues against: the stream, the block input and the code pair its producer
      * writes (whichever dtype that is), the logits. The projector maps' dtype is not a model fact:
      * it is read from the folder's manifest (bf16 or int8). */
     rad_buf buf_stream = 0, buf_x = 0, buf_x_q = 0, buf_x_s = 0, buf_logits = 0;
+    rad_buf buf_route_ids = 0;   /* the routed FFN's expert ids, which kva_drop_rows rewrites; 0 = dense */
     /* hooks; nullptr = the capability is absent and the core skips it */
     int (*declare_model)(RadBuilder*, const RadBuildCtx*, Kva&) = nullptr;          /* the fill's quantiser */
+    int (*declare_codes)(RadBuilder*, const RadBuildCtx*, Kva&) = nullptr;          /* Kva::xp's code pair */
     const char* (*decl_state_ops)(RadBuilder*, const RadBuildCtx*, Kva&) = nullptr; /* correction ops: the
                                                                      missing op's name, or nullptr */
 };

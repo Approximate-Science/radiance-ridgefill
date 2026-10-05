@@ -9,15 +9,12 @@ namespace qwen4exp_kva {
 /* THE STAGER PROBES' BUFFERS (notes/impl.md §2): expert offsets that are all zero -- kva_mask writes
  * them every masked pass -- and the rows a probe's gate-up GEMM writes its zeros into, sized for the
  * widest routed layer. Both take the whole program. */
-static int decl_probes(RadBuilder* b, const qwen4exp_fp8::Model& m, Kva& k) {
-    int64_t width = 0, top_k = 0;
-    for (const qwen4exp_fp8::Layer& l : m.layers) {
-        k.n_zeros = std::max({k.n_zeros, l.mlp.c.n_expert + 1, l.mlp.c.top_k});
-        width = std::max(width, 2 * l.mlp.c.n_ff_exp);
-        top_k = std::max(top_k, l.mlp.c.top_k);
-    }
+static int decl_probes(RadBuilder* b, Kva& k) {
+    const KvaAdapter& a = k.ad;
+    if (a.top_k == 0) return RAD_OK;   /* dense: nothing is staged, so nothing to steer */
+    k.n_zeros = std::max(a.n_expert + 1, a.top_k);
     k.b_zeros = decl_b(b, k.nm.f("kva_zero_offsets"), RAD_I32, {k.n_zeros});
-    k.b_probe = decl_b(b, k.nm.f("kva_probe_rows"), RAD_BF16, {top_k, width});
+    k.b_probe = decl_b(b, k.nm.f("kva_probe_rows"), RAD_BF16, {a.top_k, 2 * a.n_ff_exp});
     if (!k.b_zeros || !k.b_probe) return RAD_E_INVAL;
     RAD_ARCH_TRY(rad_buf_concurrent(b, k.b_zeros));
     return rad_buf_concurrent(b, k.b_probe);
@@ -26,32 +23,29 @@ static int decl_probes(RadBuilder* b, const qwen4exp_fp8::Model& m, Kva& k) {
 /* The projected block input and its codes: the same code pair the connection read writes into `x`
  * (int8 when the trunk is fed int8 codes, E4M3 otherwise, none for a bf16 model), so kva_select can
  * copy a projected row's codes over an exact row's and no linear re-quantises anything. */
-static int decl_projected(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva& k) {
-    Geom g = m.g;
-    g.max_tok = ctx->max_tok;
-    const int64_t n = g.n_embd;
+static int decl_projected(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
+    const KvaAdapter& a = k.ad;
+    const int64_t n = a.n_embd, wide = a.wide, max_tok = ctx->max_tok;
     /* h_S, the layer-S stream every projector reads on a masked pass (40 MiB at 2,048 rows, paid by every
      * request in resident experts): not with int8 maps and no MTP map, whose codes are made from b_h at
      * layer S (kva_layer.h project_masked) */
     if (!k.int8 || k.want_final) {
-        k.b_hs = decl_b(b, k.nm.f("kva_h_stream"), g.act_dtype, {g.max_tok, m.hccfg.hc * n});
+        k.b_hs = decl_b(b, k.nm.f("kva_h_stream"), a.act_dtype, {max_tok, wide});
         if (!k.b_hs) return RAD_E_INVAL;
     }
-    k.xp.x = decl_b(b, k.nm.f("kva_x_proj"), g.act_dtype, {g.max_tok, n});
+    k.xp.x = decl_b(b, k.nm.f("kva_x_proj"), a.act_dtype, {max_tok, n});
     if (!k.xp.x) return RAD_E_INVAL;
-    if (m.a_x.cq()) RAD_ARCH_TRY(k.xp.declare_qs(b, k.nm, g, "kva_x_proj", n, 0, m.a_x.q8_fed));
-    k.xp.q8_fed = m.a_x.q8_fed;
-    for (rad_buf h : { k.b_hs, k.xp.x, k.xp.cq(), k.xp.cs(), m.b_eids })
+    if (a.declare_codes) RAD_ARCH_TRY(a.declare_codes(b, ctx, k));
+    for (rad_buf h : { k.b_hs, k.xp.x, k.xp.cq(), k.xp.cs(), a.buf_route_ids })
         if (h) RAD_ARCH_TRY(rad_buf_concurrent(b, h));
-    const int64_t wide = m.hccfg.hc * n;
     /* Every buffer these three touch takes the whole program (concurrent here or in decl_fill), so
      * they state no read/write sets. */
-    k.op_cast = RAD_OP(b, "cast", RAD_PARAMS(RAD_RANGE("M", 1, g.max_tok), RAD_INT("n", wide),
-                                             RAD_STR("from", g.dtype), RAD_STR("to", g.dtype)),
+    k.op_cast = RAD_OP(b, "cast", RAD_PARAMS(RAD_RANGE("M", 1, max_tok), RAD_INT("n", wide),
+                                             RAD_STR("from", a.dtype), RAD_STR("to", a.dtype)),
                        RAD_NOWEIGHTS);
-    k.op_select = RAD_OP(b, "kva_select", RAD_PARAMS(RAD_RANGE("M", 1, g.max_tok)), RAD_NOWEIGHTS);
+    k.op_select = RAD_OP(b, "kva_select", RAD_PARAMS(RAD_RANGE("M", 1, max_tok)), RAD_NOWEIGHTS);
     k.op_drop = RAD_OP(b, "kva_drop_rows",
-                       RAD_PARAMS(RAD_RANGE("M", 1, g.max_tok), RAD_INT("top_k", m.moecfg.top_k)),
+                       RAD_PARAMS(RAD_RANGE("M", 1, max_tok), RAD_INT("top_k", a.top_k)),
                        RAD_NOWEIGHTS);
     return RAD_OK;
 }
@@ -60,17 +54,7 @@ static int decl_projected(RadBuilder* b, const qwen4exp_fp8::Model& m, const Rad
  * the same path (mask all 0, no projector), which is what makes it the oracle for the split scan
  * (R47) and the stager probes (R94). `kva_mask`'s mode is the mode's row rule: plumb keeps every
  * row exact, speed approximates the whole window, quality keeps its class (or random/all) rows. */
-/* What a late attention layer lacks for speed's tail-only straddle -- the per-row sparse attention (the
- * indexer's selection and its sequence map) and the fused sparse attention + gate -- or nullptr. */
-inline const char* straddle_missing(const AttnGatedFP8& a) {
-    if (!a.qsa_sel) return "the indexer's selection (qsa_sel)";
-    if (!a.qsa_sequ) return "the indexer's sequence map (qsa_sequ)";
-    if (!a.op_attn_gq) return "the fused sparse attention + gate (attn_paged_gate_quant)";
-    return nullptr;
-}
-
-static const char* decl_masked(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx,
-                               Kva& k) {
+static const char* decl_masked(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
     const Config& c = k.cfg;
     const bool project = c.mode != MODE_PLUMB;
     k.b_mask   = decl_b(b, k.nm.f("kva_mask"), RAD_I32, {ctx->max_tok});
@@ -78,7 +62,7 @@ static const char* decl_masked(RadBuilder* b, const qwen4exp_fp8::Model& m, cons
     if (!k.b_mask || !k.b_bounds) return "a buffer";
     for (rad_buf h : { k.b_mask, k.b_bounds })
         if (rad_buf_concurrent(b, h) < 0) return "a buffer";
-    if (project && decl_projected(b, m, ctx, k) < 0) return "a buffer";
+    if (project && decl_projected(b, ctx, k) < 0) return "a buffer";
     const char* rule = c.mode == MODE_PLUMB ? "all" : c.mask_step ? "step"
                                                      : c.mode == MODE_SPEED ? "none"
                                                      : kRowselNames[c.rowsel];
@@ -94,12 +78,11 @@ static const char* decl_masked(RadBuilder* b, const qwen4exp_fp8::Model& m, cons
     const bool straddle = c.tail_only && c.mode == MODE_SPEED;
     int64_t lacking = -1;
     const char* what = nullptr;
-    for (int64_t l = k.split; l < m.g.n_layer; ++l) {
-        const AttnGatedFP8& a = m.layers[(size_t)l].attn;
-        if (!m.layers[(size_t)l].full) continue;
-        const char* miss = straddle_missing(a);
+    for (int64_t l = k.split; l < k.ad.n_layer; ++l) {
+        if (!k.ad.full[(size_t)l]) continue;
+        const char* miss = k.ad.straddle_lack[(size_t)l];
         if (miss && lacking < 0) { lacking = l; what = miss; }
-        k.qsa_exact_to = std::max(k.qsa_exact_to, a.qsa_exact_to);
+        k.qsa_exact_to = std::max(k.qsa_exact_to, k.ad.qsa_exact_to[(size_t)l]);
     }
     k.straddle_layers = straddle && lacking < 0;
     /* Otherwise the downgrade shows only in each step log's path field: say it once, at startup. */
@@ -107,7 +90,7 @@ static const char* decl_masked(RadBuilder* b, const qwen4exp_fp8::Model& m, cons
         std::fprintf(stderr, "radiance: qwen4exp_kva: KVA: late attention layer %lld lacks %s, so speed mode "
                              "takes the masked path for straddle chunks: slower, same output class\n",
                      (long long)lacking, what);
-    return decl_probes(b, m, k) < 0 ? "a buffer" : nullptr;
+    return decl_probes(b, k) < 0 ? "a buffer" : nullptr;
 }
 
 static void note_config(RadBuilder* b, const Kva& k) {
@@ -148,7 +131,7 @@ static void note_debug(const Kva& k) {
 
 /* What the folder lets this mode run (kva_projector.h): false = serve stock, already said. Plumb
  * reads no fitted tensor (its mask keeps every row exact) and so holds none. */
-static bool take_folder(RadBuilder* b, const RadModelMeta* meta, const qwen4exp_fp8::Model& m, Kva& k) {
+static bool take_folder(RadBuilder* b, const RadModelMeta* meta, Kva& k) {
     const Loaded& l = load_folder(meta, b, k.ad);
     const Config& c = k.cfg;
     if (!l.usable) return false;
@@ -167,7 +150,7 @@ static bool take_folder(RadBuilder* b, const RadModelMeta* meta, const qwen4exp_
 }
 
 /* This rank's copies (the real declare only) handed to the issue sites. */
-static int take_upload(const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva& k) {
+static int take_upload(const RadBuildCtx* ctx, Kva& k) {
     if (!upload_rank(g_loaded, k.ad, k.cfg, ctx->rank, k.want_final)) return RAD_E_DEVICE;
     const kva::Upload& u = g_upload[ctx->rank];
     if (k.cfg.mode == MODE_PLUMB) return RAD_OK;
@@ -189,10 +172,10 @@ static int take_upload(const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva
 static void* g_hazard_dev[MAX_RANKS];
 static float g_hazard_logged[MAX_RANKS];
 
-static int decl_hazard(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva& k) {
+static int decl_hazard(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
     if (k.cfg.mode != MODE_SPEED && k.cfg.mode != MODE_QUALITY) return RAD_OK;
-    for (int64_t l = k.split; l < m.g.n_layer && k.meta_layer < 0; ++l)
-        if (!m.layers[(size_t)l].full) k.meta_layer = (int)l;
+    for (int64_t l = k.split; l < k.ad.n_layer && k.meta_layer < 0; ++l)
+        if (!k.ad.full[(size_t)l]) k.meta_layer = (int)l;
     if (k.meta_layer < 0) return RAD_OK;
     RadKVGroupDecl d{};
     d.kind = RAD_KV_LINEAR;
@@ -219,19 +202,19 @@ static int decl_hazard(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBui
 static int decl_selected(RadBuilder* b, const RadModelMeta* meta, const qwen4exp_fp8::Model& m,
                          const RadBuildCtx* ctx, Kva& k) {
     const bool probe = ctx->shape_probe != 0;
-    if (!take_folder(b, meta, m, k)) return RAD_OK;
+    if (!take_folder(b, meta, k)) return RAD_OK;
     /* THE MTP final map (kva_final.h): only when this deployment drafts, the mode projects, the folder holds
      * it and RADIANCE_KVA_FINAL is not off. Decided from declare-time numbers only. */
     k.want_final = ctx->max_spec > 0 && (k.cfg.mode == MODE_SPEED || k.cfg.mode == MODE_QUALITY) &&
                    g_loaded.has_final && k.cfg.final_on;
-    k.ring_end = m.g.n_layer + (k.want_final ? m.hccfg.hc : 0);
+    k.ring_end = k.ad.n_layer + (k.want_final ? k.ad.wide / k.ad.n_embd : 0);   /* + hc final blocks */
     if (!probe) RAD_ARCH_TRY(check_mode(k, m.g.max_tok));
     if (!probe) RAD_ARCH_TRY(check_fill(k));
-    if (!probe) RAD_ARCH_TRY(take_upload(m, ctx, k));
+    if (!probe) RAD_ARCH_TRY(take_upload(ctx, k));
     if (k.cfg.mode != MODE_PLUMB) RAD_ARCH_TRY(decl_fill(b, ctx, k));
-    const char* missing = decl_masked(b, m, ctx, k);
+    const char* missing = decl_masked(b, ctx, k);
     if (!missing && k.ad.decl_state_ops) missing = k.ad.decl_state_ops(b, ctx, k);
-    if (!missing && decl_hazard(b, m, ctx, k) != RAD_OK) missing = "kva_hazard";
+    if (!missing && decl_hazard(b, ctx, k) != RAD_OK) missing = "kva_hazard";
     if (!missing && k.want_final) missing = decl_final(b, m, ctx, k);
     if (missing && !probe) {
         std::fprintf(stderr, "radiance: qwen4exp_kva: mode %s issues '%s' and no kernel library "
@@ -249,12 +232,12 @@ static int decl_selected(RadBuilder* b, const RadModelMeta* meta, const qwen4exp
  * projector folder's split -- what every other mode calls S -- else RADIANCE_KVA_CAPTURE_SPLIT (a
  * capture fits a projector, so there may be no folder yet). Never the container: nothing kva.* is
  * read from the model file. Declares nothing. */
-static int capture_split(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadModelMeta* meta, Kva& k) {
+static int capture_split(RadBuilder* b, const RadModelMeta* meta, Kva& k) {
     const Loaded& l = load_folder(meta, b, k.ad);
     k.split = l.usable ? l.split : -1;
     const char* v = env("RADIANCE_KVA_CAPTURE_SPLIT");
     if (!l.usable && v && !parse_int(v, &k.split)) k.split = -1;
-    if (k.split <= m.ple_layer || k.split >= m.g.n_layer) {
+    if (k.split < k.ad.split_lo || k.split >= k.ad.n_layer) {
         std::fprintf(stderr, "radiance: qwen4exp_kva: a capture needs the split layer S: there is no "
                              "usable projector folder and RADIANCE_KVA_CAPTURE_SPLIT is %s\n",
                      v ? v : "unset");
@@ -266,14 +249,14 @@ static int capture_split(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadM
 /* THE STATE CAPTURE'S COPY. No ABI call returns a KV-pool pointer (RADIANCE-FACTS §5), so a late
  * layer's slot is copied by kva.so's kva_state_read into this rank's [1, heads, V, K] buffer and
  * read from there. Declared only when RADIANCE_KVA_CAPTURE_STATE is set. */
-static int decl_state_read(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadBuildCtx* ctx, Kva& k) {
-    const GdnFP8::Config& g = m.gcfg;
-    k.b_state = decl_b(b, k.nm.f("kva_state_copy"), RAD_F32, {1, g.n_head_v, g.head_v, g.head_k});
+static int decl_state_read(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
+    const StateShape& g = k.ad.state;
+    k.b_state = decl_b(b, k.nm.f("kva_state_copy"), RAD_F32, {1, g.n_head, g.sd0, g.sd1});
     if (!k.b_state) return RAD_E_INVAL;
     RAD_ARCH_TRY(rad_buf_concurrent(b, k.b_state));
     k.op_state_read = rw(b, RAD_OP(b, "kva_state_read",
-                                RAD_PARAMS(RAD_RANGE("M", 1, 1), RAD_INT("n_head", g.n_head_v),
-                                           RAD_INT("sd0", g.head_v), RAD_INT("sd1", g.head_k)),
+                                RAD_PARAMS(RAD_RANGE("M", 1, 1), RAD_INT("n_head", g.n_head),
+                                           RAD_INT("sd0", g.sd0), RAD_INT("sd1", g.sd1)),
                                 RAD_NOWEIGHTS), {}, {k.b_state});
     if (!k.op_state_read && !ctx->shape_probe) {
         std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE_STATE copies the delta-net "

@@ -924,6 +924,8 @@ TEST(the_adapter_facts_match_the_model) {
                 CHECK_EQ((bool)a.ext_in[(size_t)l], (bool)(lay.full ? lay.attn.ext_in : lay.gdn.ext_in));
                 CHECK_EQ((bool)a.routed[(size_t)l], lay.mlp.c.top_k > 0);
                 CHECK_EQ((bool)a.calibrated[(size_t)l], lay.mlp.op_gram_gu != 0);
+                CHECK(lay.mlp.c.top_k == 0 || lay.mlp.c.top_k == a.top_k);   /* decl_probes' old per-layer max */
+                CHECK(lay.mlp.c.n_expert <= a.n_expert && 2 * lay.mlp.c.n_ff_exp <= 2 * a.n_ff_exp);
             }
         }
     }
