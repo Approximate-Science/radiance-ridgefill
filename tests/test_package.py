@@ -178,11 +178,17 @@ def test_layout_and_sums(inputs, tmp_path):
 
     projector = out / "projector-qwen3.8-flash-next"
     # an exact copy: every input file, byte-identical, nothing missing or extra
+    # (LICENSE and SHA256SUMS are the two additions packaging makes on top)
     for name in sorted(p.name for p in inputs["projector"].iterdir()):
         assert (projector / name).is_file(), name
         assert sha256_file(projector / name) == sha256_file(inputs["projector"] / name), name
-    assert sorted(p.name for p in projector.iterdir() if p.name != "SHA256SUMS") == \
+    assert sorted(p.name for p in projector.iterdir()
+                  if p.name not in ("SHA256SUMS", "LICENSE")) == \
         sorted(p.name for p in inputs["projector"].iterdir())
+    assert (projector / "LICENSE").read_bytes() == \
+        (inputs["repo"] / "LICENSE").read_bytes()
+    sums_lines = (projector / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
+    assert any(line.endswith("  LICENSE") for line in sums_lines)   # LICENSE is summed
     check_sums(projector)
 
     template = out / "kva-chat-template"
@@ -190,7 +196,11 @@ def test_layout_and_sums(inputs, tmp_path):
     assert (template / "kva-marker-spec.json").is_file()
     assert (template / "chat_template.jinja").is_file()
     assert (template / "README.md").is_file()
+    assert (template / "LICENSE").read_bytes() == \
+        (inputs["repo"] / "LICENSE").read_bytes()
     assert "--override-chat-template" in (template / "README.md").read_text(encoding="utf-8")
+    sums_lines = (template / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
+    assert any(line.endswith("  LICENSE") for line in sums_lines)   # LICENSE is summed
     check_sums(template)
 
     for tarball in ("radiance-kva-0.3.0.tar.gz", "projector-qwen3.8-flash-next.tar.gz",
@@ -242,12 +252,25 @@ def test_merged_template_is_snippet_plus_base(inputs, tmp_path):
 
 
 def test_sha_sums_refuse_on_mismatch(inputs, tmp_path):
-    """The packaged plugin's SHA256SUMS must actually catch a changed file."""
+    """The packaged plugin's SHA256SUMS must actually catch a changed file,
+    and so must the projector's and the template's (their LICENSE included)."""
     out = tmp_path / "dist"
     run_packager(inputs, out)
     plugin = out / "radiance-kva-0.3.0"
     (plugin / "README.md").write_text("tampered\n", encoding="utf-8")
     result = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=plugin,
+                            capture_output=True, text=True)
+    assert result.returncode != 0
+
+    projector = out / "projector-qwen3.8-flash-next"
+    (projector / "LICENSE").write_text("tampered license\n", encoding="utf-8")
+    result = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=projector,
+                            capture_output=True, text=True)
+    assert result.returncode != 0
+
+    template = out / "kva-chat-template"
+    (template / "LICENSE").write_text("tampered license\n", encoding="utf-8")
+    result = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=template,
                             capture_output=True, text=True)
     assert result.returncode != 0
 
