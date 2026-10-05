@@ -1,17 +1,17 @@
 /* kva_guard.h -- the engine-release guard (PLAN-FIX §6.6, DD-E, R83).
  *
- * WHY. This plugin compiles the in-tree qwen4exp_fp8.cpp of ONE radiance release and shadows the
- * installed file of that name, so an engine upgraded under it would run last release's Qwen4-Exp
- * against this release's core -- and the KVA paths lean on core behaviour no ABI number covers (the
+ * WHY. An adapter compiles its in-tree architecture source of ONE radiance release and shadows the
+ * installed file of that name (its `so` stem), so an engine upgraded under it would run last release's
+ * model against this release's core -- and the KVA paths lean on core behaviour no ABI number covers (the
  * stager's release rule, stager.cpp:143-144). No ABI call says which release the engine is, so at
  * rad_plugin_open the plugin finds the object that defines rad_issue (dladdr) and requires exactly
  * one NUL-delimited copy of the release string it was built against (RAD_VERSION is compiled into
  * the core as one such string, core/CMakeLists.txt:25). On a mismatch it FORWARDS every export to
- * the engine's own in-tree qwen4exp_fp8.so, found on $RADIANCE_HOME after this plugin's own home:
+ * the engine's own in-tree <so>, found on $RADIANCE_HOME after this plugin's own home:
  * the engine then serves its current architecture with KVA off, which is stock -- loud, never
  * silent. With no in-tree file to forward to (e.g. the home was given only as --radiance-home,
- * which a plugin cannot see) the plugin DECLINES, and startup fails by name for want of a qwen4exp
- * claimant (loader.cpp:425-436). Residual risk, named: a patched build that keeps the release
+ * which a plugin cannot see) the plugin DECLINES, and startup fails by name for want of a claimant
+ * for the architecture (loader.cpp:425-436). Residual risk, named: a patched build that keeps the release
  * string; the engine's sha256 is logged so such a build is identifiable.
  */
 #ifndef KVA_GUARD_H
