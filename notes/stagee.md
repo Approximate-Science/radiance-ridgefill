@@ -191,3 +191,17 @@ README switch table + "Where the projector lives", folder README template. NEXT:
 static-test once no session is measuring; mutants (PLACE/RING not refused; int8 scale/bias offsets in the slot);
 frozen home; engine: off ident, hostring bf16 KL bytes = A′'s hostring rows, int8 ring KL (R79), Stage B's 8192/10
 config starts and serves, int8-ring vs bf16-ring TTFT 9K/16K/32K + bytes/pass + copy time per rank.
+
+## 9. ediag3 (15:41-~16:05Z, home d8f19eb) -- the stock-pass prefill penalty is a SERVER STATE, not a fixed cost
+Held TTFT (every pass the stock step), same protocol as e1, last-5 medians (1K / 2K / 4K / 8K ms):
+stock 814 / 1,233 / 2,529 / 5,010 · plumb held 820 / 1,237 / 2,541 / 5,029 (+0.3%) · speed+host held 830 / 1,260 /
+2,603 / 5,136 (+2.2 / +2.9 / +2.5%) · quality+host held 831 / 1,261 / 2,597 / 5,137 (+2.3 / +2.7 / +2.5%).
+e1's quality+host held (home 7ec3603, 13:38Z) was 777 / 1,451 / 3,014 / 5,954 (+18 / +19 / +19%) with every rep
+flat. The rep sequences explain the gap: ediag3's z-qh-held STARTED in e1's slow state (warm-up 2K 1,452 / 1,448,
+4K 2,916) and dropped to the fast one inside its warm-up (4K 2,759, then 2K 1,260 for all measured reps); e1's ON
+servers (qv, qh, qv-held, qh-held, both rounds) never left the slow state in ~3 min of reps. Stock servers start
+fast. So an ON server can sit in a slow prefill state (+16..19%) that some boots leave within seconds and others
+not for minutes; the steady fast state still costs +2.3..2.9% on stock passes when the projector is held (plumb,
+which holds nothing, +0.3%). OPEN: what the slow state is and what flips it (prime suspects: the expert mover's
+initial placement / heat with the plugin's already-held VRAM, or host-side state) -- the ediag3 prefill profiles
+(pp-exact vs pp-qh-held, --profile-ops) are the first evidence; e1's table above is therefore a slow-state table.
