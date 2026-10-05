@@ -6,7 +6,8 @@
 # A VERSION CHANGE RE-RUNS ONLY THE VERSION-DEPENDENT PART (the measurements never read the version string):
 #   gpuq.sh release-pkg env RK_RELEASE_PARTS="package e2e" RK_RELEASE_VERSION=<x.y.z> RK_RELEASE_DIST=<fresh dir> \
 #       sh scripts/release_session.sh
-# RK_RELEASE_PARTS (default "package e2e headline needle r64") picks the parts; the frozen home of RK_RELEASE_COMMIT (default HEAD)
+# RK_RELEASE_PARTS (default "package e2e headline needle r64") picks the parts (needle rides on the headline's
+# round-RK_RELEASE_NEEDLE_ROUND servers); the frozen home of RK_RELEASE_COMMIT (default HEAD)
 # is reused when it exists; extraction and the e2e work dir are per version (evidence/release/{extract,e2e}-<version>).
 #
 # Every server runs radiance 1.0.13's shipped flashnext profile (RK_RELEASE_FLAGS, below: MTP 3, prefix cache on with
@@ -58,8 +59,12 @@ export RK_DOCS=/var/home/dylan/AI-Work/kva-flashnext-tests-data/samples/quick/pp
 # the prefix cache's disk tier can fill its volume (2026-10-05: 19 GB a server filled /var/mnt/qwen-storage): the
 # cache root is a parameter, one server's dir at a time, removed before the next
 K=${RK_RELEASE_CACHE_ROOT:-$E/kvcache}; mkdir -p "$K"
-fresh_cache() {   # label: a fresh prefix-cache dir for the next server; the previous one's size logged, then removed
+drop_cache() {    # every server's prefix-cache dir goes as soon as the server stops (its size logged first)
   for c in "$K"/*/; do [ -d "$c" ] && { echo "  kvcache $(basename "$c"): $(du -sh "$c" | cut -f1)" >> "$E/kvcache.txt"; rm -rf "$c"; }; done
+}
+fresh_cache() {   # label: a fresh prefix-cache dir for the next server, the volume's free space logged first
+  drop_cache
+  echo "  $1: $(df -h --output=avail "$K" | tail -1 | tr -d ' ') free on the cache volume ($K)" >> "$E/kvcache.txt"
   export RK_CACHE_DIR=$K/$1; mkdir -p "$RK_CACHE_DIR"
 }
 export RK_FLAGS="$RK_RELEASE_FLAGS" RK_SERVE_SEQS=default RK_E2E_SEQS=default RK_STAGE=release
@@ -108,36 +113,13 @@ log "e2e exit $rc: $(grep -E '^e2e: case' "$E/e2e-$RK_RELEASE_VERSION.out" | sed
 klog
 fi
 
-# 3 headline -------------------------------------------------------------------------------------------
-arm() {   # label mode: serve, warm, time, decode (stock/quality)
-  label=$1 mode=$2
-  q=$(quiet); fresh_cache "$label"
-  if env RK_DOCKER_EXTRA="$MOUNT" scripts/serve.sh "$mode" > "$E/serve-$label.out" 2>&1; then
-    python3 tools/settle.py --out "$E/warm-$label.json" --docs "$RK_DOCS" --cycles 3 --lengths "2048 16384 32768" > "$E/warm-$label.txt" 2>&1
-    RK_LENGTHS="16384 32768" RK_REPS=7 scripts/speed.sh "$label" > "$E/speed-$label.out" 2>&1 || log "$label: speed.sh FAILED"
-    [ "$mode" = speed ] || python3 tools/mtp_accept.py --docs "$RK_DOCS" --reps 3 --out "$E/decode-$label.json" > "$E/decode-$label.txt" 2>&1
-    docker logs "radiance-kva-$mode" > "$E/$label.serve.log" 2>&1
-    log "== $label ($mode; $q) $(grep -m1 -oE 'I\[0\] mover: [0-9]+ slab slots' "$E/$label.serve.log")"
-    sed 's/^/    warm /' "$E/warm-$label.txt" | tee -a "$E/session.log"
-    log "    $(grep -E 'median' "$E/speed-$label.out" | tr -s ' ' | tr '\n' '|')"
-    [ -f "$E/decode-$label.txt" ] && log "    decode: $(tail -1 "$E/decode-$label.txt"); $(grep -o 'decode [0-9.]* ms/tok' "$E/decode-$label.txt" | tr '\n' ' ')"
-  else log "== $label: serve FAILED -- $(tail -2 "$E/serve-$label.out" | tr '\n' '|')"
-       docker logs "radiance-kva-$mode" > "$E/$label.serve.log" 2>&1; fi
-  scripts/stop.sh > /dev/null 2>&1; klog
-}
-if has headline; then
-  for a in ${RK_RELEASE_ARMS:-exact-a quality-a speed-a exact-b quality-b speed-b}; do arm "$a" "${a%-*}"; done
-fi
-
-# 4 needle: its own three servers; chat prompts (the template's user turn, thinking off), max_tokens 32 -------------
+# 3 + 4 headline, and the needle on round RK_RELEASE_NEEDLE_ROUND's servers (default b) ------------------
+# The needle prompts are chat prompts (the template's user turn, thinking off), max_tokens 32; stock builds the corpus
+# and must pass the 6-item smoke gate at 16K (>= 5/6, the tail control right) before any full run.
 N=$E/needle; mkdir -p "$N"
-needle_serve() {   # mode
-  fresh_cache "needle-$1"
-  env RK_DOCKER_EXTRA="$MOUNT" scripts/serve.sh "$1" > "$N/serve-$1.out" 2>&1 || { log "needle $1: serve FAILED"; return 1; }
-}
-needle_stop() { docker logs "radiance-kva-$1" > "$N/$1.serve.log" 2>&1; scripts/stop.sh > /dev/null 2>&1; klog; }
-if has needle; then
-  if needle_serve exact; then
+NEEDLE_OK=0
+needle_on() {   # mode (its server is up)
+  if [ "$1" = exact ]; then
     for s in 1 2 3; do
       python3 tools/needle.py build --chat --docs "$RK_DOCS" --lengths 16384,32768 --depths 0.10,0.30,0.50,0.70,0.85,0.98 \
         --keys 4 --seed $s --out "$N/corpus-s$s.jsonl" > "$N/build-s$s.out" 2>&1 || log "needle build FAILED (seed $s)"
@@ -147,19 +129,35 @@ if has needle; then
     python3 tools/needle.py run --corpus "$N/smoke.jsonl" --out "$N/smoke-exact.jsonl" --max-tokens 32 > "$N/smoke-exact.out" 2>&1
     gate=$(python3 tools/needle_merge.py --gate "$N/smoke-exact.jsonl")
     log "needle smoke (stock, 6 items at 16K): $gate"
-    case "$gate" in
-      PASS*) python3 tools/needle.py run --corpus "$N/corpus.jsonl" --out "$N/results-exact.jsonl" --max-tokens 32 > "$N/run-exact.out" 2>&1
-             log "needle exact: $(tail -1 "$N/run-exact.out")"; needle_stop exact
-             for m in quality speed; do
-               needle_serve $m && python3 tools/needle.py run --corpus "$N/corpus.jsonl" --out "$N/results-$m.jsonl" --max-tokens 32 > "$N/run-$m.out" 2>&1
-               log "needle $m: $(tail -1 "$N/run-$m.out")"; needle_stop $m
-             done
-             for m in quality speed; do
-               log "== needle stock vs $m"; python3 tools/needle.py compare "$N/results-exact.jsonl" "$N/results-$m.jsonl" 2>&1 | tee "$N/compare-$m.txt" | head -40 | tee -a "$E/session.log"
-             done ;;
-      *) log "needle: STOPPED at the smoke gate (stock must score >= 5/6 with the tail item right)"; needle_stop exact ;;
-    esac
-  else needle_stop exact; fi
+    case "$gate" in PASS*) NEEDLE_OK=1 ;; *) log "needle: STOPPED at the smoke gate"; return 0 ;; esac
+  fi
+  [ "$NEEDLE_OK" = 1 ] || return 0
+  python3 tools/needle.py run --corpus "$N/corpus.jsonl" --out "$N/results-$1.jsonl" --max-tokens 32 > "$N/run-$1.out" 2>&1
+  log "    needle $1: $(tail -1 "$N/run-$1.out")"
+}
+arm() {   # label mode: serve, warm, time, decode (stock/quality), the needle on its round
+  label=$1 mode=$2
+  q=$(quiet); fresh_cache "$label"
+  if env RK_DOCKER_EXTRA="$MOUNT" scripts/serve.sh "$mode" > "$E/serve-$label.out" 2>&1; then
+    python3 tools/settle.py --out "$E/warm-$label.json" --docs "$RK_DOCS" --cycles 3 --lengths "2048 16384 32768" > "$E/warm-$label.txt" 2>&1
+    RK_LENGTHS="16384 32768" RK_REPS=7 scripts/speed.sh "$label" > "$E/speed-$label.out" 2>&1 || log "$label: speed.sh FAILED"
+    [ "$mode" = speed ] || python3 tools/mtp_accept.py --docs "$RK_DOCS" --reps 3 --out "$E/decode-$label.json" > "$E/decode-$label.txt" 2>&1
+    log "== $label ($mode; $q) $(docker logs "radiance-kva-$mode" 2>&1 | grep -m1 -oE 'I\[0\] mover: [0-9]+ slab slots')"
+    sed 's/^/    warm /' "$E/warm-$label.txt" | tee -a "$E/session.log"
+    log "    $(grep -E 'median' "$E/speed-$label.out" | tr -s ' ' | tr '\n' '|')"
+    [ -f "$E/decode-$label.txt" ] && log "    decode: $(tail -1 "$E/decode-$label.txt"); $(grep -o 'decode [0-9.]* ms/tok' "$E/decode-$label.txt" | tr '\n' ' ')"
+    has needle && [ "${label##*-}" = "${RK_RELEASE_NEEDLE_ROUND:-b}" ] && needle_on "$mode"
+  else log "== $label: serve FAILED -- $(tail -2 "$E/serve-$label.out" | tr '\n' '|')"; fi
+  docker logs "radiance-kva-$mode" > "$E/$label.serve.log" 2>&1
+  scripts/stop.sh > /dev/null 2>&1; drop_cache; klog
+}
+if has headline; then
+  for a in ${RK_RELEASE_ARMS:-exact-a quality-a speed-a exact-b quality-b speed-b}; do arm "$a" "${a%-*}"; done
+fi
+if [ "$NEEDLE_OK" = 1 ]; then
+  for m in quality speed; do
+    log "== needle stock vs $m"; python3 tools/needle.py compare "$N/results-exact.jsonl" "$N/results-$m.jsonl" 2>&1 | tee "$N/compare-$m.txt" | head -40 | tee -a "$E/session.log"
+  done
 fi
 
 # 5 ----------------------------------------------------------------------------------------------------
@@ -176,7 +174,7 @@ r64() {   # label mode extra-flags
     python3 tools/turn2.py run --conv "$R/conv.json" --dump "$R/dump-$label" --out "$R/manifest-$label.json" > "$R/run-$label.out" 2>&1
     log "R64 $label: $(tr '\n' '|' < "$R/run-$label.out")"
   else log "R64 $label: serve FAILED"; fi
-  docker logs "radiance-kva-$mode" > "$R/$label.serve.log" 2>&1; scripts/stop.sh > /dev/null 2>&1; klog
+  docker logs "radiance-kva-$mode" > "$R/$label.serve.log" 2>&1; scripts/stop.sh > /dev/null 2>&1; drop_cache; klog
 }
 r64 exact off ""
 r64 cache quality ""

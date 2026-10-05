@@ -262,6 +262,7 @@ e2e_serve() {
     e_args=$E2E_LOGS/$e_name.cmd
     if [ -n "${RK_E2E_CACHE_ROOT:-}" ]; then   # a fresh prefix-cache dir per case (mounted at /kvcache)
         RK_CACHE_DIR=$RK_E2E_CACHE_ROOT/$e_name; mkdir -p "$RK_CACHE_DIR"; export RK_CACHE_DIR
+        e2e_ev "$e_name" "prefix cache $RK_CACHE_DIR, $(df -h --output=avail "$RK_E2E_CACHE_ROOT" | tail -1 | tr -d ' ') free on its volume"
     fi
     {
         printf '%s\n' -d --name "$e_container"
@@ -310,6 +311,7 @@ e2e_serve() {
             e2e_die "docker logs failed for $e_container"
         e2e_ev "$e_name" "container log: logs/$e_name.log"
         docker rm "$e_container" >/dev/null 2>&1 || true
+        e2e_drop_cache "$e_name"
         e_new=''
         for e_c in $E2E_STARTED; do [ "$e_c" = "$e_container" ] || e_new="$e_new $e_c"; done
         E2E_STARTED=${e_new# }
@@ -333,6 +335,14 @@ e2e_serve() {
     e2e_ev "$e_name" "server up: container $e_container, port $RK_PORT, mode $e_mode"
 }
 
+# e2e_drop_cache NAME -- with RK_E2E_CACHE_ROOT, the case's prefix-cache dir goes as soon as its server is gone
+# (the disk tier can fill a volume: one server's cache at a time)
+e2e_drop_cache() {
+    [ -n "${RK_E2E_CACHE_ROOT:-}" ] && [ -d "$RK_E2E_CACHE_ROOT/$1" ] || return 0
+    e2e_ev "$1" "prefix cache removed: $(du -sh "$RK_E2E_CACHE_ROOT/$1" | cut -f1)"
+    rm -rf "$RK_E2E_CACHE_ROOT/$1"
+}
+
 # e2e_stop NAME -- capture the container's whole log (the evidence the log checks grep),
 # then stop and remove it.
 e2e_stop() {
@@ -344,6 +354,7 @@ e2e_stop() {
         e2e_die "docker stop failed for $e_container"
     docker rm "$e_container" >/dev/null ||
         e2e_die "docker rm failed for $e_container"
+    e2e_drop_cache "$1"
     e_new=''
     for e_c in $E2E_STARTED; do [ "$e_c" = "$e_container" ] || e_new="$e_new $e_c"; done
     E2E_STARTED=${e_new# }
