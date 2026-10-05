@@ -69,7 +69,8 @@ static int declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* c
     note_meta_mode(k.cfg, ctx);
     for (auto [name, dir] : { std::pair<const char*, std::string*>{"RADIANCE_KVA_DUMP", &k.dump_dir},
                               {"RADIANCE_KVA_CAPTURE", &k.capture_dir},
-                              {"RADIANCE_KVA_CAPTURE_STATE", &k.state_dir} }) {
+                              {"RADIANCE_KVA_CAPTURE_STATE", &k.state_dir},
+                              {"RADIANCE_KVA_DUMP_LOGITS", &k.logits_dir} }) {
         const char* v = std::getenv(name);
         *dir = v ? v : "";
     }
@@ -349,6 +350,10 @@ static void step(RadCtx* c, const RadBatch* batch) {
     if (approx && rad_rank(c) == 0) log_pass(k, batch, p);
     if (states) finish_state(c, k, batch, sd, approx);
     if (mixed_states) capture_mixed(c, k, batch, approx);
+    if (!k.logits_dir.empty() && batch->n_out > 0 && batch->draft_pass == 0) {
+        const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
+        dump_logits(c, k.logits_dir, batch, m.b_logits, m.g.n_vocab, rad_rank(c));
+    }
 }
 
 /* The in-tree probe's answers hold here: the draft depth is the model's, and this declare writes

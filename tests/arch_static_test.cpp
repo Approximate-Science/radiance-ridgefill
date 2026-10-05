@@ -2152,6 +2152,31 @@ TEST(a_mixed_step_capture_copies_every_sequences_late_states_after_the_step) {
     }
 }
 
+/* Gate 1's instrument -- RADIANCE_KVA_DUMP_LOGITS writes, after a pass with output rows, each rank's
+ * logits rows and what each row is (its sequence by cu_seqlens, position, token), in any mode, off
+ * included, and changes nothing the step issues. */
+TEST(the_logits_dump_names_each_rows_sequence_and_changes_no_issue) {
+    TempDir dir;
+    REQUIRE(!dir.path.empty());
+    Env e({{"RADIANCE_KVA_DUMP_LOGITS", dir.path.c_str()}});
+    Pair p;
+    declare_pair(p, "off");
+    REQUIRE_EQ(p.st, RAD_OK);
+    Batch x = make_step(p.kva, {{1, 1, 128}, 2, 0});
+    static int32_t out_ids[3] = {0, 1, 129};
+    x.b.n_out = 3;
+    x.b.out_ids = out_ids;
+    const Run got = run_step(qwen4exp_kva::step, x.b);
+    CHECK_EQ(differ(got.issues, run_step(qwen4exp_fp8::step, x.b).issues), 0);
+    const std::string lines = slurp(dir.path / "logits.jsonl");
+    CHECK_EQ(count(lines, "\n"), 1);
+    CHECK(has(lines, "\"rows\": [[0, 0, 0, 4096, 1000], [1, 1, 1, 4096, 1001], [2, 129, 2, 4223, 1129]]"));
+    std::string descr;
+    const std::filesystem::path f = find_file(dir.path, "logits.p", ".r0.npy");
+    REQUIRE(!f.empty());
+    CHECK(npy_shape(f, &descr) == std::vector<int64_t>({3, qwen4exp_fp8::g_model[0].g.n_vocab}));
+}
+
 /* Speed declares the projector per late layer and one quantiser, after the whole in-tree graph and
 
 /* Every op a serving mode adds is declared after the whole in-tree graph and nothing in between:
