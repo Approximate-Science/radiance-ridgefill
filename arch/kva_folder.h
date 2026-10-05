@@ -123,7 +123,7 @@ inline FolderPlace find_folder() {
             f.how = "beside the resolved model file " + f.container;
             return f;
         }
-        f.how += (f.how.empty() ? "" : ", ") + cand;
+        if (f.how != cand) f.how += (f.how.empty() ? "" : ", ") + cand;   /* typed dir == resolved dir */
     }
     if (f.container.empty()) f.how += (f.how.empty() ? "" : "; ") + std::string("no model file is mapped");
     return f;
