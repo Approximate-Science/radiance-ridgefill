@@ -39,7 +39,10 @@ namespace kva {
 using namespace rad::arch;
 
 /* How many times "\0<version>\0" occurs in the file, or -1 when it cannot be read. Streams the
- * file in 1 MiB blocks, keeping the pattern's length minus one bytes across each boundary. */
+ * file in 1 MiB blocks, keeping the pattern's length minus one bytes across each boundary. The guard
+ * wants exactly one: zero is another release, and two would be a build that carries a second release
+ * string for some other reason, which it will not guess about. Cost: one read of the engine object at
+ * open (tens of MiB, page cache after the engine's own load). */
 inline int count_version(const char* path, const char* version) {
     FILE* f = std::fopen(path, "rb");
     if (!f) return -1;
@@ -84,6 +87,8 @@ inline std::string releases_in(const char* path) {
 }
 
 /* ---------------------------------------------------------------- SHA-256 (FIPS 180-4) */
+/* Its own, because the core may lean on nothing the engine image might not ship: the guard logs the
+ * engine's hash so a patched build is identifiable, and kva_folder.h checks every projector file. */
 
 inline void sha256_block(uint32_t h[8], const unsigned char* p) {
     static const uint32_t K[64] = {

@@ -1,6 +1,12 @@
 /* qwen4exp_adapter.h -- the qwen4exp side of the core/adapter split (notes/adapter-split-spec.md §1.2):
- * every fact the core reads, taken from the in-tree model after its declare. Included by
- * qwen4exp_kva.cpp after <qwen4exp_fp8/qwen4exp_fp8.cpp>, so `qwen4exp_fp8::Model` is complete here.
+ * every fact the core reads, taken from the in-tree model after its declare (adapter_of, at the end),
+ * and every hook body: the declare-side ops only a gated delta net and a routed MoE have, then the
+ * step-side pieces that issue this model's blocks. Included by qwen4exp_kva.cpp after
+ * <qwen4exp_fp8/qwen4exp_fp8.cpp> and the core, so `qwen4exp_fp8::Model` and `kva::Kva` are complete.
+ *
+ * Every hook reads g_model[rank] -- the model the REAL declare filled -- also under a sizing declare,
+ * exactly as the plugin did before the split: the in-tree declare writes a sizing declare's model to
+ * scratch, and the layer schedule and head counts read here do not depend on max_tok.
  */
 #ifndef QWEN4EXP_ADAPTER_H
 #define QWEN4EXP_ADAPTER_H
@@ -110,6 +116,11 @@ inline void conn(RadCtx* c, int64_t li, bool ffn, bool write, int64_t T, int64_t
     dbg_resid(c, (int)li, ffn ? "ffn" : "mix", m.g.n_embd, m.b_h, m.a_x.x);
 }
 
+/* Layer li's block on an approximate pass. LEAN issues only what writes the caches (the attention's K/V
+ * and indexer keys, or the delta net's projections and its corrected scan): nothing reads a bulk row's
+ * block output, so none is computed. MASKED runs the in-tree block over every row, the delta net's last
+ * sequence corrected. STRADDLE and DECODERS run the window [r0, r0 + rows) whole -- the tail, or the
+ * decoders -- and the rest lean, which is where speed mode's saving beside other rows comes from. */
 inline void late_block(RadCtx* c, const Kva& k, int64_t li, const RadBatch* batch, const Pass& p,
                        StateDump* sd, Path path, int64_t r0, int64_t rows) {
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
@@ -137,6 +148,8 @@ inline void late_block(RadCtx* c, const Kva& k, int64_t li, const RadBatch* batc
     else                            gdn_decoders(c, k, m, li, batch, p, sd);
 }
 
+/* Layer li's MoE over rows [r0, to), issued by hand (qwen4exp_moe.h) so that, given the drop op and the
+ * mask, the bulk rows' routing slots are emptied: a dropped slot's expert is neither staged nor read. */
 inline void ffn(RadCtx* c, const Kva&, int64_t li, const RadBatch* batch, int64_t r0, int64_t to, rad_op drop,
                 rad_buf mask) {
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
@@ -205,7 +218,8 @@ inline MoeArm probe_arm(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m) {
     return arm;
 }
 
-/* The hooks over them: this rank's model, as the declare filled it. */
+/* The hooks over them: this rank's model, as the declare filled it. stock_layer carries the probes on the
+ * one layer the core names (S - probe_depth of a streaming pass); every other layer is the in-tree one. */
 inline void prologue_hook(RadCtx* c, const RadBatch* batch) { prologue(c, qwen4exp_fp8::g_model[rad_rank(c)], batch); }
 inline void epilogue_hook(RadCtx* c, const RadBatch* batch) { epilogue(c, qwen4exp_fp8::g_model[rad_rank(c)], batch); }
 inline void stock_layer(RadCtx* c, const Kva& k, int64_t li, const RadBatch* batch, bool probes) {
@@ -280,7 +294,8 @@ inline void capture_mixed(RadCtx* c, const Kva& k, const RadBatch* batch, bool a
 /* The fit facts the method was measured at on this model (KVA-FACTS §5). */
 constexpr int64_t kAdapterMinTail = 512, kAdapterDefaultTail = 2048;
 
-/* Rank `m`'s facts. Read after qwen4exp_fp8::declare has filled `m`; the buffers are this rank's. */
+/* Rank `m`'s facts. Read after qwen4exp_fp8::declare has filled `m`; the buffers are this rank's. Once
+ * a declare (a few hundred bytes of per-layer arrays), never on the step path. */
 inline KvaAdapter adapter_of(const qwen4exp_fp8::Model& m) {
     KvaAdapter a;
     a.log_name = "qwen4exp_kva";

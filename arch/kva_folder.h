@@ -48,7 +48,8 @@ struct FolderPlace {
     std::string container;  /* the resolved model file, empty when none is mapped */
 };
 
-/* The first mapped file that starts with the container magic, or empty. */
+/* The first mapped file that starts with the container magic, or empty. Opens each distinct mapped
+ * file once to read 4 bytes -- a few hundred opens, once per process at the first declare. */
 inline std::string mapped_container() {
     std::ifstream maps("/proc/self/maps");
     std::string line, last;
@@ -68,7 +69,8 @@ inline std::string mapped_container() {
     return std::string();
 }
 
-/* The argument after `--model` on the command line, as typed; empty when there is none. */
+/* The argument after `--model` on the command line, as typed; empty when there is none. A plugin is
+ * handed no argv, so it reads the process's own. */
 inline std::string typed_model() {
     std::ifstream f("/proc/self/cmdline", std::ios::binary);
     const std::string all((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
@@ -84,6 +86,8 @@ inline std::string typed_model() {
     return std::string();
 }
 
+/* By device and inode, not by name: the typed path may be a symlink (a Hugging Face snapshot) or a bind
+ * mount of the file the engine resolved and mapped. */
 inline bool same_file(const std::string& a, const std::string& b) {
     struct stat x {}, y {};
     return stat(a.c_str(), &x) == 0 && stat(b.c_str(), &y) == 0 && x.st_dev == y.st_dev &&
@@ -140,6 +144,8 @@ struct FolderTensor {
     int64_t              bytes = 0;
 };
 
+/* The folder as read: tensors point into the files' read-only mappings and are never copied here --
+ * the one copy is each rank's upload (kva_projector.h). */
 struct Folder {
     FolderPlace place;
     Json        manifest;
@@ -185,6 +191,7 @@ inline const unsigned char* map_file(const std::string& path, size_t* size) {
     return (const unsigned char*)p;
 }
 
+/* The dtypes tools/kva_projector.py writes; any other tensor refuses the folder (RAD_DT_INVALID). */
 inline uint32_t safetensors_dtype(const std::string& s) {
     if (s == "BF16") return RAD_BF16;
     if (s == "F32")  return RAD_F32;
@@ -194,7 +201,9 @@ inline uint32_t safetensors_dtype(const std::string& s) {
     return RAD_DT_INVALID;
 }
 
-/* One safetensors file's tensors into f->tensors; false and *why on any malformation. */
+/* One safetensors file's tensors into f->tensors; false and *why on any malformation. Each tensor's byte
+ * span must equal its shape times its dtype and lie inside the file: a truncated or hand-edited file is
+ * refused here, before a GEMM could read past a mapping. */
 inline bool read_safetensors(const std::string& name, const unsigned char* p, size_t size,
                              Folder* f, std::string* why) {
     uint64_t hlen = 0;
@@ -253,12 +262,15 @@ inline bool read_folder(Folder* f, std::string* why) {
     std::vector<std::string> got(n);
     for (size_t i = 0; i < n; ++i) {
         const std::string& name = files->obj[i].first;
+        /* a bare file name only: a manifest must not reach outside its folder */
         if (name.find('/') != std::string::npos || !(data[i] = map_file(dir + "/" + name, &size[i]))) {
             *why = "the manifest lists " + name + ", which is missing or unreadable in " + dir;
             return false;
         }
         f->file_bytes += (int64_t)size[i];
     }
+    /* One thread a file: the hashes are read-bound on a cold page cache, and ~30 files hash in about the
+     * time of the largest. */
     std::vector<std::thread> pool;
     for (size_t i = 0; i < n; ++i)
         pool.emplace_back([&, i] { got[i] = sha256_bytes(data[i], size[i]); });

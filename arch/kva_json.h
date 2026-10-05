@@ -2,6 +2,11 @@
  * safetensors file's header. A reader, nothing more: objects, arrays, strings (with \u escapes),
  * numbers, true/false/null. Malformed text is refused, never guessed at -- a folder whose manifest
  * does not parse is "no projector" (PACKAGING.md §0).
+ *
+ * Its own reader because the core is header-only and compiled into each adapter's .so: it may lean
+ * only on radiance's installed headers and the C++ library, never on a library the engine image might
+ * not carry. The texts are small (a manifest of ~30 files, a safetensors header of a few KiB), so the
+ * tree is plain values and vectors, built once at load.
  */
 #ifndef KVA_JSON_H
 #define KVA_JSON_H
@@ -18,6 +23,7 @@ namespace kva {
 
 using namespace rad::arch;
 
+/* One value. Objects keep their members in text order (the manifest's file list is reported in it). */
 struct Json {
     enum Kind { NUL, BOOL, NUM, STR, ARR, OBJ };
     Kind kind = NUL;
@@ -40,13 +46,16 @@ struct Json {
         const Json* v = get(key);
         return v && v->kind == STR ? v->str : std::string(dflt);
     }
-    /* A numeric member as an integer, or `dflt`. */
+    /* A numeric member as an integer, or `dflt`. Truncates: every integer a manifest or header carries
+     * (split, format, offsets, shape dims) is far below 2^53, where a double stops being exact. */
     int64_t integer(const char* key, int64_t dflt) const {
         const Json* v = get(key);
         return v && v->kind == NUM ? (int64_t)v->num : dflt;
     }
 };
 
+/* A recursive-descent reader over [p, end). Depth is capped at 64: a folder is input from disk, and a
+ * crafted manifest must be refused, not overflow the declare's stack. */
 struct JsonReader {
     const char* p;
     const char* end;
@@ -147,6 +156,8 @@ struct JsonReader {
         else if (lit("false")) { v.kind = Json::BOOL; }
         else if (lit("null")) { v.kind = Json::NUL; }
         else {
+            /* strtod needs a terminated string and the text is not one; no JSON number a reader of
+             * these files meets is longer than 64 characters. */
             const std::string num(p, (size_t)std::min<ptrdiff_t>(end - p, 64));
             char* stop = nullptr;
             v.kind = Json::NUM;
