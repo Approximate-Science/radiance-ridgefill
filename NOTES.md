@@ -81,3 +81,29 @@ Corpus: `tools/kld_corpus.py`, docs cut to 3×8,192 / 4×16,384 / 2×32,768 toke
 - **R19 (fill only)** — `evidence/stage3/speed-fill.json`, same boot: 4,928 / 6,419 / 10,163 ms median →
   **1.20x / 1.56x / 1.95x**. H3-fill-ttft (1.3–1.7x at 16K) **confirmed**. 150 approximate steps logged = 6 requests ×
   (3 + 7 + 15) bulk chunks.
+
+## Stages 3–5 engine gates (GATES lane; plugin home `data/home-f60f893`; full detail `notes/gates.md`)
+Same boot as the KL reference throughout; kernel log clean; profiled runs never used for TTFT.
+
+| arm | ppl ratio | ΔNLL vs exact [95% CI] | top-1 | KL mean / p99 | TTFT 9,216 / 16,384 / 32,768 ms (speedup) |
+|---|---|---|---|---|---|
+| exact | 1.0000 | — | 100% | 1.15e-7 / 6.9e-7 | 5,923 / 10,003 / 19,789 |
+| fill | 1.0636 | +0.0617 [0.044, 0.080] | 87.21% | 0.0818 / 0.624 | 5,422 / 6,357 / 10,107 (1.09 / 1.57 / 1.96x) |
+| fill + st | 1.0442 | +0.0432 [0.028, 0.060] | 87.46% | 0.0770 / 0.578 | 4,871 / 6,374 / 10,117 (1.22 / 1.57 / 1.96x) |
+| swapped heads | 1.0717 | +0.0692 [0.050, 0.089] | 86.27% | 0.0982 / 0.730 | — |
+| quality (class 25%) | 1.0238 | +0.0236 [0.012, 0.036] | 88.32% | 0.0677 / 0.506 | 7,441 / 10,972 / 20,687 (**0.80 / 0.91 / 0.96x**) |
+| random rows | 1.0287 | +0.0283 [0.016, 0.041] | 88.39% | 0.0655 / 0.504 | — |
+| all rows | 1.0000 | 0 (byte-identical) | 100% | 1.15e-7 / 6.9e-7 | — |
+
+Green: R16, R17 (mean cosine 0.986, median 0.989, min 0.818; 11% of rows < 0.98 — passes the mean criterion, not the
+per-row wording), R20 device (546 checks, 0 differ), R22, R23, R24, R26 (projector half), R35, R36, R37, R38, R39
+(Jaccard 0.917), R41; Q6 (concurrent buffers 0 MiB; quality +15 MiB; projector 1.22 GiB static a rank = −1,090 resident
+experts, −6.5%); Q14 (late MoE at M=512 touches ~150–160 of 512 experts per layer; ~385 cap rows are zero padding
+routed to experts 0–9). **Red: R40 — quality mode is slower than exact.** Measured host→device per KL run: exact 428 GiB,
+speed+st 291, quality 516 (flat in rows selected: none 515, all 529) → the expert stager copies every late layer's pooled
+experts on a >1,024-token step even though the compacted pass routes ~30% of experts. Under investigation (ARCH).
+Verdicts: H4-st-paired confirmed (−0.0185 [−0.0218, −0.0147], 9/9 docs improve); H4-st-nll refuted (+4.42%, just above
++1.5…+4%); H4-swap confirmed (worse, +0.0075 [0.0036, 0.0113]); H4-st-ttft confirmed on op timing (0.99 ms/chunk,
+≤0.3%); H5-quality-vs-speed confirmed (−0.0197 [−0.0250, −0.0141]); H5-quality-nll refuted (+2.38% > +1.5%);
+H5-class-vs-random refuted on size (−0.0047 [−0.0094, −0.0005], CI excludes 0 so R37 passes); H5-rows-share confirmed
+(5.61%); H5-jaccard refuted high (0.917 > 0.9); H5-quality-ttft refuted (0.91x).
