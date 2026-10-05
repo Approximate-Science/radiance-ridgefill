@@ -96,14 +96,13 @@ what a capture writes.
 | `RADIANCE_KVA_ALPHA` | 0..1, default 1 | correction strength |
 | `RADIANCE_KVA_ROWSEL` | `class`, `random`, `all` | quality mode's exact-row rule |
 | `RADIANCE_KVA_SHARE` | (0, 1], default 0.25 | share of a window's class matches kept exact |
-| `RADIANCE_KVA_PROJECTOR` | a directory | the projector folder, ahead of `projector/` beside the model |
-| `RADIANCE_KVA_PROJ_PLACE` | `vram` (default), `host` | where the projector maps live. `vram` costs 1.2 GiB of each card (~970 fewer resident expert slots a rank); `host` keeps them in host-mapped memory and copies each late layer's map into one of two VRAM slots (100 MiB a card) ahead of its GEMM, so approximated chunks run slower: measured quality TTFT +6% at 16K and +10% at 32K against `vram`, which at 16K is level with exact (+2.5%, CI includes 0), at 32K still 25% faster than exact (notes/aprime.md, R148) |
-| `RADIANCE_KVA_PROJ_RING` | `1` (default), `0` | gate-only: `0` lets the GEMM read the host maps in place -- measured 2.7x SLOWER than exact (every M tile re-reads the map over the link); do not serve with it |
+| `RADIANCE_KVA_PROJECTOR` | a directory | the projector folder, ahead of `projector/` beside the model. A folder built by `tools/kva_projector.py int8 --from <bf16 folder> --out <dir>` holds the maps in int8 (the container trunk's own `i8*bf16[1x128]` encoding, 0.65 GiB instead of 1.23 GiB, half the bytes each approximated chunk streams); point this switch at it to use it |
+| `RADIANCE_KVA_FINAL` | `on` (default), `off` | with MTP on (`--num-speculative-tokens` > 0) and a folder holding the `final` map (`tools/kva_projector.py final`), each approximated chunk predicts its bulk rows' final stream, which the drafting head reads (+210 MB a chunk over the link, +200 MiB host memory, a 50 MiB slot even with int8 maps); `off` is the control |
 | `RADIANCE_KVA_ROWSEL_TABLE` | `class`/`none`/`all` | which of the folder's row tables quality mode uses (`none`/`all` are controls) |
 | `RADIANCE_KVA_STAGE` | `auto` (default), `stock` | the expert-stager lever: `auto` lets the late layers stream only their routed experts on an approximate pass (notes/impl.md §2); `stock` leaves staging as it is |
 | `RADIANCE_KVA_STAGE_ROWS` | rows | `auto` streams only when the pass has at most this many exact rows, else the pass runs the stock step. Default: no limit -- measured on warmed servers, streaming beats the stock step by 220-240 ms a straddling chunk at 512-1,984 exact rows, and a 64-row limit cost 331 ms at 9,216 and ran every T 2560 chunk exact (notes/impl.md, Stage A.1 R96) |
 | `RADIANCE_KVA_SCORE_BULK` | `1` | KL mode (`--kld-ref`) serves stock unless set: logits on approximated rows are not the model's, so set it only when scoring the exact tail |
-| `RADIANCE_KVA_MIN_BULK_ROWS` | rows | a pass approximates only with at least this many bulk rows, else it runs the stock step. Default 1,024 with the projector in host memory (0 only for a `vram` placement): every approximate pass streams the whole projector, and the 64-row checkpoint remainders a prompt alternates with beside decoders cost 208-222 ms approximated vs 61-92 ms stock -- decoders riding them got 2.2-3.5x slower (notes/stageb.md session 2c) |
+| `RADIANCE_KVA_MIN_BULK_ROWS` | rows | a pass approximates only with at least this many bulk rows, else it runs the stock step. Default 1,024 (the projector is always in host memory): every approximate pass streams the whole projector, and the 64-row checkpoint remainders a prompt alternates with beside decoders cost 208-222 ms approximated vs 61-92 ms stock -- decoders riding them got 2.2-3.5x slower (notes/stageb.md session 2c) |
 | `RADIANCE_KVA_STRADDLE`, `RADIANCE_KVA_FORCE_SPLIT`, `RADIANCE_KVA_SHIFT_B`, `RADIANCE_KVA_FORCE_STREAM`, `RADIANCE_KVA_MASK` | `split`/`end`, rows, ±rows, `1`, `all` | gate-only debug switches (R50, R47, R51, R94; `MASK=all` approximates every row before the bulk end, decoders included -- R54's negative control, speed/quality only); each is said loudly at startup |
 | `RADIANCE_KVA_TAIL_ONLY` | `1` (default), `0` | gate-only debug switch: `0` makes speed-mode straddling chunks -- and speed chunks beside decoders -- take the masked path instead of the tail-only / decoders path (their oracles, A.1 and Stage B) |
 | `RADIANCE_KVA_DUMP_LOGITS` | a directory | debug only, synchronises: every live pass's logits rows on every rank, each named by sequence/position/token (Stage B gate 1, `tools/logit_compare.py`); run with `--profile-ops` so no pass is replayed |
@@ -112,11 +111,26 @@ what a capture writes.
 | `RADIANCE_KVA_CAPTURE_STATE` | a directory | refit/debug only: on every single-sequence prefill chunk, copies whatever late delta-net state the step did not already record, one file per (chunk, rank). Unlike `RADIANCE_KVA_CAPTURE`, the code does NOT refuse it with the mode on -- it is accepted in any mode |
 | `RADIANCE_KVA_CAPTURE_SPLIT` | a layer index | refit/debug only: the split layer S a capture uses when no usable projector folder exists (a capture fits a projector, so there may be no folder yet); declares nothing; without a folder, startup refuses unless it names a layer between the PLE and the last (`arch/kva_declare_masked.h`) |
 | `RADIANCE_KVA_PROJ`, `RADIANCE_KVA_ST`, `RADIANCE_KVA_DECLARE` | -- | retired with the container append; refused by name |
+| `RADIANCE_KVA_PROJ_PLACE`, `RADIANCE_KVA_PROJ_RING` | -- | retired: the projector is always streamed from host memory (below); refused by name |
+
+**Where the projector lives:** in host memory, always. Each rank holds the maps, its correction heads and the row
+table in one host-mapped block (1.2 GiB bf16, 0.6 GiB int8) and ONE VRAM slot the size of one late layer's map
+(50 MiB bf16, 25.4 MiB int8); on every approximated chunk, as soon as layer L's GEMM has read the slot, the second
+lane copies layer L+1's map into it while the rest of layer L computes. Every request pays that slot and the
+plugin's arena buffers in resident experts (the layer-S stream, kept with bf16 maps or MTP only, and the projected
+inputs), so they are kept as small as the pass allows (notes/stagee.md §14).
+Keeping the maps in VRAM instead (an earlier option, removed) cost ~1,100 expert slots a card and made a
+configuration stock radiance serves refuse to start (`--max-num-batched-tokens 8192 --max-num-seqs 10`: the pinned
+pool overflowed), and the plugin cannot see the engine's budget when it declares (notes/stagee.md §8).
 
 A mode with no usable projector serves stock and says why. A configuration that cannot run refuses at
 startup by name (tail of two steps less a tile or more, kva.so missing, or libr4d not loaded -- kva.so's
 `kva_gemm_nt_bias` forwards to libr4d's `gemm_nt_bias` row). Each approximate step logs one `kva: approximate step` line
 (rank 0) with the numbers it was decided from.
+
+**Images and video:** a step that runs the vision encoder, holds media rows or has rows whose rotary components
+differ runs the stock step; the text chunks after it are approximated again, at their rotary positions (which run
+behind the token index after an image), exactly where the stock step reads them. Draft-head passes always run stock.
 
 **A shorter step for a long tail, with no plugin change:** `--checkpoint-interval` below
 `--max-num-batched-tokens` gives each request smaller chunks while `n_ahead` stays capped at the step, at the

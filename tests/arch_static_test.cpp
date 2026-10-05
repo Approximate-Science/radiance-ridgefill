@@ -344,6 +344,7 @@ qwen4exp_kva::Folder g_test_folder;
 /* The plugin forgets every folder and copy; the next declare looks again (every case starts so). */
 void reset_projector() {
     qwen4exp_kva::g_folder_for_test = nullptr;
+    qwen4exp_kva::g_i8_rows_for_test = nullptr;
     qwen4exp_kva::g_loaded = qwen4exp_kva::Loaded{};
     qwen4exp_kva::free_uploads();
     g_mem.copies.clear();
@@ -417,12 +418,26 @@ void served(RadBuilder& b) {
 
 /* setenv for one case, undone on scope exit, so cases cannot leak switches into each other. */
 struct Env {
-    std::vector<std::string> set;
-    Env(std::initializer_list<std::pair<const char*, const char*>> kv) {
-        for (const auto& [k, v] : kv) { setenv(k, v, 1); set.push_back(k); }
+    std::vector<std::pair<std::string, std::string>> saved;   /* name, value before ("\x01" = unset) */
+    Env(std::initializer_list<std::pair<const char*, const char*>> kv) {   /* a null value unsets */
+        for (const auto& [k, v] : kv) {
+            const char* old = std::getenv(k);
+            saved.push_back({k, old ? old : "\x01"});
+            if (v) setenv(k, v, 1);
+            else   unsetenv(k);
+        }
     }
-    ~Env() { for (const auto& k : set) unsetenv(k.c_str()); }
+    ~Env() {
+        for (auto it = saved.rbegin(); it != saved.rend(); ++it)
+            if (it->second == "\x01") unsetenv(it->first.c_str());
+            else                       setenv(it->first.c_str(), it->second.c_str(), 1);
+    }
 };
+
+/* The static cases run chunks of 64 to 2,048 rows; the planner's default gate (RADIANCE_KVA_MIN_BULK_ROWS,
+ * 1,024 bulk rows: a host-streamed projector's fixed cost) would send the small ones to the stock step. The
+ * suite runs with it off, as it did before the gate; the gate and its default are their own case. */
+[[maybe_unused]] const int g_min_bulk_off = setenv("RADIANCE_KVA_MIN_BULK_ROWS", "0", 1);
 
 /* What a call wrote to stderr: the refusals are fprintf'd, as the in-tree plugin's are. */
 std::string stderr_of(const std::function<void()>& fn) {
@@ -481,7 +496,7 @@ void check_same_graph(const RadBuilder& a, const RadBuilder& b) {
  * TP2 deployment, with the MTP head declared, for a bf16 container and for the served formats. */
 TEST(off_declares_exactly_the_in_tree_graph) {
     RadModelMeta meta = flash_next_meta();
-    for (int world : {1, 2})
+    for (int world : {1, 2, 4})   /* TP4 too (R87): a world this box cannot run */
         for (int rank = 0; rank < world; ++rank)
             for (int spec : {0, 3})
                 for (bool fmt : {false, true}) {
@@ -689,6 +704,19 @@ TEST(the_container_routes_switches_are_refused_by_name) {
         CHECK_EQ(st, RAD_E_INVAL);
         CHECK(has(log, (std::string(name) + "=all is retired with the container append").c_str()));
     }
+    /* Retired with the vram placement (Dylan, Stage E): any value, the documented ones included. */
+    for (auto [name, value] : {std::pair<const char*, const char*>{"RADIANCE_KVA_PROJ_PLACE", "vram"},
+                               {"RADIANCE_KVA_PROJ_PLACE", "host"}, {"RADIANCE_KVA_PROJ_RING", "1"},
+                               {"RADIANCE_KVA_PROJ_RING", "0"}}) {
+        RadBuilder kva;
+        hold_kva(kva, {"kva.proj", "kva.st"});
+        Env env({{"RADIANCE_KVA", "quality"}, {name, value}});
+        int st = RAD_OK;
+        const std::string log = stderr_of([&] { st = qwen4exp_kva::declare(&kva, &meta, &c); });
+        CHECK_EQ(st, RAD_E_INVAL);
+        CHECK(has(log, (std::string(name) + "=" + value + " is retired: the projector is always streamed "
+                        "from host memory through the staging ring").c_str()));
+    }
 }
 
 
@@ -721,8 +749,9 @@ TEST(speed_takes_the_folder_and_declares_its_kernel_ops) {
     CHECK_EQ(undo, 3);    /* delta-net layers 4, 5, 6 */
     CHECK_EQ(apply, 3);
     CHECK_EQ(gemm, 8 - kSplit);
-    /* 4 maps + 4 biases + 3 corrections, no row table (speed reads none) */
-    CHECK_EQ(g_mem.copies.size(), (size_t)(2 * (8 - kSplit) + 3));
+    /* no VRAM copies: the maps, biases and corrections are written into the host block on the host; the
+     * VRAM block is the ring's one slot */
+    CHECK_EQ(g_mem.copies.size(), (size_t)0);
     for (int l = 0; l < 8; ++l) {
         CHECK_EQ(k.proj_w[(size_t)l].kind == RAD_OPK_RAW, l >= kSplit);
         CHECK_EQ(k.st[(size_t)l].kind == RAD_OPK_RAW, l >= kSplit && l != 7);
@@ -732,7 +761,7 @@ TEST(speed_takes_the_folder_and_declares_its_kernel_ops) {
     RadBuilder again;
     hold_appended_weights(again);
     CHECK_EQ(qwen4exp_kva::declare(&again, &meta, &c), RAD_OK);
-    CHECK_EQ(g_mem.copies.size(), (size_t)(2 * (8 - kSplit) + 3));
+    CHECK_EQ(g_mem.copies.size(), (size_t)0);
 }
 
 /* What each RAW operand points at is the copy of exactly its tensor: the projector map [n, hc*n]
@@ -741,7 +770,7 @@ TEST(speed_takes_the_folder_and_declares_its_kernel_ops) {
  * aligned in one block. At TP2, each rank its own block. */
 TEST(the_raw_operands_point_at_their_tensors_copies) {
     RadModelMeta meta = flash_next_meta();
-    for (int world : {1, 2})
+    for (int world : {1, 2, 4})   /* TP4 (R87): each rank 12 of the 48 value heads */
         for (int rank = 0; rank < world; ++rank) {
             RadBuildCtx c = served_ctx(rank, world);
             Env env({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_ROWSEL_TABLE", "all"}});
@@ -762,36 +791,42 @@ TEST(the_raw_operands_point_at_their_tensors_copies) {
                 return nullptr;
             };
             auto src = [&](const std::string& n) { return g_test_folder.tensors[n].data; };
+            const qwen4exp_kva::Upload& up = qwen4exp_kva::g_upload[rank];
+            const int64_t row = 10240 * 2;
             for (int l = kSplit; l < 8; ++l) {
                 const std::string L = std::to_string(l);
                 const RadOperand& w = k.proj_w[(size_t)l];
-                const Upload* uw = copy_of(w);
-                const Upload* ub = copy_of(k.proj_b[(size_t)l]);
-                REQUIRE(uw && ub);
-                CHECK(uw->src == src("proj." + L + ".weight") && uw->bytes == 2560LL * 10240 * 2);
+                /* the GEMM reads the slot this layer takes turns on; the ring copies the layer's host
+                 * row block there: the map's 2,560 rows, then the bias in row 2,560 */
                 CHECK(w.dtype == RAD_BF16 && w.rows == 2560 && w.cols == 10240);
-                CHECK(ub->src == src("proj." + L + ".bias") && ub->bytes == 2560 * 2);
+                CHECK((uintptr_t)w.raw >= kFakeVram && (uintptr_t)w.raw == (uintptr_t)k.ring_dst[(size_t)l].raw);
+                CHECK_EQ((uintptr_t)k.proj_b[(size_t)l].raw, (uintptr_t)w.raw + 2560u * row);
                 CHECK_EQ(((uintptr_t)w.raw - kFakeVram) % 256, 0u);
+                const unsigned char* block = (const unsigned char*)k.ring_src[(size_t)l].raw - kDeviceView;
+                CHECK(block >= (const unsigned char*)up.host && block < (const unsigned char*)up.host + up.host_bytes);
+                CHECK(std::memcmp(block, src("proj." + L + ".weight"), 2560 * row) == 0);
+                CHECK(std::memcmp(block + 2560 * row, src("proj." + L + ".bias"), 2560 * 2) == 0);
                 if (l == 7) continue;
-                const Upload* us = copy_of(k.st[(size_t)l]);
-                REQUIRE(us != nullptr);
-                CHECK(us->src == src("st." + L) + rank * heads * 4);
-                CHECK_EQ(us->bytes, heads * 4);
+                /* this rank's value heads of the correction, in the host block, read through its device view */
+                const unsigned char* st = (const unsigned char*)k.st[(size_t)l].raw - kDeviceView;
+                CHECK(st >= (const unsigned char*)up.host && st + heads * 4 <= (const unsigned char*)up.host + up.host_bytes);
+                CHECK(std::memcmp(st, src("st." + L) + rank * heads * 4, (size_t)heads * 4) == 0);
                 CHECK(k.st[(size_t)l].rows == m.gcfg.n_head_v && k.st[(size_t)l].cols == m.gcfg.head_v * m.gcfg.head_k);
             }
-            const Upload* sc = copy_of(k.score);
-            REQUIRE(sc != nullptr);
-            CHECK(sc->src == src("score_all") && sc->bytes == 248320 * 4 && k.score.rows == 248320);
+            const unsigned char* sc = (const unsigned char*)k.score.raw - kDeviceView;
+            CHECK(sc >= (const unsigned char*)up.host && sc + 248320 * 4 <= (const unsigned char*)up.host + up.host_bytes);
+            CHECK(std::memcmp(sc, src("score_all"), 248320 * 4) == 0 && k.score.rows == 248320);
+            CHECK(g_mem.copies.empty());
         }
 }
 
-/* RADIANCE_KVA_PROJ_PLACE=host: the projector maps go to host-mapped memory (written on the host,
- * read through its device view), nothing of them to VRAM; the correction and the row table stay
- * in VRAM. */
-TEST(host_placement_puts_the_maps_in_host_mapped_memory) {
+/* The projector maps live in host-mapped memory (written on the host, read through its device view by
+ * the ring's copy), nothing of them in VRAM but the two ring slots; the correction and the row table
+ * stay in VRAM. */
+TEST(the_maps_live_in_host_mapped_memory) {
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
-    Env env({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_PROJ_PLACE", "host"}, {"RADIANCE_KVA_PROJ_RING", "0"}});
+    Env env({{"RADIANCE_KVA", "quality"}});
     RadBuilder kva;
     served(kva);
     hold_kva(kva, {"kva.proj", "kva.st"});
@@ -799,16 +834,17 @@ TEST(host_placement_puts_the_maps_in_host_mapped_memory) {
     const int hosts = g_mem.host;
     const std::string log = stderr_of([&] { CHECK_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK); });
     CHECK_EQ(g_mem.host, hosts + 1);
-    CHECK_EQ(g_mem.copies.size(), (size_t)(3 + 1));   /* corrections + row table */
+    CHECK(g_mem.copies.empty());   /* the corrections and the row table are host-block pieces too */
     const qwen4exp_kva::Upload& u = qwen4exp_kva::g_upload[0];
     const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
     for (int l = kSplit; l < 8; ++l) {
-        const uintptr_t w = (uintptr_t)k.proj_w[(size_t)l].raw;
+        const uintptr_t w = (uintptr_t)k.ring_src[(size_t)l].raw;
         CHECK(w >= (uintptr_t)u.host + kDeviceView && w < (uintptr_t)u.host + kDeviceView + (uintptr_t)u.host_bytes);
     }
-    CHECK_EQ(u.host_bytes, (int64_t)(8 - kSplit) * (2560LL * 10240 * 2 + 2560 * 2));   /* 256-aligned already */
-    CHECK(has(log, "MiB host-mapped (RADIANCE_KVA_PROJ_PLACE=host)"));
-    CHECK((uintptr_t)k.st[kSplit].raw >= kFakeVram && (uintptr_t)k.score.raw >= kFakeVram);
+    CHECK(u.host_bytes >= (int64_t)(8 - kSplit) * (2561LL * 10240 * 2) + 3 * (24LL * 128 * 128 * 4) + 248320 * 4);
+    CHECK_EQ(u.vram_bytes, 2561LL * 10240 * 2);   /* the ring's one slot, nothing else */
+    CHECK(has(log, "MiB host-mapped (bf16 maps, correction, row table)"));
+    CHECK((uintptr_t)k.st[kSplit].raw >= (uintptr_t)u.host + kDeviceView && (uintptr_t)k.score.raw >= (uintptr_t)u.host + kDeviceView);
 }
 
 /* ==================================================================== the masked path: declare */
@@ -1024,7 +1060,7 @@ TEST(the_planner_straddles_only_in_speed) {
  * 64-row checkpoint remainder runs the stock step when the projector lives in host memory (every
  * approximate pass streams the whole projector), the 1,984-row chunk beside it still approximates;
  * the bound is inclusive and is the bulk superset b - s_lb, a keyed number. Plumb (the oracle) is
- * never held back. Defaults: 0 with the projector in VRAM, 1,024 in host memory, the switch over both. */
+ * never held back. Default 1,024 (the projector is always in host memory); the switch overrides it. */
 TEST(a_host_placed_projector_approximates_only_passes_with_enough_bulk_rows) {
     using namespace qwen4exp_kva;
     PlanIn in;
@@ -1040,14 +1076,14 @@ TEST(a_host_placed_projector_approximates_only_passes_with_enough_bulk_rows) {
         in.n_tok = 1 + c.bulk; in.q_prefill = c.bulk;
         CHECK_EQ(plan_pass(in, pc).path, c.path);
     }
-    for (auto [place, want] : {std::pair<const char*, int64_t>{"vram", 0}, {"host", 1024}}) {
-        Env e({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_PROJ_PLACE", place}});
+    {
+        Env e({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_MIN_BULK_ROWS", nullptr}});
         Config cfg;
         RadModelMeta meta = flash_next_meta();
         REQUIRE_EQ(read_config(&meta, &cfg), RAD_OK);
-        CHECK_EQ(cfg.min_bulk_rows, want);
+        CHECK_EQ(cfg.min_bulk_rows, 1024);
     }
-    Env e({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_PROJ_PLACE", "host"}, {"RADIANCE_KVA_MIN_BULK_ROWS", "0"}});
+    Env e({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_MIN_BULK_ROWS", "0"}});
     Config cfg;
     RadModelMeta meta = flash_next_meta();
     REQUIRE_EQ(read_config(&meta, &cfg), RAD_OK);
@@ -1150,7 +1186,8 @@ TEST(the_stage_switch_and_threshold_gate_the_lever) {
 /* ==================================================================== issue sequences */
 
 struct Run {
-    std::vector<RecIssue> issues;
+    std::vector<RecIssue> issues;   /* the KVA step's without the staging ring's lanes and copies */
+    std::vector<RecIssue> all;      /* every issue, the ring's included */
     std::string           log;
     int                   device_calls = 0;
     std::vector<std::pair<const void*, size_t>> reads;
@@ -1164,7 +1201,14 @@ Run run_step(void (*step)(RadCtx*, const RadBatch*), const RadBatch& b, int rank
     g_ctx = &c;
     r.log = stderr_of([&] { step(&c, &b); });
     g_ctx = nullptr;
-    r.issues = c.issues;
+    r.all = c.issues;
+    /* THE RING IS ALWAYS ON (the projector streams from host memory), and the in-tree oracle has no
+     * ring: the KVA step's lane switches, joins and copies are set aside here and checked on their
+     * own (the_staging_ring_copies_each_map_a_layer_ahead_on_lane_1). Its op is declared after the
+     * whole in-tree graph, so no in-tree handle can share its number. */
+    const rad_op ring = step == qwen4exp_kva::step ? qwen4exp_kva::g_kva[rank].op_ring : 0;
+    for (const RecIssue& i : c.issues)
+        if (i.op != kLane && i.op != kJoin && (!ring || i.op != ring)) r.issues.push_back(i);
     r.device_calls = c.device_calls;
     r.reads = c.reads;
     return r;
@@ -1654,7 +1698,7 @@ TEST(speed_beside_decoders_runs_full_late_blocks_over_the_decoder_rows_only) {
  * the tail-only issues above; the epilogue stock. TP1 and rank 0 of TP2 (writes carry the
  * all-reduce). */
 TEST(a_speed_straddle_runs_its_late_blocks_over_the_tail_rows_only) {
-    for (int world : {1, 2}) {
+    for (int world : {1, 2, 4}) {
         Pair p;
         declare_pair(p, "speed", 0, world);
         REQUIRE_EQ(p.st, RAD_OK);
@@ -2293,7 +2337,7 @@ TEST(speed_adds_its_ops_after_the_in_tree_graph) {
     CHECK_EQ(n["quant_act_i8g"], 1);
     CHECK_EQ(n["kva_state_correct"], 2 * 3);
     CHECK_EQ(n["kva_mask"], 1);
-    CHECK_EQ(n["cast"], 1);
+    CHECK_EQ(n["cast"], 2);   /* the layer-S stream into h_S, and the staging ring's copy (always on) */
     CHECK_EQ(n["kva_select"], 1);
     CHECK_EQ(n["kva_drop_rows"], 1);
     CHECK_EQ(n["moe_gemm_q"], 0);
@@ -2462,7 +2506,6 @@ TEST(a_mode_whose_kva_op_no_kernel_serves_is_refused_by_name) {
 TEST(a_switch_with_an_unknown_value_is_refused_naming_the_values) {
     struct Case { const char* name; const char* value; const char* allowed; };
     for (const Case& c : {Case{"RADIANCE_KVA", "fast", "off|plumb|speed|quality"},
-                          Case{"RADIANCE_KVA_PROJ_PLACE", "gpu", "vram|host"},
                           Case{"RADIANCE_KVA_ROWSEL_TABLE", "rare", "class|none|all"},
                           Case{"RADIANCE_KVA_STAGE", "never", "auto|stock"},
                           Case{"RADIANCE_KVA_STRADDLE", "middle", "split|end"},
@@ -2601,14 +2644,14 @@ TEST(the_forward_table_starts_empty) {
     CHECK(qwen4exp_kva::find_shadowed("").empty() || std::getenv("RADIANCE_HOME") != nullptr);
 }
 
-/* THE STAGING RING (DD-L): with host placement, each late layer's map + bias row block is copied
- * into one of two VRAM slots on lane 1 -- layer S's at the start of the pass, layer li+1's right
- * before layer li's GEMM, behind a join that waits for the GEMM two layers back to have been handed
- * to lane 0 -- and lane 0 waits for a layer's copy before its GEMM, which reads that slot. */
+/* THE STAGING RING (DD-L, one slot since Stage E): each late layer's map + bias row block is copied
+ * into the ring's one VRAM slot on lane 1 -- layer S's at the start of the pass, layer li+1's right
+ * after layer li's GEMM, behind a join that waits for that GEMM to have been handed to lane 0 -- and
+ * lane 0 waits for a layer's copy before its GEMM, which reads the slot. */
 TEST(the_staging_ring_copies_each_map_a_layer_ahead_on_lane_1) {
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
-    Env env({{"RADIANCE_KVA", "speed"}, {"RADIANCE_KVA_PROJ_PLACE", "host"}});
+    Env env({{"RADIANCE_KVA", "speed"}});
     RadBuilder kva;
     served(kva);
     hold_kva(kva, {"kva.proj", "kva.st"});
@@ -2618,10 +2661,12 @@ TEST(the_staging_ring_copies_each_map_a_layer_ahead_on_lane_1) {
     REQUIRE(k.op_ring != 0);
     CHECK_EQ(kva.ops[k.op_ring - 1].op, std::string("cast"));
     const int64_t block = 2561LL * 10240 * 2;
-    CHECK_EQ(u.host_bytes, (8 - kSplit) * block);
+    /* the row blocks, then this rank's correction heads (a few MiB) */
+    CHECK(u.host_bytes > (8 - kSplit) * block && u.host_bytes < (8 - kSplit) * block + (16 << 20));
+    CHECK_EQ(u.vram_bytes, block);
     for (int l = kSplit; l < 8; ++l) {
         const uintptr_t slot = (uintptr_t)k.proj_w[(size_t)l].raw, other = (uintptr_t)k.proj_w[(size_t)(l ^ 1)].raw;
-        CHECK(slot >= kFakeVram && slot != other);
+        CHECK(slot >= kFakeVram && slot == other);   /* one slot, every layer in turn */
         CHECK_EQ((uintptr_t)k.proj_b[(size_t)l].raw, slot + 2560u * 10240 * 2);
         CHECK_EQ((uintptr_t)k.ring_dst[(size_t)l].raw, slot);
         CHECK_EQ(k.ring_src[(size_t)l].rows, 2561);
@@ -2630,7 +2675,7 @@ TEST(the_staging_ring_copies_each_map_a_layer_ahead_on_lane_1) {
     Batch bk = make_step(kva, {{2048}, 0, 2048});   /* a lean speed pass */
     const Run r = run_step(qwen4exp_kva::step, bk.b);
     std::vector<std::string> seq;   /* the ring's events and the projector GEMMs, in issue order */
-    for (const RecIssue& i : r.issues) {
+    for (const RecIssue& i : r.all) {
         if (i.op == kLane) seq.push_back("lane" + std::to_string(i.n));
         else if (i.op == kJoin) seq.push_back("join" + std::to_string(i.n / 16) + std::to_string(i.n % 16));
         else if (i.op == k.op_ring) {
@@ -2641,14 +2686,464 @@ TEST(the_staging_ring_copies_each_map_a_layer_ahead_on_lane_1) {
         } else if (i.op && i.op == k.op_proj[(size_t)kSplit]) seq.push_back("gemm4");
         else for (int x = kSplit + 1; x < 8; ++x) if (i.op == k.op_proj[(size_t)x]) seq.push_back("gemm" + std::to_string(x));
     }
+    /* one slot: lane 0 waits for layer l's copy, its GEMM reads the slot, then lane 1 (after lane 0) copies
+     * layer l + 1 into it */
     const std::vector<std::string> want = {
         "join01", "lane1", "copy4", "lane0",
-        "join10", "join01", "lane1", "copy5", "lane0", "gemm4",
-        "join10", "join01", "lane1", "copy6", "lane0", "gemm5",
-        "join10", "join01", "lane1", "copy7", "lane0", "gemm6",
+        "join10", "gemm4", "join01", "lane1", "copy5", "lane0",
+        "join10", "gemm5", "join01", "lane1", "copy6", "lane0",
+        "join10", "gemm6", "join01", "lane1", "copy7", "lane0",
         "join10", "gemm7" };
     CHECK(seq == want);
     if (seq != want) for (const std::string& e : seq) std::fprintf(stderr, " %s", e.c_str());
+}
+
+/* ==================================================================== the int8 projector (R79) */
+
+/* FAKE INT8 GEMM ROWS, standing in for kva.so's forwards of libr4d's: each describes a stored form
+ * 256 bytes longer than the plane (so a copy's size shows whether the hook was asked) and writes
+ * every plane byte XOR 0x5A, then 0x77 padding. `tag` lets two rows disagree. */
+struct FakeI8 { int layouts = 0, relayouts = 0; const char* tag = "test.i8"; } g_fake_i8;
+
+long long param(const RadParam* p, int n_p, const char* key) {
+    for (int i = 0; i < n_p; ++i) if (!std::strcmp(p[i].key, key)) return p[i].ival;
+    return 0;
+}
+int fake_i8_layout(const RadParam* p, int n_p, int opd, const RadEncoding* enc, const int* sel,
+                   const RadTensor* pl, int n, RadLayout* out) {
+    ++g_fake_i8.layouts;
+    const bool ok = n == 1 && (opd == 2 || opd == 3) && enc->plane[sel[0]].dtype == (opd == 2 ? RAD_I8 : RAD_BF16) &&
+                    param(p, n_p, "group") == 128 && pl[0].shape[0] == param(p, n_p, "N");
+    if (!ok) return RAD_E_DTYPE;
+    *out = RadLayout{};
+    out->tag = opd == 2 ? g_fake_i8.tag : "test.i8.scale";
+    out->bytes = rad_dtype_bytes(pl[0].dtype, pl[0].shape[0] * pl[0].shape[1]) + 256;
+    return RAD_OK;
+}
+int fake_i8_relayout(const RadParam* p, int n_p, int opd, const RadEncoding* enc, const int* sel,
+                     const RadTensor* pl, int n, void* dst, int64_t bytes) {
+    RadLayout L;
+    const char* tag = g_fake_i8.tag;
+    if (fake_i8_layout(p, n_p, opd, enc, sel, pl, n, &L) != RAD_OK || L.bytes != bytes) return RAD_E_SHAPE;
+    g_fake_i8.tag = tag;
+    ++g_fake_i8.relayouts;
+    const unsigned char* s = (const unsigned char*)pl[0].data;
+    for (int64_t i = 0; i < bytes; ++i) ((unsigned char*)dst)[i] = i < bytes - 256 ? (unsigned char)(s[i] ^ 0x5A) : 0x77;
+    return RAD_OK;
+}
+RadKernelInfo fake_i8_row(const char* name) {
+    RadKernelInfo k{};
+    k.name = name;
+    k.op = "kva_gemm_nt_q";
+    k.domain = RAD_DOMAIN_DEVICE;
+    k.layout = fake_i8_layout;
+    k.relayout = fake_i8_relayout;
+    return k;
+}
+RadKernelInfo g_i8_m16 = fake_i8_row("fake_i8_m16"), g_i8_tiled = fake_i8_row("fake_i8_tiled");
+std::vector<const RadKernelInfo*> g_i8_rows = { &g_i8_m16, &g_i8_tiled };
+
+/* hold_kva's folder with the maps in int8 (codes + scale + the bf16 bias) and the manifest saying
+ * so; the fake int8 rows stand in for kva.so. */
+void hold_kva_i8(RadBuilder& b) {
+    hold_kva(b, {"kva.st"});
+    const std::string text = std::string(R"({"format": 1, "adapter": "qwen4exp", "split": 4,
+        "projector": {"dtype": "i8", "layout": "i8_row128"},
+        "model": {"arch_id": "qwen4exp", "name": "test-q38-flashnext",
+                  "meta": {"hc_count": "4", "linear_num_value_heads": "48"},
+                  "vocab_sha256": ")") + kTinyVocab + R"("},
+        "files": {"proj8.L4.safetensors": "unused by the test folder"}})";
+    g_test_folder.manifest = qwen4exp_kva::Json{};
+    qwen4exp_kva::json_parse(text.data(), text.size(), &g_test_folder.manifest);
+    for (int l = kSplit; l < 8; ++l) {
+        const std::string L = std::to_string(l);
+        add_tensor("proj." + L + ".codes", RAD_I8, {2560, 4 * 2560});
+        add_tensor("proj." + L + ".scale", RAD_BF16, {2560, 4 * 2560 / 128});
+        add_tensor("proj." + L + ".bias", RAD_BF16, {2560});
+    }
+    g_fake_i8 = FakeI8{};
+    qwen4exp_kva::g_i8_rows_for_test = &g_i8_rows;
+}
+
+/* The int8 folder's declare: the quantiser over the stream, the bias add, one int8 GEMM a late layer
+ * (no bf16 GEMM), the stream's codes and scales taking the whole program; each map copied in the
+ * stored form the GEMM rows' hooks made (their size, their bytes), shaped as the GEMM reads it. */
+TEST(an_int8_folder_uploads_its_maps_in_the_gemms_stored_form) {
+    RadModelMeta meta = flash_next_meta();
+    RadBuildCtx c = served_ctx();
+    Env env({{"RADIANCE_KVA", "quality"}});
+    RadBuilder kva;
+    served(kva);
+    hold_kva_i8(kva);
+    hold_score(kva, "kva.rowsel.score");
+    int64_t at = 0;   /* distinct source bytes per tensor */
+    for (auto& [name, t] : g_test_folder.tensors) { t.data = tensor_bytes() + at; at += 256; }
+    const std::string log = stderr_of([&] { CHECK_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK); });
+    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+    REQUIRE(k.int8);
+    std::map<std::string, int> n;
+    for (const RecOp& o : kva.ops) {
+        ++n[o.op];
+        if (o.op != "kva_gemm_nt_q") continue;
+        CHECK(o.w.empty());
+        for (const RecParam& q : o.p) {
+            if (q.key == "M") CHECK(q.kind == RAD_P_RANGE && q.ival == 1 && q.ihi == 2048);
+            if (q.key == "N") CHECK_EQ(q.ival, 2560);
+            if (q.key == "K") CHECK_EQ(q.ival, 10240);
+            if (q.key == "group") CHECK_EQ(q.ival, 128);
+            if (q.key == "dtype") CHECK_EQ(q.sval, std::string("i8a8"));
+        }
+    }
+    CHECK_EQ(n["kva_gemm_nt_q"], 8 - kSplit);
+    CHECK_EQ(n["kva_gemm_nt_bias"], 0);
+    CHECK_EQ(kva.ops[k.op_quant8 - 1].op, std::string("quant_act_i8g"));
+    CHECK_EQ(kva.ops[k.op_bias - 1].op, std::string("add"));
+    for (const RecParam& q : kva.ops[k.op_quant8 - 1].p) if (q.key == "n") CHECK_EQ(q.ival, 10240);
+    for (const RecParam& q : kva.ops[k.op_bias - 1].p) if (q.key == "n") CHECK_EQ(q.ival, 2560);
+    CHECK_EQ(kva.bufs[k.b_q8 - 1].second.dtype, (uint32_t)RAD_I8);
+    CHECK_EQ(kva.bufs[k.b_s8 - 1].second.dtype, (uint32_t)RAD_F32);
+    CHECK(kva.concurrent.count(k.b_q8) && kva.concurrent.count(k.b_s8));
+    CHECK_EQ(g_fake_i8.relayouts, 2 * (8 - kSplit));
+    /* The row block, from the hook's sizes (each 256 bytes past the plane): codes at 0, scales at the
+     * next 256-byte boundary, the bias after them; whole rows of hc*n bf16. */
+    const int64_t codes = 2560LL * 10240 + 256, scales = 2560LL * 80 * 2 + 256;
+    const int64_t scale_at = (codes + 255) / 256 * 256, bias_at = (scale_at + scales + 255) / 256 * 256;
+    const int64_t rows = (bias_at + 5120 + 20479) / 20480;
+    auto relaid = [](const unsigned char* got, const unsigned char* src, int64_t plane) {
+        bool ok = true;
+        for (int64_t i = 0; i < plane + 256 && ok; ++i) ok = got[i] == (i < plane ? (unsigned char)(src[i] ^ 0x5A) : 0x77);
+        return ok;
+    };
+    for (int l = kSplit; l < 8; ++l) {
+        const std::string L = std::to_string(l);
+        const RadOperand &w = k.proj_w[(size_t)l], &sc = k.proj_s[(size_t)l], &b = k.proj_b[(size_t)l];
+        CHECK(w.dtype == RAD_I8 && w.rows == 2560 && w.cols == 10240 && w.raw == k.ring_dst[(size_t)l].raw);
+        CHECK(sc.dtype == RAD_BF16 && sc.rows == 2560 && sc.cols == 80);
+        CHECK_EQ((uintptr_t)sc.raw, (uintptr_t)w.raw + (uintptr_t)scale_at);
+        CHECK_EQ((uintptr_t)b.raw, (uintptr_t)w.raw + (uintptr_t)bias_at);
+        CHECK_EQ(k.ring_src[(size_t)l].rows, rows);
+        CHECK_EQ(k.ring_dst[(size_t)l].rows, rows);
+        const unsigned char* block = (const unsigned char*)k.ring_src[(size_t)l].raw - kDeviceView;
+        CHECK(relaid(block, g_test_folder.tensors["proj." + L + ".codes"].data, 2560LL * 10240));
+        CHECK(relaid(block + scale_at, g_test_folder.tensors["proj." + L + ".scale"].data, 2560LL * 80 * 2));
+        CHECK(std::memcmp(block + bias_at, g_test_folder.tensors["proj." + L + ".bias"].data, 5120) == 0);
+    }
+    CHECK(has(log, "(int8 maps, correction, row table)"));
+    CHECK(kva.notes.size() && has(kva.notes.back(), "(int8, streamed from host)"));
+}
+
+/* Each issue as text, with this declare's handles named: the KVA ops by role, every other op and
+ * buffer by its declared name (op names numbered by occurrence), projector memory as "vram". Two
+ * declares of different folders then compare op for op although their handles are numbered apart. */
+std::vector<std::string> named(const std::vector<RecIssue>& v, const RadBuilder& b, const qwen4exp_kva::Kva& k) {
+    std::map<rad_op, std::string> ops;
+    std::map<std::string, int> seen;
+    for (size_t i = 0; i < b.ops.size(); ++i) ops[(rad_op)(i + 1)] = b.ops[i].op + "#" + std::to_string(seen[b.ops[i].op]++);
+    for (int l = kSplit; l < 8; ++l) ops[k.op_proj[(size_t)l]] = "PROJ" + std::to_string(l);
+    if (k.op_quant8) ops[k.op_quant8] = "QUANT8";
+    if (k.op_bias) ops[k.op_bias] = "BIAS";
+    std::vector<std::string> out;
+    for (const RecIssue& r : v) {
+        if (r.op && r.op == k.op_ring) {   /* the row block differs by dtype: the layer it moves is what matters */
+            int l = -1;
+            for (int x = kSplit; x < 8; ++x) if (r.opd[1].raw == k.ring_dst[(size_t)x].raw && r.opd[0].raw == k.ring_src[(size_t)x].raw) l = x;
+            out.push_back("RING layer " + std::to_string(l));
+            continue;
+        }
+        std::string t = (ops.count(r.op) ? ops[r.op] : std::to_string(r.op)) + " n" + std::to_string(r.n);
+        for (const RadOperand& o : r.opd) {
+            const bool vram = o.kind == RAD_OPK_RAW && (uintptr_t)o.raw >= kFakeVram && (uintptr_t)o.raw < kFakeVramEnd;
+            t += " |" + std::to_string(o.kind) + "/" + std::to_string(o.dtype) + "/";
+            t += o.kind == RAD_OPK_BUF && o.handle ? b.bufs[o.handle - 1].first : vram ? std::string("vram")
+               : std::to_string(o.handle) + "@" + std::to_string((uintptr_t)o.raw);
+            t += "/" + std::to_string(o.offset) + "/" + std::to_string(o.rows) + "/" + std::to_string(o.cols);
+        }
+        out.push_back(t);
+    }
+    return out;
+}
+
+/* A buffer operand of declare `from` re-pointed at the buffer of the same name in declare `to`. */
+RadOperand rebuf(RadOperand o, const RadBuilder& from, const RadBuilder& to) {
+    if (o.kind != RAD_OPK_BUF || !o.handle) return o;
+    for (size_t i = 0; i < to.bufs.size(); ++i)
+        if (to.bufs[i].first == from.bufs[o.handle - 1].first) { o.handle = (uint32_t)(i + 1); return o; }
+    o.handle = 0;
+    return o;
+}
+
+/* The bf16 run's issues, named, with each projector GEMM replaced by what the int8 projector issues:
+ * at layer S the stream's codes from the GEMM's input rows, then per layer the int8 GEMM over those
+ * codes into the same destination, then the bias added in place. */
+std::vector<std::string> as_int8(const std::vector<RecIssue>& bf16, const RadBuilder& bb, const qwen4exp_kva::Kva& kb,
+                                 const RadBuilder& b8, const qwen4exp_kva::Kva& k8) {
+    std::vector<std::string> out;
+    for (const RecIssue& r : bf16) {
+        int l = -1;
+        for (int x = kSplit; x < 8; ++x) if (r.op == kb.op_proj[(size_t)x]) l = x;
+        /* int8 keeps no h_S (no MTP here): the bf16 pass's copy into it has no int8 counterpart, and the codes
+         * are made from b_h's same rows, which still hold the layer-S stream at layer S */
+        if (r.op == kb.op_cast && r.opd.size() > 1 && r.opd[1].kind == RAD_OPK_BUF && r.opd[1].handle == kb.b_hs) continue;
+        if (l < 0) { out.push_back(named({r}, bb, kb)[0]); continue; }
+        RadOperand src = rebuf(r.opd[0], bb, b8);
+        const RadOperand dst = rebuf(r.opd[4], bb, b8);
+        if (r.opd[0].kind == RAD_OPK_BUF && r.opd[0].handle == kb.b_hs) src.handle = qwen4exp_fp8::g_model[0].b_h;
+        RadOperand q = src, s = src;
+        q.handle = k8.b_q8;
+        s.handle = k8.b_s8;
+        s.offset = src.offset / 128;
+        std::vector<RecIssue> v;
+        if (l == kSplit) v.push_back({k8.op_quant8, {src, q, s}, r.n});
+        v.push_back({k8.op_proj[(size_t)l], {q, s, k8.proj_w[(size_t)l], k8.proj_s[(size_t)l], dst, RAD_NONE, RAD_NONE}, r.n});
+        v.push_back({k8.op_bias, {dst, k8.proj_b[(size_t)l], dst}, r.n});
+        for (const std::string& t : named(v, b8, k8)) out.push_back(t);
+    }
+    return out;
+}
+
+/* THE INT8 PASS IS THE BF16 PASS WITH THE PROJECTION SWAPPED, on every path that projects (lean,
+ * tail-only straddle, masked, speed beside decoders): same batch, same everything else, op for op; the stream quantised
+ * once, at layer S, from exactly the rows the GEMMs read. */
+TEST(the_int8_projector_quantises_the_stream_once_then_gemm_and_bias_a_layer) {
+    struct Case { const char* mode; Shape s; int path; };
+    for (const Case& cs : {Case{"speed", {{2048}, 0, 2048}, qwen4exp_kva::PATH_LEAN},
+                           Case{"speed", {{128}, 0, 1984}, qwen4exp_kva::PATH_STRADDLE},
+                           Case{"quality", {{128}, 0, 2048}, qwen4exp_kva::PATH_MASKED},
+                           Case{"quality", {{128}, 0, 1984}, qwen4exp_kva::PATH_MASKED},
+                           Case{"quality", {{1, 64, 128}, 1, 2048}, qwen4exp_kva::PATH_MASKED},   /* s_lb 65 */
+                           Case{"speed", {{1, 1984}, 1, 2048}, qwen4exp_kva::PATH_DECODERS}}) {
+        RadModelMeta meta = flash_next_meta();
+        RadBuildCtx c = served_ctx();
+        Env env({{"RADIANCE_KVA", cs.mode}});
+        RadBuilder bf, i8;
+        served(bf);
+        served(i8);
+        hold_kva(bf, {"kva.proj", "kva.st"});
+        hold_score(bf, "kva.rowsel.score");
+        REQUIRE_EQ(qwen4exp_kva::declare(&bf, &meta, &c), RAD_OK);
+        const qwen4exp_kva::Kva kb = qwen4exp_kva::g_kva[0];
+        Batch x = make_step(bf, cs.s);
+        REQUIRE_EQ(qwen4exp_kva::derive(kb, &x.b).path, cs.path);
+        const Run rb = run_step(qwen4exp_kva::step, x.b);
+        hold_kva_i8(i8);
+        hold_score(i8, "kva.rowsel.score");
+        REQUIRE_EQ(qwen4exp_kva::declare(&i8, &meta, &c), RAD_OK);
+        const qwen4exp_kva::Kva& k8 = qwen4exp_kva::g_kva[0];
+        REQUIRE(k8.int8 && !kb.int8);
+        /* the slot follows the folder's block (1,280 rows of codes, 20 of scales, 1 of bias), and no h_S */
+        CHECK_EQ(qwen4exp_kva::g_upload[0].vram_bytes, 1301LL * 10240 * 2);
+        CHECK(k8.b_hs == 0 && kb.b_hs != 0);
+        const Run r8 = run_step(qwen4exp_kva::step, x.b);
+        const std::vector<std::string> got_t = named(r8.all, i8, k8), want_t = as_int8(rb.all, bf, kb, i8, k8);
+        int quants = 0, bad = 0;
+        for (const RecIssue& r : r8.issues) quants += r.op == k8.op_quant8;
+        CHECK_EQ(quants, 1);
+        CHECK_EQ(got_t.size(), want_t.size());
+        for (size_t i = 0; i < got_t.size() && i < want_t.size(); ++i)
+            if (got_t[i] != want_t[i] && bad++ < 3)
+                std::fprintf(stderr, "  %s/%d issue %zu:\n    got  %s\n    want %s\n", cs.mode, cs.path, i,
+                             got_t[i].c_str(), want_t[i].c_str());
+        CHECK_EQ(bad, 0);
+        /* and the int8 issues' projector operands are this layer's own copies */
+        for (const RecIssue& r : r8.issues)
+            for (int l = kSplit; l < 8; ++l) {
+                if (r.op == k8.op_proj[(size_t)l])
+                    CHECK(r.opd[2].raw == k8.proj_w[(size_t)l].raw && r.opd[3].raw == k8.proj_s[(size_t)l].raw);
+                if (r.op == k8.op_bias && r.opd[1].raw == k8.proj_b[(size_t)l].raw) CHECK(same_operand(r.opd[0], r.opd[2]));
+            }
+        CHECK_EQ(r8.device_calls, 0);
+    }
+}
+
+/* No int8 GEMM row in the loaded libraries, or rows that would read different stored bytes (one
+ * upload must serve whichever row a step's M selects): the folder cannot run, startup fails naming
+ * why. A folder whose dtype is neither is refused as one that cannot run on this model. */
+TEST(an_int8_folder_without_one_agreed_stored_form_is_refused_by_name) {
+    RadModelMeta meta = flash_next_meta();
+    RadBuildCtx c = served_ctx();
+    Env env({{"RADIANCE_KVA", "speed"}});
+    RadKernelInfo other = fake_i8_row("fake_other");
+    other.layout = [](const RadParam* p, int n_p, int opd, const RadEncoding* e, const int* s, const RadTensor* pl,
+                      int n, RadLayout* out) {
+        const int st = fake_i8_layout(p, n_p, opd, e, s, pl, n, out);
+        if (opd == 2) out->tag = "test.i8.other";
+        return st;
+    };
+    const std::vector<const RadKernelInfo*> none, disagree = { &g_i8_m16, &other };
+    for (const auto* rows : { &none, &disagree }) {
+        RadBuilder kva;
+        served(kva);
+        hold_kva_i8(kva);
+        qwen4exp_kva::g_i8_rows_for_test = rows;
+        int st = RAD_OK;
+        const std::string log = stderr_of([&] { st = qwen4exp_kva::declare(&kva, &meta, &c); });
+        CHECK(st != RAD_OK);
+        CHECK(has(log, "cannot load the int8 projector"));
+        CHECK(has(log, rows == &none ? "no kernel library offers the int8 GEMM" : "store the map differently"));
+    }
+    RadBuilder stock, kva;
+    served(stock);
+    served(kva);
+    hold_kva_i8(kva);
+    std::string text = R"({"format": 1, "adapter": "qwen4exp", "split": 4, "projector": {"dtype": "i4"},
+        "model": {"arch_id": "qwen4exp", "name": "test-q38-flashnext", "meta": {"hc_count": "4"},
+                  "vocab_sha256": ")" + std::string(kTinyVocab) + R"("}, "files": {}})";
+    g_test_folder.manifest = qwen4exp_kva::Json{};
+    qwen4exp_kva::json_parse(text.data(), text.size(), &g_test_folder.manifest);
+    REQUIRE_EQ(qwen4exp_fp8::declare(&stock, &meta, &c), RAD_OK);
+    const std::string log = stderr_of([&] { CHECK_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK); });
+    check_same_graph(stock, kva);
+    CHECK(has(log, "its projector dtype 'i4' is neither bf16 nor i8"));
+}
+
+/* ==================================================================== the MTP final map (Stage D, R71) */
+
+/* The final map's bytes: 210 MB with a pattern, so each block's copy can be traced to its rows. */
+const unsigned char* final_bytes() {
+    static std::vector<unsigned char> v;
+    if (v.empty()) {
+        v.resize((size_t)10240 * 10240 * 2 + 10240 * 2);
+        for (size_t i = 0; i < v.size(); ++i) v[i] = (unsigned char)(i * 2654435761u >> 13);
+    }
+    return v.data();
+}
+
+/* hold_kva's folder plus final.weight [hc*n, hc*n] and final.bias [hc*n], and the manifest saying so. */
+void hold_kva_final(RadBuilder& b) {
+    hold_kva(b, {"kva.proj", "kva.st"});
+    hold_score(b, "kva.rowsel.score");
+    const std::string text = std::string(R"({"format": 1, "adapter": "qwen4exp", "split": 4,
+        "final": {"file": "final.safetensors", "dtype": "bf16"},
+        "model": {"arch_id": "qwen4exp", "name": "test-q38-flashnext",
+                  "meta": {"hc_count": "4", "linear_num_value_heads": "48"},
+                  "vocab_sha256": ")") + kTinyVocab + R"("},
+        "files": {"final.safetensors": "unused by the test folder"}})";
+    g_test_folder.manifest = qwen4exp_kva::Json{};
+    qwen4exp_kva::json_parse(text.data(), text.size(), &g_test_folder.manifest);
+    for (auto [name, shape, at] : {std::tuple<const char*, std::vector<int64_t>, int64_t>{"final.weight", {10240, 10240}, 0},
+                                   {"final.bias", {10240}, 10240LL * 10240 * 2}}) {
+        qwen4exp_kva::FolderTensor t;
+        t.data = final_bytes() + at;
+        t.dtype = RAD_BF16;
+        t.shape = shape;
+        t.bytes = rad_dtype_bytes(RAD_BF16, shape.size() == 2 ? shape[0] * shape[1] : shape[0]);
+        g_test_folder.tensors[name] = t;
+    }
+}
+
+/* With MTP (max_spec > 0) the final map is declared, uploaded as hc row blocks of [n + 1, hc*n] -- block i holds
+ * rows i*n .. i*n + n of the map and that slice of the bias -- and ridden by the ring after the last late layer;
+ * without MTP, or with RADIANCE_KVA_FINAL=off, nothing of it is declared or held. */
+TEST(the_final_map_is_held_and_declared_only_with_mtp) {
+    RadModelMeta meta = flash_next_meta();
+    for (auto [spec, sw, want] : {std::tuple<int, const char*, bool>{3, "on", true}, {0, "on", false}, {3, "off", false}}) {
+        RadBuildCtx c = served_ctx();
+        c.max_spec = spec;
+        Env env({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_FINAL", sw}});
+        RadBuilder kva;
+        served(kva);
+        hold_kva_final(kva);
+        REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
+        const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+        CHECK_EQ(k.want_final, want);
+        CHECK_EQ(k.op_final != 0, want);
+        CHECK_EQ(k.b_final != 0, want);
+        CHECK_EQ(k.ring_end, (int64_t)(8 + (want ? 4 : 0)));
+        CHECK_EQ(k.final_w.size(), (size_t)(want ? 4 : 0));
+        if (!want) continue;
+        CHECK_EQ(kva.ops[k.op_final - 1].op, std::string("kva_gemm_nt_bias"));
+        CHECK(kva.concurrent.count(k.b_final));
+        const int64_t row = 10240 * 2;
+        for (int i = 0; i < 4; ++i) {
+            const unsigned char* block = (const unsigned char*)k.ring_src[(size_t)(8 + i)].raw - kDeviceView;
+            CHECK_EQ(k.ring_src[(size_t)(8 + i)].rows, 2561);
+            CHECK(std::memcmp(block, final_bytes() + (size_t)i * 2560 * row, (size_t)2560 * row) == 0);
+            CHECK(std::memcmp(block + 2560 * row, final_bytes() + 10240LL * row + (size_t)i * 2560 * 2, 2560 * 2) == 0);
+            /* the ring's one slot, and the GEMM reads it */
+            CHECK(k.ring_dst[(size_t)(8 + i)].raw == k.ring_dst[7].raw);
+            CHECK(k.final_w[(size_t)i].raw == k.ring_dst[(size_t)(8 + i)].raw);
+            CHECK_EQ((uintptr_t)k.final_b[(size_t)i].raw, (uintptr_t)k.final_w[(size_t)i].raw + 2560u * row);
+        }
+    }
+}
+
+/* R71: with MTP, every approximate path ends with the final map -- hc GEMMs over the bulk rows' layer-S stream
+ * (h_S on the masked path, b_h's rows on lean and straddle), block i into columns i*n .. i*n + n of kva_final --
+ * and the predicted rows go into b_h through the mask (masked, straddle) or by a row copy (lean), right before
+ * the epilogue's connection read. Everything else is the pass without the map, op for op; the ring carries the
+ * hc blocks after the last layer, each copied while the one before computes. */
+TEST(with_mtp_the_bulk_rows_take_the_predicted_final_stream_before_the_epilogue) {
+    struct Case { const char* mode; Shape s; int path; };
+    for (const Case& cs : {Case{"speed", {{2048}, 0, 2048}, qwen4exp_kva::PATH_LEAN},
+                           Case{"speed", {{128}, 0, 1984}, qwen4exp_kva::PATH_STRADDLE},
+                           Case{"quality", {{1, 64, 128}, 1, 2048}, qwen4exp_kva::PATH_MASKED}}) {
+        RadModelMeta meta = flash_next_meta();
+        RadBuildCtx c = served_ctx();
+        c.max_spec = 3;
+        const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
+        std::vector<std::string> runs[2];
+        Run r[2];
+        RadBuilder b[2];
+        for (int on = 0; on < 2; ++on) {
+            Env env({{"RADIANCE_KVA", cs.mode}, {"RADIANCE_KVA_FINAL", on ? "on" : "off"}});
+            served(b[on]);
+            hold_kva_final(b[on]);
+            REQUIRE_EQ(qwen4exp_kva::declare(&b[on], &meta, &c), RAD_OK);
+            Batch x = make_step(b[on], cs.s);
+            const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+            const qwen4exp_kva::Pass p = qwen4exp_kva::derive(k, &x.b);
+            REQUIRE_EQ(p.path, cs.path);
+            r[on] = run_step(qwen4exp_kva::step, x.b);
+            runs[on] = named(r[on].issues, b[on], k);
+            if (!on) continue;
+            /* the final segment: right before the mixer's read */
+            const std::vector<RecIssue>& v = r[on].issues;
+            size_t mix = 0;
+            while (mix < v.size() && v[mix].op != m.mixer.op_read) ++mix;
+            REQUIRE(mix >= 5 && mix < v.size());
+            const int64_t T = x.b.n_tok, r0 = p.path == qwen4exp_kva::PATH_MASKED ? p.s_lb : 0;
+            const int64_t rows = p.path == qwen4exp_kva::PATH_LEAN ? T : p.b - r0;
+            for (int i = 0; i < 4; ++i) {
+                const RecIssue& g = v[mix - 5 + (size_t)i];
+                CHECK_EQ(g.op, k.op_final);
+                CHECK_EQ(g.n, rows);
+                CHECK(same_operand(g.opd[0], brow_slice(p.path == qwen4exp_kva::PATH_MASKED ? k.b_hs : m.b_h, r0, rows, 10240)));
+                CHECK(g.opd[1].raw == k.final_w[(size_t)i].raw && g.opd[2].raw == k.final_b[(size_t)i].raw);
+                CHECK(same_operand(g.opd[4], bcol_at(k.b_final, r0, 10240, i * 2560, 2560, rows)));
+            }
+            const RecIssue& in = v[mix - 1];
+            if (p.path == qwen4exp_kva::PATH_LEAN) {
+                CHECK_EQ(in.op, k.op_cast);
+                CHECK(same_operand(in.opd[1], brows(m.b_h, T)));
+            } else {
+                CHECK_EQ(in.op, k.op_select);
+                CHECK(same_operand(in.opd[0], brows(k.b_mask, T)) && same_operand(in.opd[4], brows(m.b_h, T)));
+            }
+            /* the ring: blocks 8 .. 11 copied after layer 7, each waited for before its GEMM */
+            std::vector<std::string> seq;
+            for (const RecIssue& i : r[on].all) {
+                if (i.op == kJoin) seq.push_back("join" + std::to_string(i.n / 16) + std::to_string(i.n % 16));
+                else if (i.op == k.op_ring) {
+                    int j = -1;
+                    for (int y = kSplit; y < 12; ++y) if (i.opd[0].raw == k.ring_src[(size_t)y].raw) j = y;
+                    seq.push_back("copy" + std::to_string(j));
+                } else if (i.op == k.op_final) seq.push_back("final");
+            }
+            const std::vector<std::string> tail(seq.end() - 15, seq.end());
+            const std::vector<std::string> want = { "join10", "final", "join01", "copy9", "join10", "final", "join01",
+                                                    "copy10", "join10", "final", "join01", "copy11", "join10", "final" };
+            CHECK(std::vector<std::string>(tail.end() - 14, tail.end()) == want);
+            CHECK(std::find(seq.begin(), seq.end(), "copy8") != seq.end());
+        }
+        /* everything but the final segment is the pass without the map */
+        std::vector<std::string> on_wo;
+        for (const std::string& t : runs[1])
+            if (t.rfind("kva_gemm_nt_bias#" + std::to_string(8 - kSplit), 0) != 0) on_wo.push_back(t);
+        on_wo.erase(std::remove_if(on_wo.begin(), on_wo.end(), [](const std::string& t) {
+            return t.find("kva_final") != std::string::npos; }), on_wo.end());
+        CHECK(on_wo == runs[0]);
+        CHECK_EQ(r[1].device_calls, 0);
+    }
 }
 
 /* ==================================================================== the folder on disk */
@@ -2688,6 +3183,144 @@ void write_folder(const std::filesystem::path& dir, const std::string& files_ove
               "\", \"README.md\": \"" + sha_of("hello") + "\"}"
         : files_override;
     std::ofstream(dir / "kva.json") << "{\"format\": 1, \"files\": " << files << "}";
+}
+
+
+/* THE STRADDLE'S DOWNGRADE IS SAID AT STARTUP (orchestrator, Stage E): speed's tail-only straddle needs every
+ * late attention layer's per-row sparse form; without it straddle chunks take the masked path, which only each
+ * step log's path field showed. A container with no indexer (indexer_n_heads 0) declares no selection: one line
+ * names layer 7, the missing piece and the consequence, in speed only; the published geometry says nothing. */
+RadModelMeta flash_next_meta_without_indexer() {
+    static std::vector<const char*> vals;
+    if (vals.empty()) {
+        vals.assign(kVals, kVals + kN);
+        for (int i = 0; i < kN; ++i)
+            if (!std::strcmp(kKeys[i], "indexer_n_heads")) vals[(size_t)i] = "0";
+    }
+    RadModelMeta m = flash_next_meta();
+    m.kv_val = vals.data();
+    return m;
+}
+
+TEST(a_speed_straddle_downgraded_at_declare_is_said_once_at_startup) {
+    for (bool indexer : {true, false})
+        for (const char* mode : {"speed", "quality"}) {
+            RadModelMeta meta = indexer ? flash_next_meta() : flash_next_meta_without_indexer();
+            RadBuildCtx c = served_ctx();
+            RadBuilder kva;
+            served(kva);
+            hold_kva(kva, {"kva.proj", "kva.st"});
+            hold_score(kva, "kva.rowsel.score");
+            Env env({{"RADIANCE_KVA", mode}});
+            int st = RAD_OK;
+            const std::string log = stderr_of([&] { st = qwen4exp_kva::declare(&kva, &meta, &c); });
+            REQUIRE_EQ(st, RAD_OK);
+            const bool speed = !std::strcmp(mode, "speed");
+            CHECK_EQ(qwen4exp_kva::g_kva[0].straddle_layers, speed && indexer);
+            CHECK_EQ(qwen4exp_kva::straddle_missing(qwen4exp_fp8::g_model[0].layers[7].attn) == nullptr, indexer);
+            CHECK_EQ(count(log, "takes the masked path for straddle chunks"), speed && !indexer ? 1 : 0);
+            if (speed && !indexer) CHECK(has(log, "late attention layer 7 lacks the indexer's selection (qsa_sel)"));
+        }
+}
+
+/* R74 and R76's static half -- MEDIA STEPS RUN STOCK, AND THE TEXT AFTER AN IMAGE RESUMES (PLAN-FIX §6.3), on
+ * the published container's geometry for pictures: interleaved M-RoPE 11/11/10 and a vision tower (cut to two
+ * blocks, as radiance's arch_test cuts it), served with a patch budget. An encoder pass, a chunk holding media
+ * rows (mixed rotary components or not) and a chunk with mixed components issue the in-tree step op for op in
+ * speed and quality. A text-only chunk after the image (rope_pos set, its three components equal) is
+ * approximated, and every in-tree op it issues takes the position operand the in-tree step gives that op --
+ * the rotary planes, which run behind the index after an image, where the stock step reads them. */
+RadModelMeta flash_next_vl_meta() {
+    static std::vector<const char*> keys, vals;
+    if (keys.empty()) {
+        keys.assign(kKeys, kKeys + kN);
+        vals.assign(kVals, kVals + kN);
+        const char* k[] = {"rope_parameters.mrope_section", "rope_parameters.mrope_interleaved",
+                           "vision_config.depth", "vision_config.hidden_size", "vision_config.num_heads",
+                           "vision_config.intermediate_size", "vision_config.patch_size",
+                           "vision_config.temporal_patch_size", "vision_config.in_channels",
+                           "vision_config.spatial_merge_size", "vision_config.out_hidden_size",
+                           "vision_config.num_position_embeddings", "vision_config.deepstack_visual_indexes",
+                           "vision_config.hidden_act"};
+        const char* v[] = {"11 11 10", "1", "2", "1152", "16", "4304", "16", "2", "3", "2", "2560", "2304", "",
+                           "gelu_pytorch_tanh"};
+        keys.insert(keys.end(), std::begin(k), std::end(k));
+        vals.insert(vals.end(), std::begin(v), std::end(v));
+    }
+    RadModelMeta m = flash_next_meta();
+    m.n_kv = (int)keys.size();
+    m.kv_key = keys.data();
+    m.kv_val = vals.data();
+    return m;
+}
+
+/* The position-like operands of an issue, in order: 'P' this pass's index positions, 'R<rows>' its rotary
+ * planes (plane 0 alone or all three). */
+std::string position_tags(const RecIssue& r, const RadBatch& b) {
+    std::string t;
+    for (const RadOperand& o : r.opd) {
+        if (o.raw && o.raw == (const void*)b.positions) t += "P";
+        if (o.raw && o.raw == (const void*)b.rope_pos) t += "R" + std::to_string(o.rows);
+    }
+    return t;
+}
+
+TEST(media_steps_run_stock_and_the_text_after_an_image_approximates_at_its_rotary_positions) {
+    static int32_t rp[3 * 4096], mm[8];
+    static uint16_t embd[8 * 2560], pix[64 * 1536];
+    static int32_t coord[4 * 64], ecu[2] = {0, 64};
+    using qwen4exp_kva::PATH_STOCK;
+    struct Edit { const char* why; std::function<void(RadBatch&)> f; };
+    const std::vector<Edit> media = {
+        {"encoder pass", [](RadBatch& b) { b.enc = 1; b.enc_n_patch = 64; b.enc_pixels = pix; b.enc_coord = coord;
+                                           b.enc_n_seg = 1; b.enc_cu = ecu; b.enc_max_seg = 64; }},
+        {"media rows, mixed components", [](RadBatch& b) { b.rope_pos = rp; b.rope_mixed = 1; b.n_mm_rows = 8;
+                                                           b.mm_rows = mm; b.mm_embd = embd; }},
+        {"media rows", [](RadBatch& b) { b.rope_pos = rp; b.n_mm_rows = 8; b.mm_rows = mm; b.mm_embd = embd; }},
+        {"mixed components", [](RadBatch& b) { b.rope_pos = rp; b.rope_mixed = 1; }},
+    };
+    for (const char* mode : {"speed", "quality"}) {
+        RadModelMeta meta = flash_next_vl_meta();
+        RadBuildCtx c = served_ctx();
+        c.max_enc_patches = 4096;
+        RadBuilder kva;
+        served(kva);
+        hold_kva(kva, {"kva.proj", "kva.st"});
+        hold_score(kva, "kva.rowsel.score");
+        Env env({{"RADIANCE_KVA", mode}});
+        REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
+        const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+        REQUIRE(qwen4exp_fp8::g_model[0].media && qwen4exp_fp8::g_model[0].g.rope_mc && k.have_proj);
+        for (const Edit& e : media) {
+            Batch x = make_step(kva, {{2048}, 0, 2048});
+            e.f(x.b);
+            CHECK_EQ(qwen4exp_kva::derive(k, &x.b).path, PATH_STOCK);
+            const Run got = run_step(qwen4exp_kva::step, x.b), want = run_step(qwen4exp_fp8::step, x.b);
+            CHECK(want.issues.size() > (x.b.enc ? 10u : 100u));
+            if (differ(got.all, want.issues) != 0) std::fprintf(stderr, "    %s / %s differs\n", mode, e.why);
+            CHECK_EQ(differ(got.all, want.issues), 0);
+            CHECK_EQ(got.device_calls, 0);
+        }
+        /* the text after it: rotary planes present, components equal -- approximated, at the rotary positions */
+        Batch x = make_step(kva, {{2048}, 0, 2048});
+        x.b.rope_pos = rp;
+        const qwen4exp_kva::Pass p = qwen4exp_kva::derive(k, &x.b);
+        CHECK(p.path != PATH_STOCK && p.b == 2048);
+        const Run got = run_step(qwen4exp_kva::step, x.b), stock = run_step(qwen4exp_fp8::step, x.b);
+        std::map<rad_op, std::set<std::string>> want;
+        for (const RecIssue& r : stock.issues) want[r.op].insert(position_tags(r, x.b));
+        int rotary = 0, bad = 0;
+        for (const RecIssue& r : got.issues) {
+            const std::string t = position_tags(r, x.b);
+            rotary += t.find('R') != std::string::npos;
+            const auto w = want.find(r.op);
+            if (w == want.end() || w->second.count(t)) continue;
+            if (bad++ < 3) std::fprintf(stderr, "    %s: op %u takes positions '%s'\n", mode, (unsigned)r.op, t.c_str());
+        }
+        CHECK_EQ(bad, 0);
+        /* not vacuous: at least layer 3's q and k (in-tree) and layer 7's k and indexer work list (filled) */
+        CHECK(rotary >= 4);
+    }
 }
 
 /* The folder's files are mapped, hashed and their tensors named; what a partial or damaged download

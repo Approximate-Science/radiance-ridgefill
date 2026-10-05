@@ -197,8 +197,11 @@ inline void gdn_masked(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, in
 
 /* ---------------------------------------------------------------- the staging ring (DD-L) */
 
-/* Layer li's map, host block -> its VRAM slot, on the second lane. The slot was last read by layer
- * li - 2's GEMM, which lane 0 has already been handed: lane 1 waits for lane 0 first. */
+/* ONE SLOT (Stage E): block li's map, host block -> the VRAM slot, on the second lane, issued right after
+ * block li - 1's GEMM -- the slot's last reader, which lane 0 has already been handed: lane 1 waits for
+ * lane 0 first. Each copy overlaps the rest of the layer after its projector (attention or the delta net,
+ * the MoE). A second slot would let it overlap the GEMM too, for one more block of VRAM a card, which every
+ * request pays in resident experts (notes/stagee.md §12-§14). */
 inline void ring_copy(RadCtx* c, const Kva& k, int64_t li) {
     rad_lane_join(c, 0, 1);
     rad_lane(c, 1);
@@ -206,12 +209,38 @@ inline void ring_copy(RadCtx* c, const Kva& k, int64_t li) {
     rad_lane(c, 0);
 }
 
-/* Before layer li's projector GEMM: lane 0 waits for li's copy, and li + 1's starts behind it, so
- * each copy overlaps a whole layer of compute. Nothing without the ring. */
-inline void ring_next(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li) {
-    if (!k.op_ring) return;
-    rad_lane_join(c, 1, 0);
-    if (li + 1 < m.g.n_layer) ring_copy(c, k, li + 1);
+/* Before block li's GEMM: lane 0 waits for its copy. Nothing without the ring. */
+inline void ring_wait(RadCtx* c, const Kva& k) {
+    if (k.op_ring) rad_lane_join(c, 1, 0);
+}
+
+/* After block li's last reader (its GEMM, and the bias add on the int8 path): block li + 1's copy into the
+ * same slot -- after the last layer, the final map's blocks (MTP). */
+inline void ring_after(RadCtx* c, const Kva& k, int64_t li) {
+    if (k.op_ring && li + 1 < k.ring_end) ring_copy(c, k, li + 1);
+}
+
+/* THE PROJECTOR over rows [r0, r0 + rows) of the layer-S stream `src` into `dst`: the bf16 GEMM, or
+ * with an int8 folder (R79) the stream's int8 codes, the int8 GEMM and the bias. Every late layer
+ * projects the SAME rows of the same stream (h_S on the masked path; b_h's bulk rows, which nothing
+ * writes, on the lean and straddle paths), so the codes are made once a pass, at layer S. */
+inline void project_rows(RadCtx* c, const Kva& k, int64_t li, rad_buf src, int64_t r0, int64_t rows,
+                         int64_t wide, RadOperand dst) {
+    const size_t L = (size_t)li;
+    ring_wait(c, k);
+    if (!k.int8) {
+        RAD_ISSUE_N(c, k.op_proj[L], rows, brow_slice(src, r0, rows, wide), k.proj_w[L], k.proj_b[L], RAD_NONE, dst);
+        ring_after(c, k, li);
+        return;
+    }
+    const int64_t groups = wide / kI8Group;
+    if (li == k.split)
+        RAD_ISSUE_N(c, k.op_quant8, rows, brow_slice(src, r0, rows, wide), brow_slice(k.b_q8, r0, rows, wide),
+                    brow_slice(k.b_s8, r0, rows, groups));
+    RAD_ISSUE_N(c, k.op_proj[L], rows, brow_slice(k.b_q8, r0, rows, wide), brow_slice(k.b_s8, r0, rows, groups),
+                k.proj_w[L], k.proj_s[L], dst, RAD_NONE, RAD_NONE);
+    RAD_ISSUE_N(c, k.op_bias, rows, dst, k.proj_b[L], dst);
+    ring_after(c, k, li);
 }
 
 /* The projected block input for the bulk superset [s_lb, b): the projector over the layer-S stream
@@ -221,10 +250,9 @@ inline void project_masked(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m
                            const Pass& p, int64_t T) {
     const int64_t r0 = p.s_lb, rows = p.b - p.s_lb, n = m.g.n_embd, wide = m.hccfg.hc * n;
     const ActFP8& x = m.a_x;
-    ring_next(c, k, m, li);
-    RAD_ISSUE_N(c, k.op_proj[(size_t)li], rows, brow_slice(k.b_hs, r0, rows, wide),
-                k.proj_w[(size_t)li], k.proj_b[(size_t)li], RAD_NONE,
-                brow_slice(k.xp.x, r0, rows, n));
+    /* int8 without the MTP map keeps no h_S: the codes are made at layer S from b_h, which still holds the
+     * layer-S stream there (its connection write comes after this), and every later layer reads the codes */
+    project_rows(c, k, li, k.b_hs ? k.b_hs : m.b_h, r0, rows, wide, brow_slice(k.xp.x, r0, rows, n));
     if (k.quant.op)
         RAD_ISSUE_N(c, k.quant.op, rows, brow_slice(k.xp.x, r0, rows, n),
                     brow_slice(k.xp.cq(), r0, rows, n), brow_slice(k.xp.cs(), r0, rows, n / RAD_FP8_BLOCK));
@@ -261,9 +289,7 @@ inline void masked_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int64_
  * codes. */
 inline void project_bulk(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li, int64_t b) {
     const int64_t n = m.g.n_embd;
-    ring_next(c, k, m, li);
-    RAD_ISSUE_N(c, k.op_proj[(size_t)li], b, brows(m.b_h, b), k.proj_w[(size_t)li],
-                k.proj_b[(size_t)li], RAD_NONE, brows(m.a_x.x, b));
+    project_rows(c, k, li, m.b_h, 0, b, m.hccfg.hc * n, brows(m.a_x.x, b));
     if (k.quant.op)
         RAD_ISSUE_N(c, k.quant.op, b, brows(m.a_x.x, b), brows(m.a_x.cq(), b),
                     brow_slice(m.a_x.cs(), 0, b, n / RAD_FP8_BLOCK));
@@ -359,13 +385,12 @@ inline void straddle_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int6
 /* ---------------------------------------------------------------- speed beside decoders */
 
 /* The bulk rows' block input [r0, T), lean style: the projector over the layer-S stream (b_h's rows
- * there stay that stream: only the decoder rows are written from here on) into `x` and its codes. */
-inline void project_rows(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li, int64_t r0,
-                         int64_t T) {
+ * there stay that stream: only the decoder rows are written from here on) into `x` and its codes --
+ * through project_rows, so the ring and an int8 folder serve this path as every other. */
+inline void project_beside(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li, int64_t r0,
+                           int64_t T) {
     const int64_t rows = T - r0, n = m.g.n_embd, wide = m.hccfg.hc * n;
-    ring_next(c, k, m, li);
-    RAD_ISSUE_N(c, k.op_proj[(size_t)li], rows, brow_slice(m.b_h, r0, rows, wide), k.proj_w[(size_t)li],
-                k.proj_b[(size_t)li], RAD_NONE, brow_slice(m.a_x.x, r0, rows, n));
+    project_rows(c, k, li, m.b_h, r0, rows, wide, brow_slice(m.a_x.x, r0, rows, n));
     if (k.quant.op)
         RAD_ISSUE_N(c, k.quant.op, rows, brow_slice(m.a_x.x, r0, rows, n), brow_slice(m.a_x.cq(), r0, rows, n),
                     brow_slice(m.a_x.cs(), r0, rows, n / RAD_FP8_BLOCK));
@@ -400,7 +425,7 @@ inline void decoders_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int6
     batch_split(batch, &D, &DT);
     const int64_t T = batch->n_tok;
     l.hc_mix.read(c, T, 0, DT);
-    project_rows(c, k, m, li, DT, T);
+    project_beside(c, k, m, li, DT, T);
     if (l.full) attn_rows(c, l, batch, 0, DT);
     else        gdn_decoders(c, k, m, li, batch, p, sd);
     l.hc_mix.write(c, T, 0, DT);
@@ -415,9 +440,7 @@ inline void decoders_layer(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, int6
 
 /* The projector writes the block input `x` from the stream entering layer S, for every row. */
 inline void project(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li, int64_t T) {
-    ring_next(c, k, m, li);
-    RAD_ISSUE_N(c, k.op_proj[(size_t)li], T, brows(m.b_h, T), k.proj_w[(size_t)li],
-                k.proj_b[(size_t)li], RAD_NONE, brows(m.a_x.x, T));
+    project_rows(c, k, li, m.b_h, 0, T, m.hccfg.hc * m.g.n_embd, brows(m.a_x.x, T));
 }
 
 /* x's codes, as the connection read would have written them: QuantFP8::step without its

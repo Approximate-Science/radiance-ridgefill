@@ -87,7 +87,7 @@ static int declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* c
     k.nm = Names(ctx->scope ? ctx->scope : "");
     k.tile = m.gcfg.chunk;
     k.out_rows_ok = ctx->max_out_rows == 0 || k.cfg.score_bulk;
-    for (auto* v : { &k.proj_w, &k.proj_b, &k.st })
+    for (auto* v : { &k.proj_w, &k.proj_b, &k.proj_s, &k.st })
         v->assign(m.layers.size(), RAD_NONE);
     for (auto* v : { &k.op_undo, &k.op_apply, &k.op_rho, &k.op_proj })
         v->assign(m.layers.size(), 0);
@@ -192,7 +192,7 @@ static void mask_rows(RadCtx* c, const Kva& k, const RadBatch* batch, const Pass
 /* After layer S-1: the layer-S stream of the bulk superset copied into h_S, which every projector
  * reads from here on (b_h's bulk rows become a stream nobody reads). */
 static void copy_stream(RadCtx* c, const Kva& k, qwen4exp_fp8::Model& m, const Pass& p) {
-    if (!k.op_cast) return;
+    if (!k.op_cast || !k.b_hs) return;   /* int8 without the MTP map keeps no h_S (kva_layer.h project_masked) */
     const int64_t wide = m.hccfg.hc * m.g.n_embd, rows = p.b - p.s_lb;
     RAD_ISSUE_N(c, k.op_cast, rows, brow_slice(m.b_h, p.s_lb, rows, wide),
                 brow_slice(k.b_hs, p.s_lb, rows, wide));
@@ -236,6 +236,7 @@ static void approximate_step(RadCtx* c, const Kva& k, const RadBatch* batch, con
         else if (p.path == PATH_DECODERS) decoders_layer(c, k, m, li, batch, p, sd);
         else                              masked_layer(c, k, m, li, batch, p, sd);
     }
+    final_stream(c, k, m, batch, p);   /* MTP: the bulk rows' predicted final stream, before the epilogue reads b_h */
     epilogue(c, m, batch);
 }
 

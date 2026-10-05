@@ -33,15 +33,20 @@
  *                             checkpoint chunks; 0 = off (Dylan decides the value after Stage C's
  *                             branch numbers, R65/R66)                                   default 0
  *   env RADIANCE_KVA_MIN_BULK_ROWS  a pass approximates only when it has at least this many bulk rows
- *                             (b - s_lb), else it runs the stock step. Default 0 with the projector in
- *                             VRAM; 1,024 with it in host memory, where EVERY approximate pass streams
- *                             every late layer's map over the link whatever its rows: measured
+ *                             (b - s_lb), else it runs the stock step. The projector is always in host
+ *                             memory, so EVERY approximate pass streams every late layer's map over the
+ *                             link whatever its rows: measured
  *                             (notes/stageb.md session 2c), the 64-row checkpoint remainders a
  *                             decoder-shared prompt alternates with cost 208-222 ms masked vs 61-92 ms
  *                             stock, and the decoders riding them got 2.2-3.5x slower. The two measured
  *                             shapes put break-even near 640 rows; 1,024 because below the stager's
  *                             1,025-row arming the stock step does not stage and is cheaper than that
- *                             line (unmeasured in between)           default 0 (vram) / 1024 (host)
+ *                             line (unmeasured in between)                         default 1024
+ *   env RADIANCE_KVA_FINAL    on | off: with MTP (--num-speculative-tokens > 0) and a folder holding the
+ *                             `final` map, every approximate pass writes the predicted final stream of its
+ *                             bulk rows into the trunk's stream before the epilogue, which the MTP head reads
+ *                             (kva_final.h; DD-D). off = the head reads what the pass left (R70's control)
+ *                                                                                     default on
  *   env RADIANCE_KVA_SCORE_BULK  1: approximate in KL mode too, whose logits on bulk rows are then
  *                             not the model's -- score only the exact tail (PLAN-FIX §6.2, R73)
  *
@@ -61,23 +66,24 @@
  * `<model dir>/projector/` and never from the container -- kva.* weights and keys an earlier append
  * left in a container are ignored:
  *
- *   env RADIANCE_KVA_PROJECTOR    the folder, ahead of projector/ beside the model file
- *   env RADIANCE_KVA_PROJ_PLACE   vram | host: where the projector maps live. vram costs ~1.2 GiB
- *                                 of each card (fewer resident experts); host costs nothing on
- *                                 the card and reads the maps over the link on every
- *                                 approximated chunk (slower ON chunks, R148)        default vram
- *   env RADIANCE_KVA_PROJ_RING    1 | 0: with host placement, copy each late layer's map into one of
- *                                 two VRAM slots on the second lane ahead of its GEMM (Dylan's DD-L,
- *                                 2 x 50 MiB a card), or let the GEMM read host memory directly
- *                                 (0: every M tile re-reads the map over the link -- measured
- *                                 2.7x slower than exact at 16K/32K; the ring +6%/+10% over
- *                                 vram, notes/aprime.md R148)                             default 1
+ *   env RADIANCE_KVA_PROJECTOR    the folder, ahead of projector/ beside the model file. A folder
+ *                                 whose manifest says "projector": {"dtype": "i8"} (tools/kva_projector.py
+ *                                 int8) holds the int8 maps: half the bytes on the link, read by the
+ *                                 engine's int8 GEMM (kva_int8.h)
+ *
+ * THE PROJECTOR IS ALWAYS STREAMED FROM HOST MEMORY (Dylan, 2026-10-05): its maps live in host-mapped
+ * memory and each late layer's map is copied into ONE VRAM slot on the second lane, after the previous
+ * layer's GEMM has read it (kva_projector.h, kva_layer.h ring_*). There is no placement choice: maps kept in VRAM cost
+ * ~1,100 resident expert slots a card and made a configuration stock serves refuse to start (the
+ * pinned pool overflowed at --max-num-batched-tokens 8192 --max-num-seqs 10), and the plugin cannot
+ * see the engine's budget at declare to choose safely (notes/stagee.md §8).
  *   env RADIANCE_KVA_ROWSEL_TABLE class -> score   none -> score_none (R41)
  *                                 all   -> score_all (every id a match: R35')
  *
  * RETIRED with the container append (A'), refused by name so an old command line cannot silently
  * run something else: RADIANCE_KVA_PROJ and RADIANCE_KVA_ST (a variant is its own folder now:
- * point RADIANCE_KVA_PROJECTOR at it) and RADIANCE_KVA_DECLARE (tools/dev/README.md).
+ * point RADIANCE_KVA_PROJECTOR at it) and RADIANCE_KVA_DECLARE (tools/dev/README.md). RETIRED with
+ * the vram placement (Stage E): RADIANCE_KVA_PROJ_PLACE and RADIANCE_KVA_PROJ_RING.
  */
 #ifndef QWEN4EXP_KVA_CONFIG_H
 #define QWEN4EXP_KVA_CONFIG_H
@@ -96,13 +102,11 @@ enum Mode     { MODE_OFF = 0, MODE_PLUMB, MODE_SPEED, MODE_QUALITY };
 enum Rowsel   { ROWSEL_CLASS = 0, ROWSEL_RANDOM, ROWSEL_ALL };
 enum Stage    { STAGE_AUTO = 0, STAGE_STOCK };
 enum Straddle { STRADDLE_SPLIT = 0, STRADDLE_END };
-enum Place    { PLACE_VRAM = 0, PLACE_HOST };
 
 static const char* const kModeNames[]     = { "off", "plumb", "speed", "quality" };
 static const char* const kRowselNames[]   = { "class", "random", "all" };
 static const char* const kStageNames[]    = { "auto", "stock" };
 static const char* const kStraddleNames[] = { "split", "end" };
-static const char* const kPlaceNames[]    = { "vram", "host" };
 
 /* RADIANCE_KVA_MIN_BULK_ROWS's default with the projector in host memory (the doc block above). */
 constexpr int64_t kHostMinBulkRows = 1024;
@@ -121,13 +125,12 @@ struct Config {
     double      share       = 0.25;
     int64_t     seed        = 0;
     int         rowsel_table = 0;          /* kScoreNames' index: score, score_none, score_all */
-    int         place       = PLACE_VRAM;
-    bool        ring        = true;        /* host placement: stage each layer's map through VRAM */
     int         stage       = STAGE_AUTO;
     int64_t     stage_rows  = INT64_MAX;   /* always stream: notes/impl.md A.1 R96, the guard's trade */
-    int64_t     min_bulk_rows = -1;
-    int64_t     ckpt_floor  = 0;           /* RADIANCE_KVA_CKPT_FLOOR (T_ck) */        /* -1: the placement's default, resolved in read_config */
+    int64_t     min_bulk_rows = -1;        /* -1: the default (kHostMinBulkRows), resolved in read_config */
+    int64_t     ckpt_floor  = 0;           /* RADIANCE_KVA_CKPT_FLOOR (T_ck) */
     bool        score_bulk  = false;
+    bool        final_on    = true;        /* RADIANCE_KVA_FINAL: the MTP `final` map, when held and MTP is on */
     int         straddle    = STRADDLE_SPLIT;
     int64_t     force_split = 0;
     int64_t     shift_b     = 0;
@@ -205,13 +208,16 @@ inline int read_variants(Config* c) {
                          retired, v);
             return RAD_E_INVAL;
         }
-    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_ROWSEL_TABLE", { "class", "none", "all" },
-                             "class|none|all", &c->rowsel_table));
-    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_PROJ_PLACE", { "vram", "host" }, "vram|host", &c->place));
-    int ring = 1;
-    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_PROJ_RING", { "1", "0" }, "1|0", &ring));
-    c->ring = ring == 0;   /* index 0 is "1" */
-    return RAD_OK;
+    for (const char* retired : { "RADIANCE_KVA_PROJ_PLACE", "RADIANCE_KVA_PROJ_RING" })
+        if (const char* v = env(retired)) {
+            std::fprintf(stderr, "radiance: qwen4exp_kva: %s=%s is retired: the projector is always "
+                                 "streamed from host memory through the staging ring (maps kept in VRAM "
+                                 "could make a configuration stock serves refuse to start); unset it\n",
+                         retired, v);
+            return RAD_E_INVAL;
+        }
+    return read_choice("RADIANCE_KVA_ROWSEL_TABLE", { "class", "none", "all" }, "class|none|all",
+                       &c->rowsel_table);
 }
 
 /* The stager lever, the KL switch and the gate-only debug switches. */
@@ -223,6 +229,8 @@ inline int read_switches(Config* c) {
     RAD_ARCH_TRY(read_int("RADIANCE_KVA_CKPT_FLOOR", 0, INT64_MAX / 2, "a row count", &c->ckpt_floor));
     RAD_ARCH_TRY(read_choice("RADIANCE_KVA_SCORE_BULK", { "0", "1" }, "1 or unset", &v));
     c->score_bulk = v == 1;
+    RAD_ARCH_TRY(read_choice("RADIANCE_KVA_FINAL", { "on", "off" }, "on|off", &v));
+    c->final_on = v == 0;
     RAD_ARCH_TRY(read_choice("RADIANCE_KVA_STRADDLE", { "split", "end" }, "split|end",
                              &c->straddle));
     RAD_ARCH_TRY(read_int("RADIANCE_KVA_FORCE_SPLIT", 1, INT64_MAX, "a positive row count",
@@ -264,7 +272,7 @@ inline int read_config(const RadModelMeta* meta, Config* c) {
     }
     RAD_ARCH_TRY(read_switches(c));
     RAD_ARCH_TRY(read_variants(c));
-    if (c->min_bulk_rows < 0) c->min_bulk_rows = c->place == PLACE_HOST ? kHostMinBulkRows : 0;
+    if (c->min_bulk_rows < 0) c->min_bulk_rows = kHostMinBulkRows;
     return RAD_OK;
 }
 
