@@ -128,3 +128,20 @@ H5-class-vs-random refuted on size (−0.0047 [−0.0094, −0.0005], CI exclude
   | 0.25 | 1.0239 | 88.35% | 0.0672 |
   | 0.50 | 1.0164 | 88.54% | 0.0626 |
   0.10→0.25 −0.0093 [−0.0132, −0.0056]; 0.25→0.50 −0.0073 [−0.0109, −0.0040]. Default stays 0.25 (Dylan's call).
+
+## Why the numbers looked "much worse" than tcc's (2026-10-04 ~21:15) — scoring-window mismatch + one residual
+tcc's quick tier (`~/AI-Work/kva-flashnext-iterate/tests/results/`, same 9 ppl docs) scored the LAST 512 tokens
+(`scored_tokens: 512`, `nll_all` / `nll_novel`), against an exact run from another boot. Our KL runs score the whole exact
+tail (`score_from = N − 2048`, 2,047 positions). The first ~1,500 tail positions sit right after the approximated region
+and are hurt far more than the last 512, so our headline ratios were not comparable with tcc's (or with HANDOVER §6's
+bands, which came from tcc's last-512 numbers). Rescored from our `.rows` files (col 1 = candidate NLL, col 2 = reference):
+| arm | ours, last 2,047 | ours, last 512 | tcc quick tier, last 512 (all 9 docs) |
+|---|---|---|---|
+| fill | +0.0617 (+6.4%) | +0.0381 (+3.9%) | +0.0362 (+3.7%) big-nost |
+| fill + st | +0.0432 (+4.4%) | +0.0238 (+2.4%) | +0.0190 … +0.0237 (iter-04 / iter-02 big-st) |
+| quality 25% | +0.0236 (+2.4%) | +0.0065 (+0.65%) | +0.0031 (+0.31%) |
+On the 6 docs whose token ranges are identical in both (16k + 32k; tcc's 8k docs were 9,216 tokens, ours cut to 8,192),
+last 512: fill ours +0.0426 vs tcc +0.0414 (same); fill+st ours +0.0272 vs tcc +0.0152 (**ours 0.012 nats worse**);
+quality ours +0.0038 vs tcc −0.0028 (0.007 worse; tcc's cross-boot noise ≈ ±0.004–0.006 on such means).
+Conclusion: the projector fill behaves exactly as on tcc's engine; the residual is that the GDN correction (and so
+quality mode built on it) removes less of the loss on radiance (−0.015 vs tcc −0.026 on those 6 docs). Under investigation.
