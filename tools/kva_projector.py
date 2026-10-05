@@ -3,6 +3,7 @@
 
   kva_projector.py build --proj P --st RANK0.pt RANK1.pt --freq F --tokenizer DIR --container MODEL.rad \\
                          --rad-info-v FILE --spec kva-marker-spec.json --out DIR
+  kva_projector.py int8 --from BF16_FOLDER --out DIR
 
 The model file is only READ (its metadata, tokenizer, chat template and a few KiB of base tensors); nothing is
 written to it. Files written (L = the projector's layers, S the lowest):
@@ -20,17 +21,26 @@ THE FINGERPRINT (arch/kva_match.h reads it; Dylan's DD-K split):
   warns if different       -> `encodings` (every non-expert late-layer weight, from `rad-info -v`), `anchors` (sha256
                               of the planes of the hyper-connection norms around the split), `name`
 The tensors are the bytes the container append carried (data/sidecar/kva-sidecar.safetensors): same readers.
+
+THE INT8 VARIANT (`int8`; Stage E, R79) is its own folder, selected with RADIANCE_KVA_PROJECTOR: every map quantised
+offline to the encoding the container's own int8 trunk uses, i8*bf16[1x128] -- codes i8 [n_embd, stream_width]
+row-major and a bf16 scale per 128 columns of a row, value = code * scale, the scale absmax/127 rounded to bf16 and
+each code rounded half-to-even against the ROUNDED scale (libquant's rtn rule). proj8.L<L>.safetensors holds
+proj.L.codes, proj.L.scale and the unchanged bf16 proj.L.bias. The file is canonical planes only: the plugin
+relayouts them at load through the int8 GEMM's own layout hook, so no kernel library's arrangement is ever written
+here. Every other file is copied byte for byte; the manifest says `"dtype": "i8"` and names its source folder.
 """
 import argparse
 import hashlib
 import json
 import mmap
+import shutil
 import struct
 import sys
 from pathlib import Path
 
 import torch
-from safetensors.torch import save_file
+from safetensors.torch import load_file, save_file
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -229,6 +239,49 @@ def build(args):
           f"vocab {model['vocab_sha256'][:12]}..., {len(model['encodings'])} encodings, {len(model['anchors'])} anchors")
 
 
+def quantise_i8(w):
+    """i8*bf16[1x128] of a [N, K] map: (codes i8 [N, K], scale bf16 [N, K/128], max |w - code*scale| / max |w|)."""
+    n, k = w.shape
+    if k % 128:
+        raise SystemExit(f"a map of {k} columns is not a whole number of 128-column groups")
+    x = w.float().reshape(n, k // 128, 128)
+    amax = x.abs().amax(-1)
+    scale = (amax / 127).to(torch.bfloat16)
+    scale[amax == 0] = 1.0   # a zero group decodes to zero whatever its scale; 1 as quant_act_i8g writes it
+    codes = torch.round(x / scale.float().unsqueeze(-1)).clamp(-127, 127)
+    err = (codes * scale.float().unsqueeze(-1) - x).abs().max() / x.abs().max()
+    return codes.to(torch.int8).reshape(n, k), scale, float(err)
+
+
+def int8(args):
+    src, out = Path(getattr(args, "from")), Path(args.out)
+    manifest = json.loads((src / "kva.json").read_text(encoding="utf-8"))
+    proj = manifest["projector"]
+    if proj["dtype"] != "bf16":
+        raise SystemExit(f"{src}: its projector is {proj['dtype']}; the int8 variant is made from a bf16 folder")
+    out.mkdir(parents=True, exist_ok=True)
+    files, worst = {}, 0.0
+    for layer, name in sorted(proj["files"].items(), key=lambda kv: int(kv[0])):
+        t = load_file(str(src / name))
+        codes, scale, err = quantise_i8(t[f"proj.{layer}.weight"])
+        worst = max(worst, err)
+        files[layer] = f"proj8.L{layer}.safetensors"
+        save({f"proj.{layer}.codes": codes, f"proj.{layer}.scale": scale, f"proj.{layer}.bias": t[f"proj.{layer}.bias"]},
+             out / files[layer])
+    kept = [n for n in manifest["files"] if n not in proj["files"].values()]
+    for name in kept:
+        shutil.copyfile(src / name, out / name)
+    manifest["projector"] = {"dtype": "i8", "layout": "i8_row128", "encoding": "i8*bf16[1x128]",
+                             "files": files, "source": {"folder": src.name,
+                                                        "kva_json_sha256": S.sha256_file(src / "kva.json")}}
+    names = sorted(kept + list(files.values()))
+    manifest["files"] = {name: S.sha256_file(out / name) for name in names}
+    (out / "kva.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
+    total = sum((out / n).stat().st_size for n in names) + (out / "kva.json").stat().st_size
+    print(f"wrote {out}: {len(names) + 1} files, {total} bytes ({total / 2**30:.3f} GiB); {len(files)} maps i8*bf16[1x128], "
+          f"worst |w - dequant| {worst:.4g} of a map's max |w|")
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="command", required=True)
@@ -241,8 +294,14 @@ def main(argv=None):
     b.add_argument("--rad-info-v", required=True, help="saved `rad-info -v` output of that container")
     b.add_argument("--spec", required=True, help="kva-marker-spec.json (tools/kva_template.py)")
     b.add_argument("--out", required=True, help="the folder to write (created)")
+    q = sub.add_parser("int8", help="the int8 variant of a bf16 folder (its own folder)")
+    q.add_argument("--from", required=True, help="a bf16 projector folder")
+    q.add_argument("--out", required=True, help="the folder to write (created)")
     args = ap.parse_args(argv)
-    build(args)
+    if args.command == "int8":
+        int8(args)
+    else:
+        build(args)
     return 0
 
 

@@ -174,3 +174,57 @@ def test_a_container_without_the_metadata_is_refused(built, tmp_path):
     bare.write_bytes(container({"n_layers": "4"}, ANCHORS))
     with pytest.raises(SystemExit, match="metadata lacks"):
         P.fingerprint(P.Rad(bare), type("A", (), {"container": bare, "rad_info_v": ""})(), 2, [2, 3])
+
+
+def test_quantise_i8_is_libquants_absmax_rule():
+    """i8*bf16[1x128]: scale = absmax/127 rounded to bf16, a zero group scaled by 1, codes rounded half to even
+    against the ROUNDED scale and clamped to +-127; dequantised within half a step of the map."""
+    torch.manual_seed(7)
+    w = torch.randn(32, 256, dtype=torch.float32).to(torch.bfloat16)
+    w[3, 128:] = 0
+    codes, scale, err = P.quantise_i8(w)
+    assert codes.dtype == torch.int8 and codes.shape == (32, 256)
+    assert scale.dtype == torch.bfloat16 and scale.shape == (32, 2)
+    x = w.float().reshape(32, 2, 128)
+    want = (x.abs().amax(-1) / 127).to(torch.bfloat16)
+    want[3, 1] = 1.0
+    assert torch.equal(scale, want)
+    assert torch.equal(codes.reshape(32, 2, 128).float(),
+                       torch.round(x / want.float().unsqueeze(-1)).clamp(-127, 127))
+    assert codes.abs().max() <= 127 and (codes[3, 128:] == 0).all()
+    deq = codes.float().reshape(32, 2, 128) * scale.float().unsqueeze(-1)
+    assert ((deq - x).abs() <= scale.float().unsqueeze(-1) * 0.5 + 1e-7).all()
+    assert err < 0.01
+    with pytest.raises(SystemExit):
+        P.quantise_i8(torch.zeros(4, 100, dtype=torch.bfloat16))
+
+
+def test_int8_folder_keeps_every_other_file_and_names_its_source(tmp_path):
+    """The int8 variant of a bf16 folder: one proj8 file a layer (codes, scale, the bias unchanged), every other
+    file byte-identical, the manifest's projector dtype i8 with the source's manifest hash, every file hashed."""
+    src, out = tmp_path / "bf16", tmp_path / "int8"
+    src.mkdir()
+    bias = torch.randn(16).to(torch.bfloat16)
+    for layer in (4, 5):
+        P.save({f"proj.{layer}.weight": torch.randn(16, 256).to(torch.bfloat16), f"proj.{layer}.bias": bias},
+               src / f"proj.L{layer}.safetensors")
+    (src / "README.md").write_text("hello")
+    files = {"proj.L4.safetensors": "", "proj.L5.safetensors": "", "README.md": ""}
+    manifest = {"format": 1, "split": 4, "projector": {"dtype": "bf16", "layout": "plain_nk",
+                                                       "files": {"4": "proj.L4.safetensors", "5": "proj.L5.safetensors"}},
+                "files": {n: P.S.sha256_file(src / n) for n in files}}
+    (src / "kva.json").write_text(json.dumps(manifest))
+    assert P.main(["int8", "--from", str(src), "--out", str(out)]) == 0
+    m = json.loads((out / "kva.json").read_text())
+    assert m["projector"]["dtype"] == "i8" and m["projector"]["encoding"] == "i8*bf16[1x128]"
+    assert m["projector"]["files"] == {"4": "proj8.L4.safetensors", "5": "proj8.L5.safetensors"}
+    assert m["projector"]["source"]["kva_json_sha256"] == P.S.sha256_file(src / "kva.json")
+    assert sorted(m["files"]) == ["README.md", "proj8.L4.safetensors", "proj8.L5.safetensors"]
+    assert all(m["files"][n] == P.S.sha256_file(out / n) for n in m["files"])
+    assert (out / "README.md").read_text() == "hello"
+    with safe_open(str(out / "proj8.L5.safetensors"), "pt") as f:
+        assert sorted(f.keys()) == ["proj.5.bias", "proj.5.codes", "proj.5.scale"]
+        assert torch.equal(f.get_tensor("proj.5.bias"), bias)
+        assert f.get_tensor("proj.5.codes").dtype == torch.int8 and f.get_tensor("proj.5.scale").shape == (16, 2)
+    with pytest.raises(SystemExit):   # an int8 folder is not a source
+        P.main(["int8", "--from", str(out), "--out", str(tmp_path / "again")])
