@@ -183,15 +183,84 @@ Latest result:
 51 passed in 3.01s
 ```
 
+## Engine-side identity check — `tools/template_identity.py`
+
+The offline renders above are jinja2; the engine renders with minja, so the
+R119/R120 check that counts runs through a live radiance server's `/tokenize`
+(which renders `messages` with the same template the chat endpoints use and
+tokenises what it produced: parse_special=true, add_special_tokens=false —
+`core/server/admin.cpp`). Standard library only:
+
+```sh
+$V tools/template_identity.py suite    --out suite.json            # 66 cases
+$V tools/template_identity.py render  --server http://STOCK:8000 --suite suite.json --out stock-ids.json
+$V tools/template_identity.py render  --server http://MERGED:8000 --suite suite.json --out merged-ids.json
+$V tools/template_identity.py diff    --stock stock-ids.json --merged merged-ids.json \
+                                     --spec kva-marker-spec.json     # exit 0/1, per-case table
+$V tools/template_identity.py replyfmt --stock-log stock.log --merged-log merged.log
+```
+
+The suite is 11 shapes x 6 kva variants. Shapes: system+user; user only;
+user/assistant/user; tools + an assistant tool_call + a tool result;
+`chat_template_kwargs` enable_thinking true/false; `thinking_budget` 2048;
+reasoning_effort low/xhigh; `add_generation_prompt` false; a long user message
+typing `<|quad_start|>`/`<|quad_end|>`/`<|im_start|>` as data. Variants: plain
+(no kva kwarg), `kva:on`, `kva:on` + each dial (`kva_share "0.50"`,
+`kva_alpha "0.5"`, `kva_tail "2560"`), and `kva:on` with the invalid dial
+`kva_share "0.75"` (which keeps the request off).
+
+`diff` re-derives every case's expectation from the spec (switch, dial
+tables, defaults, token ids, resolved as the snippet resolves them: `|string`
+after the JSON value arrives, so the number 0.5 does not match the key
+"0.50"), cross-checks it against the expectation the suite declares, and
+requires: no-kva and invalid-dial cases byte-identical to stock; `kva:on`
+cases exactly the 64 marker ids in front of stock's ids. `replyfmt` compares
+the engines' startup `chat: reply format template: ...` entries (R120).
+
+Field spellings were read off the engine, not the guide's chat sections
+(see the tool docstring for the details): `/tokenize` merges
+`chat_template_kwargs` into the template context but never reads the
+request's top-level `reasoning_effort` (parse_thinking runs on the chat
+endpoints only), so the effort cases use the kwargs spelling; the template's
+own high effort is `xhigh` (it refuses `high` with a 400 naming the legal
+set, which leaves no ids to compare); `thinking_budget` is a sampler knob
+that never reaches the template; and the kwargs' `enable_thinking` bool is
+overwritten with the server's own (`chat-auto-parser-helpers.cpp`), so on a
+default server both enable_thinking cases render with thinking on — identity
+is what those cases check.
+
+## Tests — `tests/test_template_identity.py`
+
+Run with the venv python (needs `jinja2`, `transformers`, `pytest`):
+
+```sh
+/var/home/dylan/projects/research/kva/.venv/bin/python -m pytest tests/test_template_identity.py -q
+```
+
+Covered: the suite's 66 cases (shapes, variant kwargs merging, spellings,
+determinism); the pure diff rules on hand-made id lists (pass cases, missing
+marker, marker gained where none was expected, wrong dial token, numeric dial
+resolution, declared-vs-derived mismatch, mismatched id files); `replyfmt`
+against logs with the real startup line's bytes; and an end-to-end run
+(suite → render → diff) against a FAKE radiance server whose /tokenize renders
+via jinja2 and tokenises with the shipped model's tokenizer at
+`/var/home/dylan/models-boot/tcc-qwen38-flash-next-mxfp4-fp8-gptq/` (skipped
+when absent, naming the path), including a broken-marker-gate server that
+`diff` must catch.
+
+Latest result:
+
+```
+29 passed in 4.59s
+```
+
 ## Limits / not verified offline
 
-- **minja itself was never run** (no engine or llama.cpp checkout on this
-  machine). Evidence for compatibility is: the construct list above, and that
-  all of them except the `{#- -#}` comment appear verbatim in the container
-  template the engine already serves. jinja2 is a superset, so jinja2 passing
-  does not prove minja passes; the first live smoke test should render one
-  `kva="on"` and one plain request through the engine and diff against the
-  jinja2 renders kept in evidence.
+- **minja itself was never run** on this machine (no engine or llama.cpp checkout
+  served here; the fake radiance in the tests renders with jinja2). The live R119/R120
+  check — the one that counts — is now driven by `tools/template_identity.py`
+  (see above): run `suite`, `render` against the stock and the merged server, and
+  `diff` + `replyfmt` on a machine that can reach them.
 - Token identity was verified with the tokenizer at
   `/var/home/dylan/models-boot/tcc-qwen38-flash-next-mxfp4-fp8-gptq/` only;
   the engine's own tokenizer is stated to be the same.

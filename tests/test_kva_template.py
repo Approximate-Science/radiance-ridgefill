@@ -4,35 +4,64 @@ Offline verification only — the inference engine is never run:
   * jinja2 stands in for the template engine (with minimal stubs for the
     non-Jinja callables both base templates use: `raise_exception`;
     `strftime_now` is provided too, though neither base needs it);
-  * the shipped tokenizer verifies the marker is exactly the spec's 64 ids.
+  * a shipped tokenizer verifies the marker is exactly the spec's 64 ids.
 
-Spec, base templates and tokenizer are read-only inputs on this machine.
+The spec and the container base template are portable fixtures beside this
+file; the operator template and the tokenizer are OPTIONAL machine-local
+inputs, pointed at by `KVA_TEST_OPERATOR_TEMPLATE` and `KVA_TEST_TOKENIZER`.
 """
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 from jinja2 import Environment
-from transformers import AutoTokenizer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
 from tools.kva_template import build_block, load_spec  # noqa: E402
 
-SPEC_PATH = Path(
-    "/var/home/dylan/AI-Work/radiance-kva-plugin-20261004/worker-context/kva-marker-spec.json"
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+SPEC_PATH = FIXTURES_DIR / "kva-marker-spec.json"
+
+OPERATOR_TEMPLATE_ENV = "KVA_TEST_OPERATOR_TEMPLATE"
+TOKENIZER_ENV = "KVA_TEST_TOKENIZER"
+_operator_template = os.environ.get(OPERATOR_TEMPLATE_ENV)
+OPERATOR_TEMPLATE = Path(_operator_template) if _operator_template else None
+_tokenizer_dir = os.environ.get(TOKENIZER_ENV)
+TOKENIZER_DIR = Path(_tokenizer_dir) if _tokenizer_dir else None
+
+needs_operator_template = pytest.mark.skipif(
+    OPERATOR_TEMPLATE is None or not OPERATOR_TEMPLATE.is_file(),
+    reason=f"optional machine-local input: set {OPERATOR_TEMPLATE_ENV} to the operator base "
+           "template (it is unset, or its file is missing)",
 )
+needs_tokenizer = pytest.mark.skipif(
+    TOKENIZER_DIR is None or not TOKENIZER_DIR.is_dir(),
+    reason=f"optional machine-local input: set {TOKENIZER_ENV} to the tokenizer directory "
+           "(it is unset, or its directory is missing)",
+)
+
 BASE_PATHS = {
-    "container": Path(
-        "/var/home/dylan/AI-Work/radiance-kva-plugin-20261004/worker-context/container-chat-template.jinja"
-    ),
-    "operator": Path("/var/mnt/qwen-storage/models/text/qwen/qwen3.8/sharp-v22-dylan.jinja"),
+    "container": FIXTURES_DIR / "container-chat-template.jinja",
+    "operator": OPERATOR_TEMPLATE,
 }
-TOKENIZER_DIR = Path("/var/home/dylan/models-boot/tcc-qwen38-flash-next-mxfp4-fp8-gptq")
+
+
+def _base_params(names):
+    """A param per base template; the operator one is skipped when its
+    machine-local env var is unset or missing (the skip reason names it)."""
+    params = []
+    for name in names:
+        marks = [needs_operator_template] if name == "operator" else []
+        params.append(pytest.param(name, marks=marks))
+    return params
+
+
 TOOL = REPO_ROOT / "tools" / "kva_template.py"
 
 SCENARIOS = [
@@ -85,6 +114,9 @@ def block(spec):
 
 @pytest.fixture(scope="session")
 def tokenizer():
+    # Only reached from tests marked with `needs_tokenizer`, so TOKENIZER_DIR is set.
+    from transformers import AutoTokenizer
+
     return AutoTokenizer.from_pretrained(str(TOKENIZER_DIR))
 
 
@@ -216,7 +248,7 @@ def test_check_names_the_reason_on_corruption(tmp_path):
     assert "marker block does not match spec" in result.stderr
 
 
-@pytest.mark.parametrize("base_name", list(BASE_PATHS))
+@pytest.mark.parametrize("base_name", _base_params(BASE_PATHS))
 def test_merged_file_is_block_plus_base_bytes(tmp_path, block, base_name):
     out = tmp_path / f"merged-{base_name}.jinja"
     result = run_cli("merge", "--spec", SPEC_PATH, "--base", BASE_PATHS[base_name], "--out", out)
@@ -224,7 +256,7 @@ def test_merged_file_is_block_plus_base_bytes(tmp_path, block, base_name):
     assert out.read_bytes() == block.encode("utf-8") + BASE_PATHS[base_name].read_bytes()
 
 
-@pytest.mark.parametrize("base_name", list(BASE_PATHS))
+@pytest.mark.parametrize("base_name", _base_params(BASE_PATHS))
 def test_strip_round_trips_a_merge(tmp_path, base_name):
     merged = tmp_path / "merged.jinja"
     stripped = tmp_path / "base.jinja"
@@ -260,7 +292,7 @@ def test_strip_refuses_a_file_without_marker(tmp_path):
 # Rendering: requests WITHOUT the kwarg are byte-identical to the base
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("base_name", list(BASE_PATHS))
+@pytest.mark.parametrize("base_name", _base_params(BASE_PATHS))
 @pytest.mark.parametrize("scenario", SCENARIOS, ids=[s[0] for s in SCENARIOS])
 def test_off_case_renders_byte_identically(env, block, base_name, scenario):
     _, messages, add_generation_prompt = scenario
@@ -274,7 +306,7 @@ def test_off_case_renders_byte_identically(env, block, base_name, scenario):
 # Rendering: requests WITH kva="on" get exactly the 64-token marker first
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("base_name", list(BASE_PATHS))
+@pytest.mark.parametrize("base_name", _base_params(BASE_PATHS))
 @pytest.mark.parametrize("scenario", [SCENARIOS[0], SCENARIOS[3]])
 def test_on_case_renders_marker_plus_base(env, block, spec, base_name, scenario):
     _, messages, add_generation_prompt = scenario
@@ -300,6 +332,7 @@ def test_non_on_switch_values_disable_the_marker(env, block, kva_value):
     assert render(env, merged_source(block, "container"), **context) == base
 
 
+@needs_tokenizer
 def test_marker_tokenizes_to_exactly_the_spec_ids(spec, tokenizer):
     marker = expected_marker(spec)
     ids = tokenizer(marker, add_special_tokens=False)["input_ids"]
@@ -318,6 +351,7 @@ def dial_cases(spec):
 
 
 @pytest.mark.parametrize("kwarg,value", list(dial_cases(json.loads(SPEC_PATH.read_text()))))
+@needs_tokenizer
 def test_each_dial_value_selects_its_token(env, spec, tokenizer, kwarg, value):
     context = dict(kva="on", **{kwarg: value})
     marker = render(env, build_block(spec), **context)
@@ -348,6 +382,7 @@ def test_unknown_dial_value_suppresses_the_marker(env, block, kwarg):
     assert render(env, merged_source(block, "container"), **context) == base
 
 
+@needs_tokenizer
 def test_numeric_dial_values_match_the_string_tables(env, spec, tokenizer):
     """chat_template_kwargs arrive as JSON: numbers like 0.5 / 2048 must resolve
     via |string to the table keys '0.5' / '2048'."""
