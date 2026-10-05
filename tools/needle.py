@@ -45,6 +45,7 @@ HTTP_TIMEOUT = 3600.0
 
 TAIL_TOKENS = 2048     # the plugin's exact tail T (README.md RADIANCE_KVA_TAIL)
 N_DIGITS = 7           # every magic number is exactly 7 digits
+WRAP = ([], [])        # --chat: the template's ids before and after a user message (chat_wrap)
 
 
 # A fixed pool of common words for the keys: no external word list is available to a
@@ -263,6 +264,21 @@ def mcnemar_exact_p(b, c):
 
 # ---------------------------------------------------------------- build
 
+def chat_wrap():
+    """The model's chat template around ONE user message, generation prompt on, thinking off: the ids the server's
+    own template renders before and after the message's content. A raw prompt makes an instruct model continue the
+    document or open a reasoning block, and a 16-token reply then holds no number (2026-10-05: stock 0/28)."""
+    probe = "needle probe content"
+    r = http_json("POST", BASE + "/tokenize",
+                  {"messages": [{"role": "user", "content": probe}], "add_generation_prompt": True,
+                   "chat_template_kwargs": {"enable_thinking": False}})
+    rendered, content = r.get("tokens") or [], tokenize(probe)
+    for i in range(len(rendered) - len(content) + 1):
+        if rendered[i:i + len(content)] == content:
+            return rendered[:i], rendered[i + len(content):]
+    die("the chat template's render does not contain the message's own ids: cannot wrap the prompts")
+
+
 def build_item(rng, doc_ids, length, depth, variant, n_keys, seed):
     """One corpus item: filler + needle block at `depth` + the question, EXACTLY
     `length` tokens.  Pure given the pre-tokenised pieces' ids (tokenize() is the
@@ -275,7 +291,8 @@ def build_item(rng, doc_ids, length, depth, variant, n_keys, seed):
                   for k, n in zip(keys, numbers)]
     question_ids = tokenize("\n\n" + question_sentence(keys[asked]))
     block_len = sum(len(x) for x in needle_ids)
-    filler_total = length - block_len - len(question_ids)
+    head, tail = WRAP
+    filler_total = length - block_len - len(question_ids) - len(head) - len(tail)
     if filler_total <= 0:
         die(f"length {length} has no room for filler: the needle block ({block_len} "
             f"tokens) and the question ({len(question_ids)}) alone exceed it")
@@ -283,16 +300,17 @@ def build_item(rng, doc_ids, length, depth, variant, n_keys, seed):
     pos = needle_position(length, depth, filler_total)
     filler = filler_prefix(doc_ids, filler_total)
 
-    starts, cursor = [], pos
+    starts, cursor = [], len(head) + pos
     for ids in needle_ids:
         starts.append(cursor)
         cursor += len(ids)
 
-    prompt_ids = filler[:pos]
+    prompt_ids = head + filler[:pos]
     for ids in needle_ids:
         prompt_ids.extend(ids)
     prompt_ids.extend(filler[pos:])
     prompt_ids.extend(question_ids)
+    prompt_ids.extend(tail)
     if len(prompt_ids) != length:
         die(f"assembled {len(prompt_ids)} tokens, expected exactly {length} "
             f"(filler {filler_total} + needles {block_len} + "
@@ -342,6 +360,11 @@ def cmd_build(a):
           f"lengths {lengths}, depths {depths}, seed {a.seed}, "
           f"multi-key variant with {a.keys} needles")
     doc_ids = [tokenize(d["prompt"]) for d in docs]
+    global WRAP
+    WRAP = ([], [])
+    if getattr(a, "chat", False):
+        WRAP = chat_wrap()
+        print(f"needle build: --chat: {len(WRAP[0])} template ids before the message, {len(WRAP[1])} after")
     total_doc_tokens = sum(len(x) for x in doc_ids)
     longest = max(lengths)
     if total_doc_tokens < longest:
@@ -543,6 +566,8 @@ def main(argv=None):
                    help="relative needle depths in [0,1], comma/space separated")
     b.add_argument("--keys", type=int, default=4,
                    help="needles in the multi-key variant (the question asks one)")
+    b.add_argument("--chat", action="store_true",
+                   help="wrap each prompt in the server's chat template (one user turn, thinking off)")
     b.add_argument("--seed", type=int, default=0,
                    help="seed for keys, numbers and the asked needle")
     b.add_argument("--server", default="http://127.0.0.1:8100")
