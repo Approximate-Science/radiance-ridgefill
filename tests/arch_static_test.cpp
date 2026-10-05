@@ -2115,6 +2115,28 @@ TEST(the_container_mode_is_ignored_and_said_so) {
     }
 }
 
+/* A capture with no folder takes S from RADIANCE_KVA_CAPTURE_SPLIT, never from the container: a
+ * kva.split key in the model's metadata is not read (nothing kva.* is, but kva.mode's notice). */
+TEST(a_capture_without_a_folder_takes_its_split_from_the_env_not_the_container) {
+    static const char* keys[kN + 1];
+    static const char* vals[kN + 1];
+    for (int i = 0; i < kN; ++i) { keys[i] = kKeys[i]; vals[i] = kVals[i]; }
+    keys[kN] = "kva.split";
+    vals[kN] = "4";
+    RadModelMeta meta = flash_next_meta();
+    meta.n_kv = kN + 1; meta.kv_key = keys; meta.kv_val = vals;
+    RadBuildCtx c = served_ctx();
+    for (const char* split : {"", "4"}) {
+        RadBuilder b;
+        Env env({{"RADIANCE_KVA_CAPTURE", "/nonexistent"}, {"RADIANCE_KVA_CAPTURE_SPLIT", split}});
+        int st = RAD_OK;
+        const std::string err = stderr_of([&] { st = qwen4exp_kva::declare(&b, &meta, &c); });
+        CHECK_EQ(st, *split ? RAD_OK : RAD_E_UNSUPPORTED);
+        if (*split) CHECK_EQ(qwen4exp_kva::g_kva[0].split, (int64_t)kSplit);
+        else CHECK(has(err, "RADIANCE_KVA_CAPTURE_SPLIT is unset"));
+    }
+}
+
 TEST(capture_refuses_a_serving_mode) {
     RadBuilder b;
     hold_kva(b, {"kva.proj"});

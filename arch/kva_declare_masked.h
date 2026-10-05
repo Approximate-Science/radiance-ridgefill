@@ -176,15 +176,18 @@ static int decl_selected(RadBuilder* b, const RadModelMeta* meta, const qwen4exp
 }
 
 /* WHERE THE LATE LAYERS START FOR A CAPTURE, which in `off` mode nothing else has asked: the
- * projector folder's split -- what every other mode calls S -- else the container's `kva.split`
- * metadata (a capture fits a projector, so there may be no folder yet). Declares nothing. */
+ * projector folder's split -- what every other mode calls S -- else RADIANCE_KVA_CAPTURE_SPLIT (a
+ * capture fits a projector, so there may be no folder yet). Never the container: nothing kva.* is
+ * read from the model file. Declares nothing. */
 static int capture_split(RadBuilder* b, const qwen4exp_fp8::Model& m, const RadModelMeta* meta, Kva& k) {
     const Loaded& l = load_folder(meta, b, m);
-    k.split = l.usable ? l.split : rad_meta_geti(meta, "kva.split", -1);
+    k.split = l.usable ? l.split : -1;
+    const char* v = env("RADIANCE_KVA_CAPTURE_SPLIT");
+    if (!l.usable && v && !parse_int(v, &k.split)) k.split = -1;
     if (k.split <= m.ple_layer || k.split >= m.g.n_layer) {
         std::fprintf(stderr, "radiance: qwen4exp_kva: a capture needs the split layer S: there is no "
-                             "usable projector folder and the container's kva.split is %lld\n",
-                     (long long)k.split);
+                             "usable projector folder and RADIANCE_KVA_CAPTURE_SPLIT is %s\n",
+                     v ? v : "unset");
         return RAD_E_UNSUPPORTED;
     }
     return RAD_OK;
