@@ -10,7 +10,8 @@
 #       sh scripts/release_session.sh
 # RK_RELEASE_PARTS (default "package e2e headline needle r64") picks the parts (needle rides on the headline's
 # round-RK_RELEASE_NEEDLE_ROUND servers); the frozen home of RK_RELEASE_COMMIT (default HEAD)
-# is reused when it exists; extraction and the e2e work dir are per version (evidence/release/{extract,e2e}-<version>).
+# is reused when it exists; extraction and the e2e work dir are per version (evidence/release/{extract,e2e}-<version>;
+# RK_RELEASE_EVIDENCE names another evidence dir, so a second session never touches the first one's).
 #
 # Every server runs radiance 1.0.13's shipped flashnext profile (RK_RELEASE_FLAGS, below: MTP 3, prefix cache on with
 # host and disk tiers, 2,048-token steps, wht6 wire, 8 sequences), headroom 3,072 MiB instead of 96. Only the
@@ -36,7 +37,7 @@ D=$(readlink -f "$W/data")
 COMMIT=$(git rev-parse "${RK_RELEASE_COMMIT:-HEAD}") SHORT=$(git rev-parse --short "${RK_RELEASE_COMMIT:-HEAD}")
 : "${RK_RELEASE_PARTS:=package e2e headline needle r64}"
 has() { case " $RK_RELEASE_PARTS " in *" $1 "*) return 0 ;; esac; return 1; }
-E=$W/evidence/release; mkdir -p "$E"
+E=${RK_RELEASE_EVIDENCE:-$W/evidence/release}; mkdir -p "$E"   # a re-run names a fresh dir: e2e refuses a used one
 : "${RK_RELEASE_VERSION:=0.1.0}"
 # the radiance release the plugin is built against and served on (1.0.13 since the rebase, Dylan 2026-10-05):
 : "${RK_RADIANCE_VERSION:=1.0.13}"
