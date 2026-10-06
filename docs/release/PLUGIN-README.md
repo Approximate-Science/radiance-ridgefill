@@ -32,11 +32,16 @@ RidgeFill builds on are at the end.
 ## Installation
 
 1. **Keep the stock model file intact.** Serve the published `.rad` file as is.
-2. **Download the plugin** into a plugin directory (it needs only these two files):
+2. **Download the plugin** from the GitHub release built for your radiance release (each build targets one
+   radiance release, named in the tag; on any other the plugin turns itself off, code RF-201):
    ```sh
-   hf download Dyluhn/radiance-ridgefill --include "architectures/*" "kernels/*" --local-dir <plugin dir>
+   TAG=v0.1.0-radiance-1.2.0
+   URL=https://github.com/Approximate-Science/radiance-ridgefill/releases/download/$TAG
+   curl -fLO $URL/radiance-ridgefill-0.1.0.tar.gz && curl -fLO $URL/SHA256SUMS
+   sha256sum -c SHA256SUMS && tar -xzf radiance-ridgefill-0.1.0.tar.gz   # <plugin dir> = radiance-ridgefill-0.1.0/
    ```
-   The same repo's `release/` folder holds the release tarballs and their `SHA256SUMS`.
+   (`gh release download $TAG -R Approximate-Science/radiance-ridgefill` does the same.) The folder holds
+   `architectures/`, `kernels/`, this README, `ridgefill_report.py` and `TROUBLESHOOTING.md`.
 3. **Download the projector** into a `projector/` folder beside the model file:
    ```sh
    hf download Dyluhn/ridgefill-projector-qwen3.8-flash-next-i8 --local-dir <model dir>/projector

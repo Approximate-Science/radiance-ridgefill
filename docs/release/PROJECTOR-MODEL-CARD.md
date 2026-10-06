@@ -33,7 +33,8 @@ RidgeFill builds on are at the end. The credit also travels inside the folder (b
 ## Use
 
 Download this folder into a `projector/` folder beside the stock model file, and install the
-plugin from [Dyluhn/radiance-ridgefill](https://huggingface.co/Dyluhn/radiance-ridgefill):
+plugin from its [GitHub releases](https://github.com/Approximate-Science/radiance-ridgefill/releases) (pick the
+build for your radiance release):
 
 ```sh
 hf download Dyluhn/ridgefill-projector-qwen3.8-flash-next-i8 --local-dir <model dir>/projector

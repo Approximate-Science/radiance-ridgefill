@@ -16,7 +16,7 @@ identifiers:
     value: 10.5281/zenodo.23179168
     description: The archived release (Zenodo).
 license: Apache-2.0
-repository-code: "https://huggingface.co/Dyluhn/radiance-ridgefill"
+repository-code: "https://github.com/Approximate-Science/radiance-ridgefill"
 url: "https://doi.org/10.5281/zenodo.23179168"
 keywords:
   - radiance
