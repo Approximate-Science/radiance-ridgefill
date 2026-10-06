@@ -35,6 +35,14 @@ Cases 0-6 PASS, 7 SKIPPED (per-request RidgeFill parked):
 The first attempt aborted at case 5: the gate's glob found only bf16 map files (fixed in f57f016).
 
 ## Headline (S4 protocol: settle.py warm-up then speed.sh 7 reps, median; two rounds, int8 folder, T 2048)
+> **Correction (2026-10-06): these ratios are not the prefill speed to quote.** The quality and speed reps were
+> still falling through the expert cache's shift toward layers 0–23 (notes/ramp.md: they are its requests
+> #10–#17), and this stock was 18% slower than in later sessions. Measured since: 32K typical use (fresh server,
+> or long prompts mixed with chat) quality 1.24x / speed 1.70x; sustained long-prompt traffic 2.05x / 2.81x
+> after ~15–18 long prompts; no loss on short prompts or decode (notes/mixed-traffic.md). The docs carry those
+> since 0.1.0-r2. The table below is kept as measured.
+
+
 | | 16K | 32K |
 |---|---|---|
 | stock | 12,258 / 12,269 ms | 24,058 / 24,069 ms |
