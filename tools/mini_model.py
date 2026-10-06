@@ -270,10 +270,9 @@ def write_config(real: Path, m: Mini, out: Path):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--out", required=True, help="the checkpoint directory (created)")
-    ap.add_argument("--real-config", default="/var/home/dylan/projects/inference/radiance-kva/data/stub",
-                    help="dir with the real config.json (default: the published container's source stub)")
-    ap.add_argument("--tokenizer", default="/var/home/dylan/models-boot/tcc-qwen38-flash-next-mxfp4-fp8-gptq",
-                    help="dir with the real tokenizer files")
+    ap.add_argument("--real-config", default=str(Path(__file__).resolve().parents[1] / "data" / "stub"),
+                    help="dir with the real config.json (default: data/stub in this repo, the source stub)")
+    ap.add_argument("--tokenizer", required=True, help="dir with the real tokenizer files")
     ap.add_argument("--hidden", type=int, default=256)
     ap.add_argument("--layers", type=int, default=8)
     ap.add_argument("--experts", type=int, default=16)
