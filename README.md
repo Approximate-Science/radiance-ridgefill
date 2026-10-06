@@ -13,6 +13,22 @@ RidgeFill is by Dylan Johnston and tcclaviger (Apache-2.0, `NOTICE`); cite it wi
 [10.5281/zenodo.23179168](https://doi.org/10.5281/zenodo.23179168) (`CITATION.cff`; BibTeX and the prior work
 it builds on at the end of this file).
 
+## What it gains
+
+Measured on two AMD R9700 (gfx1201), `--tp 2`, radiance 1.0.13's flashnext profile (expert_tiered offload,
+MTP 3, `--gpu-headroom-mib 3072`), int8 projector, against the same server with `RADIANCE_RIDGEFILL=off`
+(notes/ramp.md, notes/mixed-traffic.md):
+
+- **Typical use: a 32K-token prompt prefills 1.24x faster (quality) / 1.70x (speed)** on a fresh server or with
+  long prompts mixed with chat (1 long : 6 short). A fresh server's first long prompts: 1.07–1.13x / 1.47–1.56x.
+- **Sustained long-prompt traffic: 2.05x / 2.81x at 32K** (1.85x / 2.33x at 16K), after ~15–18 long prompts
+  back to back, once radiance's expert cache has shifted toward layers 0–23. Short chats and decode shift it back.
+- **Short prompts and decode: no loss** (decode −0.3% / −0.5% on a fresh server, +3.3–3.9% after long-prompt
+  traffic).
+
+docs/HOW-IT-WORKS.md "Headline results" has the mechanism and the BetterBench sweep. The 2.10x / 2.55x of the
+release session were measured partway through the cache shift and hold only for sustained long-prompt traffic.
+
 ## Build
 
 Two inputs: an **installed radiance** and a **source checkout of the same release**. The arch plugin
@@ -172,8 +188,8 @@ inputs), so they are kept as small as the pass allows (notes/stagee.md §14).
 of VRAM a rank -- the ring's 25.4 MiB slot and 41 MiB of plugin activation buffers -- that the engine would otherwise
 give to resident experts (63 of ~16,850 slab slots). Measured on a server holding the projector with every pass
 running the stock step, settled, against stock started in the same session: **+0.9% at 2K and +1.2% at 8K prompt
-tokens** (notes/stagee.md §19). Decode is unchanged. With RidgeFill on, prefill is 0.82x stock at 16K and 0.58x at 32K tokens
-(quality, tail 2,048).
+tokens** (notes/stagee.md §19). Decode is unchanged. What RidgeFill gains on long prompts is under "What it gains"
+above.
 Keeping the maps in VRAM instead (an earlier option, removed) cost ~1,100 expert slots a card and made a
 configuration stock radiance serves refuse to start (`--max-num-batched-tokens 8192 --max-num-seqs 10`: the pinned
 pool overflowed), and the plugin cannot see the engine's budget when it declares (notes/stagee.md §8).
