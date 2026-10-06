@@ -30,6 +30,22 @@ static void note_meta_mode(const Config& c, const RadBuildCtx* ctx) {
                          "comes from RADIANCE_RIDGEFILL only (now %s)\n", g_log_name, c.meta_mode, kModeNames[c.mode]);
 }
 
+/* BEFORE THE MODEL'S GRAPH: the hazard op (ridgefill_hazard.h), in the modes that may issue it. radiance's
+ * prefill stager stages a routed layer ahead only up to the highest op a pass of that kind issued before
+ * (core/place/stager.cpp will_issue), and a stock pass issues this op after the model's whole step.
+ * Declared after the graph, its handle carried that bound past the draft head's routed layer, and every
+ * trunk pass of more than 1,024 tokens staged the head's experts for nothing: 50 layer stages against
+ * stock's 49, +2.5% prefill (notes/stock-path-cost.md). Declared first, it is never a pass's highest op.
+ * The adapter calls this before its model's declare and hands the handle to core_declare in
+ * RidgeFill::hazard_first; when the projector then proves unusable the op is never issued, which is no
+ * error (radiance abi/rad_builder.h rad_op_resolved). */
+static rad_op core_declare_first(RadBuilder* b) {
+    const char* v = env("RADIANCE_RIDGEFILL");
+    const int mode = v ? pick(v, { "off", "plumb", "speed", "quality" }) : MODE_OFF;
+    if (mode != MODE_SPEED && mode != MODE_QUALITY) return 0;
+    return RAD_OP(b, "ridgefill_hazard", RAD_PARAMS(RAD_RANGE("M", 1, 1)), RAD_NOWEIGHTS);
+}
+
 /* Everything RidgeFill declares after the model's own graph, for the RidgeFill whose `ad` the adapter just filled.
  * `off` with no capture declares nothing at all: the in-tree graph, byte for byte (R6, R7). */
 static int core_declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* ctx, RidgeFill& k) {

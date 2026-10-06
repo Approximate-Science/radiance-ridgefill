@@ -8,7 +8,9 @@ qwen4exp_moe.h, qwen4exp_ridgefill.cpp.
 0. Read radiance docs/PLUGIN.md §11: your adapter is ONE .so claiming (arch_id, quant) and
    shadowing the in-tree stem on $RADIANCE_HOME. Copy qwen4exp_ridgefill.cpp's scaffolding
    (`RAD_ARCH_NO_EXPORTS` + the `#include` of your in-tree arch .cpp, then `#include "ridgefill_core.h"`,
-   the declare/step/probe thins that call `core_declare` / `core_step`, the `RAD_ARCH_PLUGIN` exports)
+   the declare/step/probe thins that call `core_declare` / `core_step`, the `RAD_ARCH_PLUGIN` exports;
+   the declare calls `core_declare_first` BEFORE your in-tree declare and hands its handle to
+   `core_declare` in `RidgeFill::hazard_first`, so the hazard op never sorts after your draft head)
    and arch/CMakeLists.txt's `rad_add_plugin` entry (stem = the shadowed .so's name; pass the same
    name as `shadow_so` and to `open_guard`, so a release mismatch forwards to it).
 1. Write `<model>_adapter.h` with `adapter_of(model)` filling every fact from your in-tree Model

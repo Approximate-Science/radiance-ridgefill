@@ -24,13 +24,8 @@ using namespace rad::arch;
  * lie BEFORE the pass (span - q > 0 for the last sequence's q rows) and exist (its context > 0;
  * max_ctx_len is 0 exactly when no sequence has any, radiance core/sched/batch.cpp bound_bucket). With
  * one prefill sequence its q is the step's rows after the decoders; with more it is not known here.
- *
- * WHY A STOCK PASS THAT CANNOT COUNT ISSUES NOTHING: the op is declared after the whole in-tree graph,
- * MTP head included, and the engine's prefill stager stages a routed layer ahead only up to the last op
- * a pass of that kind issued before (radiance core/place/stager.cpp will_issue). One op past the head
- * made every trunk pass of more than 1,024 tokens stage the head's layer for nothing: 50 layer stages
- * against stock's 49, +2.5% prefill time at 1,600-2,000 tokens (notes/stock-path-cost.md). A pass that
- * can count still pays that stage; that needs a prefix hit and a 1,025-2,047-row step. */
+ * A stock pass that cannot count issues nothing, so a fresh prompt's stock path is the model's own step
+ * op for op. (Where the op sits in the graph matters too: ridgefill_step.h core_declare_first.) */
 static bool may_count(const RadBatch* batch, int64_t span, int64_t D, int64_t DT) {
     if (span <= 0 || batch->max_ctx_len <= 0) return false;
     return batch->n_seq - D > 1 || span > batch->n_tok - DT;

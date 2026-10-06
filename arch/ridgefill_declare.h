@@ -73,6 +73,7 @@ struct RidgeFill {
     rad_kvgroup kv_meta = 0;
     int         meta_layer = -1;
     rad_op      op_hazard = 0;
+    rad_op      hazard_first = 0;             /* the op as core_declare_first declared it, before the graph */
     /* The projector GEMM per late layer, and the quantiser that writes a projected block input's
      * codes as the connection read would have. */
     std::vector<rad_op> op_proj;              /* [n_layer]: 0 below S */

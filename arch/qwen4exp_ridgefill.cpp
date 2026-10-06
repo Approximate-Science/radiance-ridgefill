@@ -58,6 +58,7 @@ constexpr const char* kShadowSo = "qwen4exp_fp8.so";
 
 static int declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* ctx) {
     if (g_forward.declare) return g_forward.declare(b, meta, ctx);
+    const rad_op hazard = core_declare_first(b);   /* before the in-tree graph: ridgefill_step.h says why */
     RAD_ARCH_TRY(qwen4exp_fp8::declare(b, meta, ctx));
 
     /* A SIZING DECLARE WRITES SCRATCH, as the included declare does. Its geometry is read from
@@ -70,6 +71,7 @@ static int declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* c
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[ctx->rank];
     if (m.layers.empty()) return RAD_E_STATE;
     k.ad = adapter_of(m);
+    k.hazard_first = hazard;
     return core_declare(b, meta, ctx, k);
 }
 

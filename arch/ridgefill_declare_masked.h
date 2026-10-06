@@ -192,7 +192,7 @@ static int decl_hazard(RadBuilder* b, const RadBuildCtx* ctx, RidgeFill& k) {
     d.state_dim[1] = 2;   /* {last approximated position + 1, positions counted below} */
     k.kv_meta = rad_decl_kv_group(b, k.nm.f("kv_ridgefill_meta"), &d);
     if (!k.kv_meta || rad_bind_layer_kv(b, k.meta_layer, k.kv_meta) < 0) return RAD_E_INVAL;
-    k.op_hazard = RAD_OP(b, "ridgefill_hazard", RAD_PARAMS(RAD_RANGE("M", 1, 1)), RAD_NOWEIGHTS);
+    k.op_hazard = k.hazard_first;   /* declared before the model's graph (ridgefill_step.h core_declare_first) */
     if (!k.op_hazard) return ctx->shape_probe ? RAD_OK : RAD_E_UNSUPPORTED;
     if (!ctx->shape_probe && !g_hazard_dev[ctx->rank]) {
         g_hazard_dev[ctx->rank] = rad_dev_alloc(sizeof(float), RAD_MEM_HOST_MAPPED);
@@ -205,7 +205,8 @@ static int decl_hazard(RadBuilder* b, const RadBuildCtx* ctx, RidgeFill& k) {
 
 /* The selected set, its ops and its refusals. Under a sizing declare nothing is refused or copied:
  * the real declare already decided, and its handles are the ones issued. With no usable projector
- * nothing at all is declared: the engine serves the in-tree graph. */
+ * nothing more is declared: the engine serves the in-tree graph (after the hazard op core_declare_first
+ * declared, which is then never issued). */
 static int decl_selected(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* ctx, RidgeFill& k) {
     const bool probe = ctx->shape_probe != 0;
     if (!take_folder(b, meta, k)) return RAD_OK;

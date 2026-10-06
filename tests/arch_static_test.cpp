@@ -240,8 +240,9 @@ TEST(off_with_a_projector_folder_still_declares_the_in_tree_graph) {
 }
 
 /* A mode is asked and the folder is missing, or not this model's, or misshapen: the folder is
- * refused by name and the declare is the in-tree graph exactly (DD-K: refuse only what cannot run,
- * and serve stock). Also when the container still holds appended ridgefill.* weights: none is declared. */
+ * refused by name and the declare is the in-tree graph exactly, after the one hazard op declared first
+ * and never issued (DD-K: refuse only what cannot run, and serve stock). Also when the container still
+ * holds appended ridgefill.* weights: none is declared. */
 TEST(a_mode_without_a_usable_projector_serves_the_in_tree_graph) {
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
@@ -275,12 +276,15 @@ TEST(a_mode_without_a_usable_projector_serves_the_in_tree_graph) {
         served(stock); served(ridgefill);
         k.setup(ridgefill);
         hold_appended_weights(ridgefill);
+        /* the hazard op, declared before the graph in speed and quality (core_declare_first), never issued */
+        RAD_OP(&stock, "ridgefill_hazard", RAD_PARAMS(RAD_RANGE("M", 1, 1)), RAD_NOWEIGHTS);
         REQUIRE_EQ(qwen4exp_fp8::declare(&stock, &meta, &c), RAD_OK);
         Env env({{"RADIANCE_RIDGEFILL", "quality"}});
         int st = -1;
         const std::string log = stderr_of([&] { st = qwen4exp_ridgefill::declare(&ridgefill, &meta, &c); });
         CHECK_EQ(st, RAD_OK);
         check_same_graph(stock, ridgefill);
+        CHECK_EQ(qwen4exp_ridgefill::g_ridgefill[0].op_hazard, (rad_op)0);
         CHECK(has(log, k.said));
         CHECK(has(log, "serving stock"));
         CHECK_EQ(g_mem.copies.size(), (size_t)0);
@@ -1712,34 +1716,43 @@ TEST(the_hazard_instrument_counts_on_tail_passes_and_records_on_approximate_ones
 }
 
 /* THE EXTRA PREFILL STAGE (notes/stock-path-cost.md): radiance's prefill stager stages a routed layer ahead
- * only up to the highest op a pass of that kind issued before (core/place/stager.cpp will_issue), and every
- * RidgeFill op is declared after the in-tree graph, MTP head included. A stock pass that issued the hazard op
- * made each trunk pass of more than 1,024 tokens stage the head's layer for nothing (50 stages against 49,
- * +2.5% prefill). So a stock pass whose hazard rule can count nothing -- a fresh prompt (no context), or one
- * prefill sequence whose rows cover the whole span -- issues exactly the in-tree step and no op past its
- * graph, with MTP declared. Passes that can count still end with the op. */
-TEST(a_stock_pass_that_can_count_no_hazard_issues_no_op_past_the_in_tree_graph) {
+ * only up to the highest op a pass of that kind issued before (core/place/stager.cpp will_issue). The hazard
+ * op, declared after the in-tree graph and issued after a stock pass, carried that bound past the MTP head,
+ * and each trunk pass of more than 1,024 tokens staged the head's layer for nothing (50 stages against 49,
+ * +2.5% prefill). So, with MTP declared, no stock pass issues an op above the highest one the in-tree step
+ * issues on the same batch: not a fresh prompt, not a prefix hit (the rule may count, so the op is issued,
+ * but it was declared first). And a stock pass whose rule can count nothing -- no context, or one prefill
+ * sequence whose rows cover the whole span -- issues exactly the in-tree step. */
+rad_op highest(const std::vector<RecIssue>& v) {
+    rad_op h = 0;
+    for (const RecIssue& i : v) h = std::max(h, i.op);
+    return h;
+}
+
+TEST(no_stock_pass_issues_an_op_above_the_in_tree_steps_highest) {
     Pair p;
     declare_pair(p, "quality", 0, 1, 0, /*max_spec=*/3);
     REQUIRE_EQ(p.st, RAD_OK);
     const rad_op op_hazard = qwen4exp_ridgefill::g_ridgefill[0].op_hazard;
     REQUIRE(op_hazard != 0);
-    const rad_op last_in_tree = (rad_op)p.stock.ops.size();
     for (const Shape& s : {Shape{{1600}, 0, 0, 0}, Shape{{2000}, 0, 0, 0}, Shape{{2048}, 0, 0, 4096},
-                           Shape{{1, 1, 2048}, 2, 0, 4096}}) {
+                           Shape{{1, 1, 2048}, 2, 0, 4096}}) {   /* the rule can count nothing */
         Batch x = make_step(p.ridgefill, s);
         const Run got = run_step(qwen4exp_ridgefill::step, x.b);
+        const std::vector<RecIssue> want = run_step(qwen4exp_fp8::step, x.b).issues;
         CHECK_EQ(count(got.log, "ridgefill: approximate step"), 0);
-        CHECK_EQ(differ(got.all, run_step(qwen4exp_fp8::step, x.b).issues), 0);
-        rad_op highest = 0;
-        for (const RecIssue& i : got.all) highest = std::max(highest, i.op);
-        CHECK(highest <= last_in_tree);
+        CHECK_EQ(differ(got.all, want), 0);
+        CHECK(highest(got.all) <= highest(want));
     }
-    for (const Shape& s : {Shape{{1600}, 0, 0, 4096}, Shape{{64, 2048}, 0, 0, 4096}}) {   /* may count */
+    for (const Shape& s : {Shape{{1600}, 0, 0, 4096}, Shape{{1200}, 0, 0, 30000},     /* prefix hits */
+                           Shape{{64, 2048}, 0, 0, 4096}, Shape{{1, 1, 1500}, 2, 0, 4096}}) {
         Batch x = make_step(p.ridgefill, s);
         const Run got = run_step(qwen4exp_ridgefill::step, x.b);
+        const std::vector<RecIssue> want = run_step(qwen4exp_fp8::step, x.b).issues;
+        CHECK_EQ(count(got.log, "ridgefill: approximate step"), 0);
         REQUIRE(!got.all.empty());
         CHECK_EQ(got.all.back().op, op_hazard);
+        CHECK(highest(got.all) <= highest(want));
     }
 }
 
@@ -2184,18 +2197,22 @@ TEST(the_logits_dump_names_each_rows_sequence_and_changes_no_issue) {
 
 /* Speed declares the projector per late layer and one quantiser, after the whole in-tree graph and
 
-/* Every op a serving mode adds is declared after the whole in-tree graph and nothing in between:
- * the in-tree op list is a prefix of the RidgeFill one. Speed adds the projector per late layer, one
- * quantiser, the correction pair per late delta-net layer, the mask, the stream copy, the select,
- * the drop and one alternate down handle per routed layer from S-1. */
-TEST(speed_adds_its_ops_after_the_in_tree_graph) {
+/* Every op a serving mode adds is declared after the whole in-tree graph and nothing in between,
+ * except the hazard op, declared FIRST (core_declare_first: a stock pass issues it, and after the graph
+ * it would raise the prefill stager's bound past the draft head). So the in-tree op list follows that
+ * one op. Speed adds the projector per late layer, one quantiser, the correction pair per late
+ * delta-net layer, the mask, the stream copy, the select, the drop and one alternate down handle per
+ * routed layer from S-1. */
+TEST(speed_declares_the_hazard_op_first_and_its_other_ops_after_the_in_tree_graph) {
     Pair p;
     declare_pair(p, "speed");
     REQUIRE_EQ(p.st, RAD_OK);
-    REQUIRE(p.ridgefill.ops.size() > p.stock.ops.size());
-    for (size_t i = 0; i < p.stock.ops.size(); ++i) CHECK_EQ(p.ridgefill.ops[i].op, p.stock.ops[i].op);
+    REQUIRE(p.ridgefill.ops.size() > p.stock.ops.size() + 1);
+    CHECK_EQ(p.ridgefill.ops[0].op, std::string("ridgefill_hazard"));
+    CHECK_EQ(qwen4exp_ridgefill::g_ridgefill[0].op_hazard, (rad_op)1);
+    for (size_t i = 0; i < p.stock.ops.size(); ++i) CHECK_EQ(p.ridgefill.ops[i + 1].op, p.stock.ops[i].op);
     std::map<std::string, int> n;
-    for (size_t i = p.stock.ops.size(); i < p.ridgefill.ops.size(); ++i) {
+    for (size_t i = p.stock.ops.size() + 1; i < p.ridgefill.ops.size(); ++i) {
         const RecOp& o = p.ridgefill.ops[i];
         ++n[o.op];
         if (o.op != "ridgefill_gemm_nt_bias") continue;
@@ -2216,7 +2233,7 @@ TEST(speed_adds_its_ops_after_the_in_tree_graph) {
     CHECK_EQ(n["ridgefill_rho_update"], 0);
     int total = 0;
     for (const auto& [op, c] : n) total += c;
-    CHECK_EQ(total, (int)(p.ridgefill.ops.size() - p.stock.ops.size()));
+    CHECK_EQ(total, (int)(p.ridgefill.ops.size() - p.stock.ops.size() - 1));
 }
 
 /* A SIZING DECLARE describes the same graph with only rows smaller and leaves the step's state
@@ -2907,9 +2924,11 @@ TEST(an_int8_folder_without_one_agreed_stored_form_is_refused_by_name) {
                   "vocab_sha256": ")" + std::string(kTinyVocab) + R"("}, "files": {}})";
     g_test_folder.manifest = qwen4exp_ridgefill::Json{};
     qwen4exp_ridgefill::json_parse(text.data(), text.size(), &g_test_folder.manifest);
+    RAD_OP(&stock, "ridgefill_hazard", RAD_PARAMS(RAD_RANGE("M", 1, 1)), RAD_NOWEIGHTS);   /* declared first, never issued */
     REQUIRE_EQ(qwen4exp_fp8::declare(&stock, &meta, &c), RAD_OK);
     const std::string log = stderr_of([&] { CHECK_EQ(qwen4exp_ridgefill::declare(&ridgefill, &meta, &c), RAD_OK); });
     check_same_graph(stock, ridgefill);
+    CHECK_EQ(qwen4exp_ridgefill::g_ridgefill[0].op_hazard, (rad_op)0);
     CHECK(has(log, "its projector dtype 'i4' is neither bf16 nor i8"));
 }
 
