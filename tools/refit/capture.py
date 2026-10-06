@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """Stage 6 capture driver: send the refit's prompts to a running server one at a time and file each prompt's capture
 in a directory of its own (`run`); add the projector captures to running ridge sums and delete them once a saved
 checkpoint holds them (`acc`, CPU, alongside or after `run`).

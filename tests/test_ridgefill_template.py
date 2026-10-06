@@ -1,3 +1,5 @@
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """Tests for tools/ridgefill_template.py (RidgeFill chat-template marker snippet).
 
 Offline verification only — the inference engine is never run:

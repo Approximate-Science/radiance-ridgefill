@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* ridgefill_projector.h -- the projector folder for Qwen4-Exp: loaded once per process, checked against
  * the model, uploaded per rank at the rank's real declare, and handed to the issue sites as RAW
  * operands (PACKAGING.md §0, REFUTATION-3 §2.1, §2.4, §4).

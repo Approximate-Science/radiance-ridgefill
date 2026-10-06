@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # once.sh -- run the engine ONCE in the foreground with the shared flags plus extra args, for the
 # engine modes that print and exit (--debug-graph, --debug-placement, --debug-selection) or any
 # one-off run whose log is the evidence. Output goes to stdout+stderr; the caller redirects it.

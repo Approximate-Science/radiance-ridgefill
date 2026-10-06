@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # session.sh -- the Stage 6 refit's GPU sessions, each the WHOLE serve -> capture -> stop sequence under the GPU
 # lock (WORKER-RULES: the lock file is the caller's RK_GPU_LOCK; flock blocks until the holder releases it).
 #

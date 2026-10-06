@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # release_session.sh -- THE FINAL RELEASE SESSION: one GPU session, from one commit of main.
 #
 #   gpuq.sh release env RK_RELEASE_VERSION=0.1.0 sh scripts/release_session.sh   (from a checkout of main's HEAD)

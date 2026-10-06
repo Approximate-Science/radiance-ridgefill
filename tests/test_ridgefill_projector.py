@@ -1,3 +1,5 @@
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """tools/ridgefill_projector.py on synthetic inputs and a synthetic container (no model files, no GPU).
 
 The tiny container's two hashes are the constants tests/arch_static_test.cpp expects of the same bytes, which is what

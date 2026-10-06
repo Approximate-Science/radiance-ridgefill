@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """R45: the engine's per-chunk mask dump against the rule, transcribed here apart from the plugin.
 
   mask_rule.py --dump DIR --sidecar F [--lengths 9216,10000,...] [--chunk 2048] [--tail 2048] [--tile 64]

@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* ridgefill_config.h -- what an operator can turn on the RidgeFill plugin, read ONCE, at declare.
  *
  * step() reads only the parsed Config and keyed batch fields, never the environment (HANDOVER

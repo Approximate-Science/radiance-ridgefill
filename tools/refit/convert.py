@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """Radiance's projector captures (RADIANCE_RIDGEFILL_CAPTURE, notes/arch.md "Capture") as tcc Capture records, so the
 research pipeline's own code reads them unchanged (R42): qfn.fit.Sums.add takes the record dict directly (no file
 round trip for the training rows), and fit.Held / fit.records read the held-out documents from the capture_NNNNN.pt

@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # update_radiance.sh -- is the plugin compatible with another radiance release? One command, one verdict.
 #
 # USAGE: scripts/update_radiance.sh <radiance tag or commit> [--host-only] [--ci] [--gpu-smoke]

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """Build and verify the RidgeFill sidecar shard: the fitted projector, the GDN state correction and the row-selection
 score tables, as one safetensors shard plus an index naming only it, so the directory is a checkpoint
 namespace `rad-convert --reuse --in-place` can append from.

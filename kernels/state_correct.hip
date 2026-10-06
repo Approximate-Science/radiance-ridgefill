@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* state_correct.hip -- the device rows that touch a GDN state slot: ridgefill_state_correct (apply /
  * undo the correction) and ridgefill_state_read (copy the slot out), one workgroup per (head, sequence)
  * each. ridgefill_state_correct addresses each pool (state, applied, ND) through its own slot index

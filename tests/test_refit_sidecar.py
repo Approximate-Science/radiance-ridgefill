@@ -1,3 +1,5 @@
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """tools/ridgefill_sidecar.py --names refit for Stage 6's two appends: the projector alone first (no ridgefill.str.*, so
 RADIANCE_RIDGEFILL_ST=refit serves with no correction while the correction is being fitted), then the full refit set,
 whose projector tensors must be byte-identical to the first build's (the second append reuses them by name)."""

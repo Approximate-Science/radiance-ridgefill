@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """conc_table.py -- R55 / R56 from conc.py ttft results: settled medians and the ratios the rows read.
 
 Per (length, C): the long prompt's prompt_ms median over the settled reps (reps[skip:], A.1's warmed

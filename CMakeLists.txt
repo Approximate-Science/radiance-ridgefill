@@ -1,3 +1,5 @@
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # radiance-ridgefill -- RidgeFill for radiance's Qwen4-Exp (Qwen3.8-Flash-Next), as plugins.
 #
 #   arch/     qwen4exp_fp8.so, plugin name qwen4exp_ridgefill: the in-tree Qwen4-Exp plugin #included and

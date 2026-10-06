@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """conc_steps.py -- R57: every step of a long prompt that the rule says is approximate logged one.
 
 Reads a conc.py ttft result and its per-rep log windows (the engine's RADIANCE_LOG_STEPS lines and

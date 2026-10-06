@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # kl_session.sh -- KL-mode runs of the investigation, ALL under one hold of the GPU lock: record a reference on a
 # corpus (stock engine), then speed-mode candidates at the given correction strengths.
 #

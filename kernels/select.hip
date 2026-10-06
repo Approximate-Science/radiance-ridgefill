@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* select.hip -- ridgefill_select and ridgefill_drop_rows' device rows: one workgroup per row of the mask,
  * which returns at once unless the row is approximated (mask 1).
  *

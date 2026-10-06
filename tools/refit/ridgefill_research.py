@@ -1,3 +1,5 @@
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """Read-only access to the RidgeFill research code the refit reuses unchanged (qfn.fit Sums / Held / solve, ridgefill.ridge,
 qfn.hc, qfn.bigcap's checkpoint format, qfn.steps' chat frame). Its repo root comes from RIDGEFILL_RESEARCH_ROOT, so no
 path is typed in this repo (R27); nothing here writes to it."""

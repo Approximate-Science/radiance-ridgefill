@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* ridgefill.h -- what the RidgeFill ops share between the row table, the host rows and the device rows.
  *
  * The plugin is one .so with a host row (the oracle, plain C++) and a device row per op. The

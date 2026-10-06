@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """A KL-mode corpus whose docs end half a chunk past a chunk boundary (R49, R50, R51).
 
   kld_offset_corpus.py --corpus corpus/quick9.jsonl --tokenizer DIR --out corpus/quick9-off1024.jsonl

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """mask_pn2.py -- R58': on every dumped masked step with two (or more) prefill entries, the earlier
 sequences' rows are all exact.
 

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """Quality mode's exact rows, checked against the paper's rule (research repo fnlev/rules.py, the oracle).
 
   rows_compare.py fixture --ppl ppl.jsonl --out FIXTURE.json  COMMON

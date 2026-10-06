@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """rho_ref.py -- a NumPy transcription of the reference +st rho (research repo ridgefill/b0/st_hook.py:25-34
 and 229-276, StController._rho; log_gate from b0/worker_ext.py:71-74), written as the fixture
 tests/kernel_test.cpp holds ridgefill_rho_update to (R34).

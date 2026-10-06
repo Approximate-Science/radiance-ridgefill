@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """mtp_accept.py -- the drafting head's acceptance after a long prefill: R70's instrument (and R97's link bytes).
 
   mtp_accept.py --docs JSONL --out OUT.json [--length 16384] [--answer 256] [--reps 5] [--depth 3] [--port 8100]

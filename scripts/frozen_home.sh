@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # frozen_home.sh -- build the plugin home a measurement runs against from ONE commit, so every
 # number names the exact source it came from and no working-tree state can leak into it.
 #

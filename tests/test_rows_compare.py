@@ -1,3 +1,5 @@
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """tools/rows_compare.py helpers, and the R33 fixture against a built sidecar (RIDGEFILL_SIDECAR; SKIPPED without it).
 Run: python -m pytest tests/
 """

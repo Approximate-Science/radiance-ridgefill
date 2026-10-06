@@ -1,3 +1,5 @@
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """tools/hazard_rate.py: the flag/overlap arithmetic on hand-made records, the plugin-log
 contract regex, the cross-check, and one end-to-end pass where the records are hand-made from
 a branch_corpus build against the fake /tokenize server.  Run: python -m pytest tests/

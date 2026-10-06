@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """needle.py -- needle-in-a-haystack retrieval test against a radiance server.
 
 Perplexity on long docs cannot catch a retrieval failure: the score is a mean over

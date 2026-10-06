@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* ridgefill_layer.h -- one late layer of an approximate pass: the masked layer (PLAN-FIX §3, §4, §8) and
  * the lean fill (the pure all-bulk case). The blocks' own issues and the correction spliced into them
  * are the adapter's (its conn / late_block / ffn hooks, ridgefill_adapter.h); what stays here is the

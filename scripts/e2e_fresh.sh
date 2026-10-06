@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # e2e_fresh.sh -- the FRESH-ENGINE end-to-end check of the packaged artifacts. THE RELEASE GATE.
 #
 # WHAT IT PROVES (PLAN-FIX "DECISIONS RECORDED", FINAL DELIVERABLE): the tarballs tools/package.py

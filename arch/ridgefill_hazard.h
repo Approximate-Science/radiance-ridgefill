@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* ridgefill_hazard.h -- DD-A's exact branch-hazard instrument (PLAN-FIX §5.4; Stage C, R65/R68).
  *
  * A request resuming from a prefix-cache checkpoint that a LONGER request wrote may find some of its

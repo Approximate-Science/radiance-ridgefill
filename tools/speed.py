@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """speed.py -- prefill latency at exact prompt lengths against a running server.
 
 Called by scripts/speed.sh (which checks the inputs); see that header for the protocol.

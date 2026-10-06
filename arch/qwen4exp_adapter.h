@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* qwen4exp_adapter.h -- the qwen4exp side of the core/adapter split (notes/adapter-split-spec.md §1.2):
  * every fact the core reads, taken from the in-tree model after its declare (adapter_of, at the end),
  * and every hook body: the declare-side ops only a gated delta net and a routed MoE have, then the

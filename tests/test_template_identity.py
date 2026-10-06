@@ -1,3 +1,5 @@
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """Tests for tools/template_identity.py (the engine-side identity check).
 
 Three layers, matching what the tool itself can prove offline:

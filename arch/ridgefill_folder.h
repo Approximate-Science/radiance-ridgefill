@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* ridgefill_folder.h -- the projector folder: where it is, and what it holds (PACKAGING.md §0, §2, §3;
  * REFUTATION-3 §1). Model-agnostic: no model type appears here.
  *

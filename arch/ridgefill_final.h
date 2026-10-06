@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* ridgefill_final.h -- the MTP `final` map (Stage D, PLAN-FIX DD-D): what the drafting head reads for a bulk row.
  *
  * WHY. The MTP head's history pass gathers the trunk's final stream `b_h` (rad_block_mtp_hc.h:252-256). On an

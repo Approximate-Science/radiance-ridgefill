@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # append_prep.sh -- everything before a Stage 6 in-place append EXCEPT the append: the refit sidecar shard, its R13
 # self-check, the header-only stub naming the shipped shard + the refit shard, the container's current rad-info,
 # `rad-convert --plan-only -v` and the plan diff gate (notes/sidecar.md §7). Writes nothing to the container (its

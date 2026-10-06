@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* qwen4exp_fill.h -- the LEAN fill's pieces: the in-tree blocks' own op handles, issued by hand.
  *
  * The lean fill serves the one shape with no exact row at all -- a pure prefill step of ONE

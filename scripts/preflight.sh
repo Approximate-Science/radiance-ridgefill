@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # preflight.sh -- fail closed before any GPU measurement: a number taken on a busy or
 # unhealthy machine is not a measurement. scripts/speed.sh runs it before every sample,
 # scripts/serve.sh and scripts/grade.sh before each container.

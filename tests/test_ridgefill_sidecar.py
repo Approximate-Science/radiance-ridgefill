@@ -1,3 +1,5 @@
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """tools/ridgefill_sidecar.py on small synthetic inputs (no model files, no GPU), plus a check of a real build when
 RIDGEFILL_SIDECAR (+ RIDGEFILL_TOKENIZER) point at one; that check is SKIPPED otherwise, never passed.
 Run: python -m pytest tests/

@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* rad_fake.h -- the recording fakes behind the arch plugins' host tests (arch_static_test, adapter_core_test):
  * a RadBuilder that records every declaration, a RadCtx that records every issue, and the rest of the
  * plugin ABI's C row with the device faked (no GPU, no core). Modelled on radiance's tests/arch_test.cpp,

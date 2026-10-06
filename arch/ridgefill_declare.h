@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* ridgefill_declare.h -- the RidgeFill plugin's declare side: its state, the ops it adds to the in-tree graph,
  * and every refusal a mode makes before anything runs (R31). The fitted tensors come from the
  * projector folder (ridgefill_projector.h), as RAW operands.

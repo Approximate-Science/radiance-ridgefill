@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """How much of radiance's GDN fill error at a chunk end does a constant correction C remove?
 
 Inputs: two capture dirs written by RADIANCE_RIDGEFILL_CAPTURE_STATE (notes/arch.md "Capture"): an exact run

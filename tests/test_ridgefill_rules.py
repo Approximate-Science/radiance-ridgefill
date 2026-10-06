@@ -1,3 +1,5 @@
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """The transcribed class56 rule (tools/ridgefill_rules.py). Run: python -m pytest tests/
 
 The cross-check against the original (fnlev/rules.py) runs only with RIDGEFILL_RESEARCH_ROOT (a checkout of the

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """On-engine check of the +st apply, from RADIANCE_RIDGEFILL_CAPTURE_STATE captures (labbook INV-apply, INV-apply-neg).
 
 Arms are speed runs of the same prompts that differ only in the correction (alpha / copy); `--base` is the alpha=0

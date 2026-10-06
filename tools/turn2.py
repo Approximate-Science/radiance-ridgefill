@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """turn2.py -- R64 (redefined): the second turn of a conversation whose first turn's KV comes from the prefix cache,
 against the same turn recomputed (--no-prefix-cache) and against exact, through the HTTP logits capture.
 

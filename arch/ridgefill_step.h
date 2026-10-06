@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* ridgefill_step.h -- the core's declare body and step: what a pass is, and the order its pieces run in.
  *
  * Model-free: everything the model owns -- its in-tree step, the exact layers, the embedding and the

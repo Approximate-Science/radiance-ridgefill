@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* forward.cpp -- ridgefill_gemm_nt_bias and ridgefill_gemm_nt_q: the engine's own gemm_nt_bias and int8
  * gemm_nt_q rows, offered again under ops whose weight operands are IN operands (PACKAGING.md §0,
  * REFUTATION-3 §2.2).

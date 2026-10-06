@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* ridgefill_int8.h -- the int8 projector (Stage E, R79): the folder's canonical int8 planes turned into
  * the stored form the engine's own int8 GEMM reads, once per rank at load.
  *

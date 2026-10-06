@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # mini_cpu.sh -- the no-GPU correctness run for this plugin, one command (notes/mini-model.md).
 #
 # WHAT IT DOES. Builds radiance host-only and the plugins host-only (README's host-only section)

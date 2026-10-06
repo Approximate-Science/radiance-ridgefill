@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """template_identity.py -- the engine-side identity check for the merged chat template.
 
 The engine renders chat templates with minja (llama.cpp's Jinja subset), not

@@ -1,3 +1,5 @@
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """tools/stub_checkpoint.py with HTTP replaced by a local file (no network). Run: python -m pytest tests/"""
 import json
 import os

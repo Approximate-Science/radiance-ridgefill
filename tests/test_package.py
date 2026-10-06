@@ -1,3 +1,5 @@
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """test_package.py -- tests for tools/package.py (the release packager).
 
 package.py derives the repo root from its own location, so the tests build a SCRATCH

@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* ridgefill_log.h -- the plugin's name in the core's stderr lines ("radiance: <name>: ...").
  *
  * The adapter's log_name fact, mirrored in one global because the core speaks before any RidgeFill exists

@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* hazard.hip -- ridgefill_hazard's device row: one thread runs ridgefill.h's rule on the step's last sequence
  * (a handful of loads and two stores a pass). cu_last is device memory, so an out-of-order window
  * counts nothing rather than refusing (the host row refuses it). */

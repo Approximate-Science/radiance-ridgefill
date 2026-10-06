@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """state_compare.py -- R61: the decoders' late delta-net states after each mixed step, RidgeFill vs off.
 
 Two RADIANCE_RIDGEFILL_CAPTURE_STATE directories of the SAME arrangement (scripts/conc.sh text: one batched

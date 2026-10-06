@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* ridgefill_match.h -- does the projector folder belong to the model being served (PACKAGING.md §3,
  * REFUTATION-3 §6, Dylan's DD-K split)? Model-agnostic: it reads the manifest's `model` block and
  * answers from RadModelMeta, the builder's encoding query and the container file itself.

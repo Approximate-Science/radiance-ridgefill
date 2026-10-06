@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # two_prompts.sh -- R58': two non-final prefill chunks in one step are both served correctly, and the
 # last one is approximated (PLAN-FIX §3: the device mask ignores every row before the last sequence).
 #

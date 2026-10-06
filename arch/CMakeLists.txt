@@ -1,3 +1,5 @@
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # THE TARGET IS NAMED qwen4exp_fp8 ON PURPOSE (PLAN D1). The engine refuses two plugins claiming
 # (qwen4exp, ""), and rad-convert --reuse needs that same arch id, so this plugin claims it too and
 # replaces the in-tree one by FILE STEM: architectures/qwen4exp_fp8.so in a $RADIANCE_HOME entry

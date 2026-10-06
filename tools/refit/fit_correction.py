@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """Stage 6 correction refit (R43): C_L = mean over approximate chunk ends of (S_exact - S_pred) per late delta-net
 layer and TP rank, from capture.py's filed state captures of an exact run and a speed run of the same prompts, written
 in b0/st_hook.py's fit format so tools/ridgefill_sidecar.py --names refit --st reads it unchanged.

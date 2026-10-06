@@ -1,3 +1,5 @@
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """The class56 row rule (RidgeFill quality mode), transcribed so the tools run without the research repo.
 
 Source of truth: the research repo's fnlev/rules.py (classifier lines 48-71, row ranking 167-195) and

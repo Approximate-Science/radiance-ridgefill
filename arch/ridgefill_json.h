@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* ridgefill_json.h -- the JSON the projector folder carries: its manifest (ridgefill.json) and each
  * safetensors file's header. A reader, nothing more: objects, arrays, strings (with \u escapes),
  * numbers, true/false/null. Malformed text is refused, never guessed at -- a folder whose manifest

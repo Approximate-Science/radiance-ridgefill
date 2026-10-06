@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """branch_corpus.py -- build the Stage C (#2, prefix cache on) branch-hazard corpus.
 
   branch_corpus.py build --docs ppl.jsonl --n 20 --seed 0 --interval 2048 --tail 2048 \\

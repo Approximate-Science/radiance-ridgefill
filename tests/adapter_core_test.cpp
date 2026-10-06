@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* adapter_core_test.cpp -- the core serves a model it was not written for (notes/adapter-split-spec.md §4).
  *
  * A toy adapter, whole in this file: four dense attention layers, a plain 64-wide residual (wide =

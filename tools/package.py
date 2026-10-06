@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """package.py -- build the radiance-ridgefill release distribution (PACKAGING.md §0-§5).
 
   package.py --home <frozen plugin home> --projector <projector folder> \

@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # conc.sh -- a long prompt beside decoding users, against the server scripts/serve.sh left running
 # (Stage B: REQUIREMENTS-FIX R54-R57, R60). It starts nothing.
 #

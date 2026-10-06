@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* ridgefill_adapter.h -- the ONE interface between the RidgeFill core and a model (notes/adapter-split-spec.md §1.3).
  *
  * The core (every ridgefill_*.h but this file's users' adapters) is compiled into each adapter's .so and

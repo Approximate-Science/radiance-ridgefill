@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """The Stage 6 refit's prompts, tokenised once: the projector's training and held-out documents (each raw AND as a
 chat user turn) and the +st fit prompts. Writes <out>/{train,held,sterm}.jsonl (one prompt a line, token ids
 included) and <out>/manifest.json (counts, tokens, the sha256 of every text and of every file written).

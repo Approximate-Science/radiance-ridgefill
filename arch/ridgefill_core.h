@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* ridgefill_core.h -- the whole RidgeFill core, in the order its headers lean on each other. An adapter includes
  * this after radiance's installed arch headers (and, if it wraps an in-tree architecture, after that
  * source), then its own files; tests/adapter_core_test.cpp includes nothing else of the plugin.

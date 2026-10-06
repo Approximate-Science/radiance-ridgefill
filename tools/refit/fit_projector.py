@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """Stage 6 projector refit (R42): capture.py acc's running sums -> the research pipeline's own ridge solve (qfn.fit
 solve over ridgefill.ridge.RidgeFit: centred ridge, unpenalised bias, one eigendecomposition for every lambda) -> lambda
 by held-out mean block-input cosine -> the projector in tcc's per-layer layout + report-radiance-s<S>.json.

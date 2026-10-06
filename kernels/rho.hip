@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* rho.hip -- ridgefill_rho_update's device row: one thread a head, sequential over the chunk's rows.
  *
  * The recurrence is sequential in t by definition and the work is n * n_head multiply-adds, so

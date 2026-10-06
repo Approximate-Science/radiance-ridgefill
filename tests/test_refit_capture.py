@@ -1,3 +1,5 @@
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """tools/refit/convert.py + capture.py on synthetic captures written in the plugin's layout (notes/arch.md
 "Capture"): the record the research code reads, the chunk keys, the replay refusal, filing and the running sums.
 Needs RIDGEFILL_RESEARCH_ROOT (the research code is imported read-only); without it every test here is SKIPPED."""

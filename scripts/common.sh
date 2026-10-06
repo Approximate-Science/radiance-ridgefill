@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # common.sh -- shared configuration, mode validation and the docker-run prefix for every
 # measurement script in this repo (serve.sh, stop.sh, preflight.sh, speed.sh, grade.sh).
 # SOURCED, never executed.

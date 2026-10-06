@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* qwen4exp_blocks.h -- the qwen4exp adapter's late-block pieces (notes/adapter-split-spec.md §1.2): the
  * delta net's and the attention's in-tree issues over a row window, with the +st correction spliced
  * into the last sequence's scan. Verbatim copies of the in-tree blocks' step() pieces, cited per

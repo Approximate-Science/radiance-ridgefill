@@ -1,3 +1,5 @@
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """tools/refit/fit_projector.py end to end on synthetic captures whose block inputs ARE a linear map of the boundary:
 filed -> summed (capture.py acc) -> solved -> written. The refit must recover the map (held-out cosine ~1, far above a
 random "shipped" projector scored on the same rows), write tcc's per-layer layout without `final`, and be readable by

@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # session.sh -- the investigation's GPU session: GDN state captures of the 14 +st prompts in speed mode with the
 # correction at several strengths, each serve -> capture -> stop, ALL under one hold of the GPU lock.
 #

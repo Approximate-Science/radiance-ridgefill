@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* ridgefill_guard.h -- the engine-release guard (PLAN-FIX §6.6, DD-E, R83).
  *
  * WHY. An adapter compiles its in-tree architecture source of ONE radiance release and shadows the

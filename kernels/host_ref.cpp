@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* host_ref.cpp -- the operand checks both rows share, and the host rows: the oracles.
  *
  * The host rows are written to be read, not to be fast: plain loops, one element at a time, the

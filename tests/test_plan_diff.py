@@ -1,3 +1,5 @@
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """tools/plan_diff.py on hand-written rad-convert / rad-info output. Run: python -m pytest tests/"""
 import sys
 from pathlib import Path

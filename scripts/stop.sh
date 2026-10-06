@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # stop.sh -- stop every radiance-ridgefill-* container and wait until the cards let go of their
 # VRAM, so the next measurement starts from a clean machine (preflight.sh (b) would
 # otherwise fail it, and a number taken next to a half-released card is not a number).

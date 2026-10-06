@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """RidgeFill chat-template marker snippet tool.
 
 Builds a Jinja snippet that, when merged in front of any chat template, makes

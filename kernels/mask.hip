@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* mask.hip -- ridgefill_mask's device row: one workgroup ranks the window of the step's last sequence.
  *
  * The window W = [s, b') is read here, from cu_last in device memory (ridgefill_mask_window); the host

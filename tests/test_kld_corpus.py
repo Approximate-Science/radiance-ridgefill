@@ -1,3 +1,5 @@
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """tools/kld_corpus.py with a character-level fake tokenizer (no model files). Run: python -m pytest tests/"""
 import json
 import sys

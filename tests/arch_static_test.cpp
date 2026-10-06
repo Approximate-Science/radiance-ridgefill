@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* arch_static_test.cpp -- the RidgeFill arch plugin's declared graph and issued sequence, asserted with no
  * GPU, no model file and no core (R11, arch half). Modelled on radiance's tests/arch_test.cpp: a
  * recording fake builder and a recording fake RadCtx, both included plugins called directly.

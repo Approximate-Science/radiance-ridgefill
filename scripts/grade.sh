@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # grade.sh -- the KL-mode quality measurement (radiance docs/TOOLS.md lines 470-506).
 #
 # WHAT IT MEASURES: how far a RidgeFill mode is from the exact engine on the quick quality set,

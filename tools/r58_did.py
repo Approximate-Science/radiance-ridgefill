@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """r58_did.py -- R58': does sharing a step with another prompt move a RidgeFill mode's tails more than it
 moves stock's?
 

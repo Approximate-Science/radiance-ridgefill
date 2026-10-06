@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # tp1_check.sh -- the published model at TENSOR-PARALLEL 1 on ONE card: does it fit, is `off` stock, and how
 # close is int8 quality to exact there. One session; run it under the GPU queue:
 #   RK_PLUGIN_HOME=data/home-<short> gpuq.sh tp1 scripts/tp1_check.sh [<pci address, default 0000:13:00.0>]

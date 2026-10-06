@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """A header-only stub of a Hugging Face safetensors checkpoint, plus extra shards, as one rad-convert input.
 
   stub_checkpoint.py --repo Qwen/Qwen3.8-Flash-Next --revision main --out DIR --extra SHARD [--extra SHARD ...]

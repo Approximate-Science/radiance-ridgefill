@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # serve.sh -- start the engine in one RidgeFill mode as a detached container and leave it up.
 #
 # WHAT IT IS FOR: the deployment every speed/quality number is taken against; it measures

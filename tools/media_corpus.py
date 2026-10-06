@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """media_corpus.py -- R75's image + long-text corpus, generated: five synthetic pictures, each paired with a document.
 
   media_corpus.py --docs QUICK_PPL.jsonl --out DIR [--seed 75] [--chars 56000]

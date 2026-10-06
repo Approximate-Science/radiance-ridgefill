@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """mini_model.py -- a MINI Qwen4-Exp of the SAME architecture as Qwen3.8-Flash-Next, with random
 weights, as an HF-format checkpoint rad-convert turns into a .rad container (notes/mini-model.md).
 

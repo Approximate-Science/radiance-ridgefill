@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* ridgefill_declare_masked.h -- the masked path's declarations (PLAN-FIX §3, §6.1), the selected set's
  * declare, and the debug captures' declarations. Included by ridgefill_declare.h only.
  */

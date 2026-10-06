@@ -1,3 +1,5 @@
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """tools/refit/fit_correction.py on synthetic state captures in the plugin's layout (notes/arch.md "Capture"):
 C = mean(S_exact - S_pred) over matched approximate chunk ends, per rank, in st_hook's format with rank 0's heads
 first after tools/ridgefill_sidecar.py; tail chunks unused; refusals for a missing exact record and for too few chunk ends."""

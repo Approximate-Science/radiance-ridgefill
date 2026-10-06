@@ -1,3 +1,5 @@
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """Unit + end-to-end tests for tools/needle.py against a fake radiance server.
 
 The engine cannot run in this sandbox, so the HTTP shapes come from a fake server

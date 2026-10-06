@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """profile_steps.py -- per-step op lists out of a --profile-ops log (R16, R26, R36).
 
   profile_steps.py LOG [--step K] [--from-layer 24] [--json OUT]

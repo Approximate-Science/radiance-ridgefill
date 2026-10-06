@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """hazard_rate.py -- Stage C (#2, prefix cache on): which requests' exact tail overlapped
 cached positions, at what rate, and does the log-side count agree with the plugin's device
 counter (R65, R68).

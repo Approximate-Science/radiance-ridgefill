@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """ppl.jsonl -> a radiance KL-mode corpus whose every doc is a whole number of prefill chunks.
 
   kld_corpus.py --ppl ppl.jsonl --tokenizer DIR --out corpus/quick9.jsonl [--chunk 2048] [--tail 2048]

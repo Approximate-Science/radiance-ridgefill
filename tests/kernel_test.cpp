@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* kernel_test.cpp -- the ridgefill kernel library, seen the way the engine sees it: dlopen'd, its rows
  * found by op and domain, called through RadArgs with the operands in schema order.
  *

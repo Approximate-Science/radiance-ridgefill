@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* folder_fixture.h -- a projector folder the host tests build in memory (ridgefill_folder.h's Folder, handed to
  * load_folder through g_folder_for_test), and the tiny container its manifest's tokenizer hash points at.
  * Include after the core (ridgefill_folder.h) and rad_fake.h.

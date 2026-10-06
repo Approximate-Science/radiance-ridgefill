@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """conc.py -- a long prompt beside decoding users, against the server already running (scripts/conc.sh).
 
 Two measurements, both on one server in one mode (Stage B, PLAN-FIX §3, REQUIREMENTS-FIX R54-R60):

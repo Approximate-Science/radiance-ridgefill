@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 """boundary_cos.py -- R17: the plugin's dumped boundary stream vs a tcc capture's boundary_24.
 
   boundary_cos.py --dump DIR --capture CAPTURE.pt [--capture CAPTURE.pt ...] [--ids IDS.json]

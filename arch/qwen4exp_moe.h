@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* qwen4exp_moe.h -- a routed layer's MoE, issued by hand on an approximate pass (PLAN-FIX §3, §6.1).
  *
  * WHY A COPY. MoeFP8::pass (radiance 1.0.13 d0f639b, arch/common/rad_block_moe_fp8.h:1408-1584) has no hook

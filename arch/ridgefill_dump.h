@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* ridgefill_dump.h -- the debug copies to the host: RADIANCE_RIDGEFILL_DUMP (what a filled chunk computed) and
  * the Stage 6 captures RADIANCE_RIDGEFILL_CAPTURE / RADIANCE_RIDGEFILL_CAPTURE_STATE (the refit's data).
  * notes/arch.md "Capture" is the file layout the fitting side reads; this file writes exactly it.

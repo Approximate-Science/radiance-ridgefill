@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* rows.cpp -- the ridgefill kernel library's op schemas, its row table and its operand descriptions.
  *
  * NEW OPS, none of them in docs/OPS.md, so this plugin FIXES their schemas (the first plugin in

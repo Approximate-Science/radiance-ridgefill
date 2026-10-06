@@ -1,3 +1,5 @@
+/* Copyright 2026 Dylan Johnston and tcclaviger
+ * SPDX-License-Identifier: Apache-2.0 */
 /* ridgefill_plan.h -- WHAT AN APPROXIMATE PASS IS, decided from numbers alone (model-agnostic).
  *
  * A pure function: the keyed batch fields the decision may read (radiance core/runtime/ctx.cpp:989-995)

@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # ident_long.sh -- ident.sh with a LONG prompt (R89): is a server reproducible when RidgeFill approximates the
 # prompt? ident.sh's two questions are too short for any approximate chunk; here each question follows a
 # ~30K-token document, so a speed or quality server approximates most of it. One hash per (temperature,

@@ -1,3 +1,5 @@
+# Copyright 2026 Dylan Johnston and tcclaviger
+# SPDX-License-Identifier: Apache-2.0
 # ridgefill -- the kernel library of the RidgeFill plugin: ridgefill_mask, ridgefill_select, ridgefill_drop_rows,
 # ridgefill_rho_update, ridgefill_state_correct and ridgefill_state_read, a host row (the oracle) and a device row each.
 #
