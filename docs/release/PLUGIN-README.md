@@ -12,7 +12,7 @@ RidgeFill builds on are at the end.
 
 ## Requirements
 
-- **Radiance engine:** release `1.1.1` (commit 7001841). The plugin checks the engine binary at
+- **Radiance engine:** release `1.2.0` (commit e95d397). The plugin checks the engine binary at
   startup and forwards to the engine's own architecture (RidgeFill off) or refuses to
   start on a mismatch; see Troubleshooting.
 - **Base model:** the stock published container
@@ -184,7 +184,7 @@ files against their hashes (`--projector <dir>`). Every message RidgeFill can pr
 - Missing or incompatible projector: the server runs stock (see the `serving
   stock` lines above). A tokenizer or geometry mismatch refuses by name;
   quantization or anchor differences warn and run.
-- Engine other than 1.1.1: forwarded to the in-tree architecture (RidgeFill off) or
+- Engine other than 1.2.0: forwarded to the in-tree architecture (RidgeFill off) or
   refused at startup, never silently approximated. Forwarding needs the engine's own
   in-tree `qwen4exp_fp8.so` on `$RADIANCE_HOME` behind this plugin's home; a home given
   only as `--radiance-home` is invisible to plugins, so the start then fails by name.
