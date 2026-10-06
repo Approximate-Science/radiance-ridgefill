@@ -105,7 +105,7 @@ inline const char* straddle_missing(const AttnGatedFP8& a) {
     return nullptr;
 }
 
-/* ---- the step hooks: the in-tree layer's pieces (qwen4exp_fp8.cpp:1465-1485) over the rows the core's
+/* ---- the step hooks: the in-tree layer's pieces (qwen4exp_fp8.cpp:1509-1529) over the rows the core's
  * driver names. Each reads this rank's model, the one the declare filled. */
 
 /* hc_mix in front of the block, hc_ffn in front of the MoE; a write also takes the debug residual dump. */
@@ -161,7 +161,7 @@ inline void ffn(RadCtx* c, const RidgeFill&, int64_t li, const RadBatch* batch, 
 /* ---- the exact layers and the step around them: copies of the in-tree step's pieces, issued by the core's
  * approximate_step (ridgefill_step.h) and the debug captures. */
 
-/* qwen4exp_fp8.cpp:1450-1463, verbatim: embedding, media rows, PLE hash, the stream's first value,
+/* qwen4exp_fp8.cpp:1494-1507, verbatim: embedding, media rows, PLE hash, the stream's first value,
  * the rope table. */
 inline void prologue(RadCtx* c, qwen4exp_fp8::Model& m, const RadBatch* batch) {
     const int64_t T = batch->n_tok;
@@ -174,7 +174,7 @@ inline void prologue(RadCtx* c, qwen4exp_fp8::Model& m, const RadBatch* batch) {
         RAD_ISSUE_N(c, m.op_rope_cs, T, rope_pos1(batch, T), RAD_B(m.b_rope_cs));
 }
 
-/* qwen4exp_fp8.cpp:1465-1485 for one layer -- with the MoE issued through `arm` when one is given
+/* qwen4exp_fp8.cpp:1509-1529 for one layer -- with the MoE issued through `arm` when one is given
  * (layer S-3 of a streaming pass: stock rows, the stager probes behind its gate-up GEMM). */
 inline void layer(RadCtx* c, qwen4exp_fp8::Model& m, int64_t li, const RadBatch* batch,
                   const MoeArm* arm = nullptr) {
@@ -193,7 +193,7 @@ inline void layer(RadCtx* c, qwen4exp_fp8::Model& m, int64_t li, const RadBatch*
     dbg_resid(c, (int)li, "ffn", m.g.n_embd, m.b_h, m.a_x.x);
 }
 
-/* qwen4exp_fp8.cpp:1487-1496: the 97th connection and, when the chunk asks for them, logits. On an
+/* qwen4exp_fp8.cpp:1531-1540: the 97th connection and, when the chunk asks for them, logits. On an
  * approximate chunk they are requested only on exact rows in production (PLAN-FIX §6.2). */
 inline void epilogue(RadCtx* c, qwen4exp_fp8::Model& m, const RadBatch* batch) {
     const int64_t T = batch->n_tok;

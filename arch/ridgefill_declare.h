@@ -90,7 +90,7 @@ struct RidgeFill {
     rad_buf b_zeros = 0, b_probe = 0;
     int64_t n_zeros = 0;
     /* THE TAIL-ONLY STRADDLE (A.1) needs every late attention layer on its per-row sparse gated form
-     * (rad_block_attn_gated_fp8.h:503-519): declared here, decided per pass from the keyed context
+     * (rad_block_attn_gated_fp8.h:542-558): declared here, decided per pass from the keyed context
      * against the largest exactness bound. */
     bool    straddle_layers = false;
     int64_t qsa_exact_to = 0;

@@ -2,7 +2,7 @@
  * SPDX-License-Identifier: Apache-2.0 */
 /* qwen4exp_moe.h -- a routed layer's MoE, issued by hand on an approximate pass (PLAN-FIX §3, §6.1).
  *
- * WHY A COPY. MoeFP8::pass (radiance 1.0.13 d0f639b, arch/common/rad_block_moe_fp8.h:1408-1584) has no hook
+ * WHY A COPY. MoeFP8::pass (radiance 1.1.1 7001841, arch/common/rad_block_moe_fp8.h:1473-1663) has no hook
  * for the two things an approximate pass needs: the routing slots of bulk rows dropped
  * (`ridgefill_drop_rows`, ids := -1) between the top-k and the scatter, and the stager probes issued
  * right after one layer's gate-up GEMM (notes/impl.md §2). Everything else below is that function
@@ -22,7 +22,7 @@ namespace qwen4exp_ridgefill {
 
 using namespace rad::arch;
 
-/* THE GROUPED GEMMS' WEIGHT TABLES (rad_block_moe_fp8.h:1458-1506). A quantised layer passes its experts
+/* THE GROUPED GEMMS' WEIGHT TABLES (rad_block_moe_fp8.h:1542-1599). A quantised layer passes its experts
  * as two tables by parity (`moe_gemm_q`), or -- at four ranks, where the extra fp8 block of a five-block
  * expert goes round all four (MoeFP8::Config::ff_lo4, radiance 1.0.10) -- as four by number mod 4
  * (`moe_gemm_q_mod4`), class q holding ceil((n_reg - q) / 4) experts. `n` is how many class q holds. */
@@ -77,18 +77,30 @@ inline void moe_probe(RadCtx* c, const MoeFP8& e, rad_buf zeros, rad_buf out) {
         moe_gate_up_q(c, e, 0, 1, brows(zeros, k), brows(zeros, e.n_reg + 1), brows(out, k));
 }
 
-/* The top-k and the sort, with the drop between them. The FUSED form has no point between the two,
- * so a pass that drops rows always takes the pair; a pass that does not drops nothing and keeps the
- * stock choice, which leaves plumb's issue identical to stock's at every row count. */
-inline void moe_route(RadCtx* c, const MoeFP8& e, const MoeArm& arm, RadOperand ecnt, int64_t r0,
+/* The router, the top-k and the sort, with the drop between the last two. Neither FUSED form has a
+ * point between them, so a pass that drops rows always takes the router and the pair; a pass that does
+ * not drops nothing and keeps the stock choice, which leaves plumb's issue identical to stock's at every
+ * row count. Returns whether the fused router wrote the shared gate (rad_block_moe_fp8.h:1499-1527). */
+inline bool moe_route(RadCtx* c, const MoeFP8& e, const MoeArm& arm, RadOperand ecnt, int64_t r0,
                       int64_t rows) {
-    const int64_t ne = e.c.n_expert, ne_all = e.c.n_expert_all, k = e.c.top_k;
+    const int64_t ne = e.c.n_expert, ne_all = e.c.n_expert_all, k = e.c.top_k, n = e.g.n_embd;
     const auto& w = e.w;
+    if (!arm.drop && e.op_router_fused && rows <= e.router_fused_rows) {
+        RAD_ISSUE_N(c, e.op_router_fused, rows, brow_slice(w.h.x, r0, rows, n),
+                    RAD_W(e.w_router), e.router_fused_gate ? RAD_W(e.w_sgate) : RAD_NONE,
+                    brow_slice(w.logits, r0, rows, ne_all),
+                    brow_slice(w.ids, r0, rows, k), brow_slice(w.ew, r0, rows, k),
+                    brows(w.sorted, rows * k), brows(w.eoff, ne + 1), ecnt,
+                    e.router_fused_gate ? brow_slice(w.sgate, r0, rows, 1) : RAD_NONE);
+        return e.router_fused_gate;
+    }
+    RAD_ISSUE_N(c, e.op_router, rows, brow_slice(w.h.x, r0, rows, n), RAD_W(e.w_router),
+                brow_slice(w.logits, r0, rows, ne_all));
     if (!arm.drop && e.op_topk_scatter && rows <= e.topk_scatter_rows) {
         RAD_ISSUE_N(c, e.op_topk_scatter, rows, brow_slice(w.logits, r0, rows, ne_all),
                     brow_slice(w.ids, r0, rows, k), brow_slice(w.ew, r0, rows, k),
                     brows(w.sorted, rows * k), brows(w.eoff, ne + 1), ecnt);
-        return;
+        return false;
     }
     RAD_ISSUE_N(c, e.op_topk, rows, brow_slice(w.logits, r0, rows, ne_all),
                 brow_slice(w.ids, r0, rows, k), brow_slice(w.ew, r0, rows, k));
@@ -97,12 +109,14 @@ inline void moe_route(RadCtx* c, const MoeFP8& e, const MoeArm& arm, RadOperand 
                     brow_slice(w.ids, r0, rows, k));
     RAD_ISSUE_N(c, e.op_scatter, rows, brow_slice(w.ids, r0, rows, k),
                 brows(w.sorted, rows * k), brows(w.eoff, ne + 1), ecnt);
+    return false;
 }
 
-/* rad_block_moe_fp8.h:1458-1520: the two grouped GEMMs, the shared arm beside them, the protected
- * experts after -- with the arm's probes right behind the gate-up GEMM. */
+/* rad_block_moe_fp8.h:1542-1599: the two grouped GEMMs, the shared arm beside them (its gate already
+ * written when `gate_done`), the protected experts after -- with the arm's probes right behind the
+ * gate-up GEMM. */
 inline void moe_experts(RadCtx* c, const MoeFP8& e, const MoeArm& arm, int64_t T, int64_t r0,
-                        int64_t rows) {
+                        int64_t rows, bool gate_done) {
     const int64_t ne = e.c.n_expert, k = e.c.top_k, n = e.g.n_embd;
     const bool shared = e.op_sgate != 0;
     const auto& w = e.w;
@@ -113,7 +127,7 @@ inline void moe_experts(RadCtx* c, const MoeFP8& e, const MoeArm& arm, int64_t T
         moe_gate_up_q(c, e, r0, rows, brows(w.sorted, rows * k), brows(w.eoff, e.n_reg + 1),
                       brows(w.egu, rows * k));
     if (arm.after_gate_up) arm.after_gate_up();
-    if (shared) e.shared_up(c, T, r0, rows);
+    if (shared) e.shared_up(c, T, r0, rows, gate_done);
     e.gq_exp.step(c, w.egu, rows * k, 0, rows * k);
     if (shared) e.gq_sh.step(c, w.sgu, T, r0, rows);
     if (e.c.expert_bf16)
@@ -145,21 +159,19 @@ inline void moe_experts(RadCtx* c, const MoeFP8& e, const MoeArm& arm, int64_t T
     if (shared) e.sh_down.step(c, w.sff, w.sout, T, r0, rows);
 }
 
-/* MoeFP8::pass with the arm's substitutions (rad_block_moe_fp8.h:1408-1584). */
+/* MoeFP8::pass with the arm's substitutions (rad_block_moe_fp8.h:1473-1663). */
 inline void moe_pass(RadCtx* c, const MoeFP8& e, const MoeArm& arm, int64_t T, int64_t r0,
                      int64_t rows) {
-    const int64_t ne = e.c.n_expert, ne_all = e.c.n_expert_all, k = e.c.top_k, n = e.g.n_embd;
+    const int64_t ne = e.c.n_expert, k = e.c.top_k, n = e.g.n_embd;
     const auto& w = e.w;
     if (!e.ext_in) e.nq_h.step(c, T, r0, rows);
     int32_t* const counts = rad_route_counts(c, e.layer, ne);
     const RadOperand ecnt = counts ? praw(counts, RAD_I32, ne) : brows(w.ecnt, ne);
-    RAD_ISSUE_N(c, e.op_router, rows, brow_slice(w.h.x, r0, rows, n), RAD_W(e.w_router),
-                brow_slice(w.logits, r0, rows, ne_all));
-    moe_route(c, e, arm, ecnt, r0, rows);
+    const bool gate_done = moe_route(c, e, arm, ecnt, r0, rows);
     if (e.op_hq)
         RAD_ISSUE_N(c, e.op_hq, rows, brow_slice(w.h.x, r0, rows, n), brow_slice(w.hr.q, r0, rows, n),
                     brow_slice(w.hr.s, r0, rows, n / RAD_FP8_BLOCK));
-    moe_experts(c, e, arm, T, r0, rows);
+    moe_experts(c, e, arm, T, r0, rows, gate_done);
     const bool fold = e.gfold;
     if (!gather_taken(e.g, T, e.gather_out_rows, e.gather_out_rows6))
         RAD_ISSUE_N(c, e.op_gather, rows, brows(w.edn, rows * k), brow_slice(w.ew, r0, rows, k),
@@ -172,7 +184,7 @@ inline void moe_pass(RadCtx* c, const MoeFP8& e, const MoeArm& arm, int64_t T, i
                     brow_slice(w.x, r0, rows, n));
 }
 
-/* MoeFP8::step (rad_block_moe_fp8.h:1631-1664) over rows [from, to) (to < 0: the step's end): the
+/* MoeFP8::step (rad_block_moe_fp8.h:1710-1743) over rows [from, to) (to < 0: the step's end): the
  * passes and the routing report the heat engine reads -- with dropped slots or an exact-rows-only
  * range, the counts are the exact rows' alone, so bulk rows no longer register as heat. */
 inline void moe_layer(RadCtx* c, const MoeFP8& e, const MoeArm& arm, const RadBatch* batch,

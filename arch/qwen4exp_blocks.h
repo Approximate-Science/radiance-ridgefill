@@ -3,8 +3,9 @@
 /* qwen4exp_blocks.h -- the qwen4exp adapter's late-block pieces (notes/adapter-split-spec.md §1.2): the
  * delta net's and the attention's in-tree issues over a row window, with the +st correction spliced
  * into the last sequence's scan. Verbatim copies of the in-tree blocks' step() pieces, cited per
- * function; the blocks they copy are unchanged from radiance 1.0.8 (140987f) through 1.0.13 (d0f639b),
- * so the citations hold for both, and the static oracle compares them issue for issue. The core's
+ * function, at radiance 1.1.1 (7001841)'s lines. The step() bodies they copy are unchanged from 1.0.8
+ * (140987f) through 1.1.1 but for 1.1.0's attention-zero branch (a rank with no attention heads, which
+ * only a world the KV heads do not divide has), and the static oracle compares them issue for issue. The core's
  * layer drivers (ridgefill_layer.h) call them; nothing here names the projector.
  */
 #ifndef QWEN4EXP_BLOCKS_H
@@ -69,7 +70,7 @@ inline void read_state(RadCtx* c, const RidgeFill& k, const qwen4exp_fp8::Model&
 
 /* ---------------------------------------------------------------- the delta net, masked */
 
-/* rad_block_gdn_fp8.h:450-475, verbatim: the decode half over sequences [0, D), tokens [0, DT). */
+/* rad_block_gdn_fp8.h:479-504, verbatim: the decode half over sequences [0, D), tokens [0, DT). */
 inline void gdn_decode_half(RadCtx* c, const GdnFP8& d, const RadBatch* batch, int64_t D, int64_t DT) {
     if (D <= 0) return;
     const RadKVGroupBatch* st = kv_batch(batch, d.kv_state);
@@ -104,7 +105,7 @@ inline void gdn_decode_half(RadCtx* c, const GdnFP8& d, const RadBatch* batch, i
                 w.o.cq() ? brows(w.o.cq(), DT) : RAD_NONE, w.o.cq() ? brows(w.o.cs(), DT) : RAD_NONE);
 }
 
-/* rad_block_gdn_fp8.h:489-494: the chunked scan over the sequences `cu` names, whose state rows
+/* rad_block_gdn_fp8.h:518-523: the chunked scan over the sequences `cu` names, whose state rows
  * are `st` (n entries). `cu` is a raw batch pointer or the plugin's `bounds`. */
 inline void gdn_scan_over(RadCtx* c, const GdnFP8& d, int64_t T, RadOperand cu, RadOperand st) {
     const auto& w = d.w;
@@ -113,7 +114,7 @@ inline void gdn_scan_over(RadCtx* c, const GdnFP8& d, int64_t T, RadOperand cu, 
               brows(w.o.x, T), kv_cache(d.kv_state, d.layer), st);
 }
 
-/* rad_block_gdn_fp8.h:477-488: conv window and kkt, ONCE over every prefill sequence -- both
+/* rad_block_gdn_fp8.h:506-517: conv window and kkt, ONCE over every prefill sequence -- both
  * anchor their 64-row tiles at each sequence's start, which a split at b - s = 0 mod 64 keeps. */
 inline void gdn_prefill_front(RadCtx* c, const GdnFP8& d, const RadBatch* batch, int64_t D) {
     const RadKVGroupBatch* cv = kv_batch(batch, d.kv_conv);
@@ -153,7 +154,7 @@ inline void gdn_prefill_scans(RadCtx* c, const RidgeFill& k, const qwen4exp_fp8:
     if (split) gdn_scan_over(c, d, T, brow_slice(k.b_bounds, 2, 2, 1), last);
 }
 
-/* GdnFP8::step (rad_block_gdn_fp8.h:397-514) with the last sequence's scan corrected. Its block
+/* GdnFP8::step (rad_block_gdn_fp8.h:426-543) with the last sequence's scan corrected. Its block
  * input is normed by the caller (ext_in, check_fill), so there is no norm here. */
 inline void gdn_masked(RadCtx* c, const RidgeFill& k, const qwen4exp_fp8::Model& m, int64_t li,
                        const RadBatch* batch, const Pass& p, StateDump* sd) {
@@ -178,7 +179,7 @@ inline void gdn_masked(RadCtx* c, const RidgeFill& k, const qwen4exp_fp8::Model&
     if (d.op_add) RAD_ISSUE(c, d.op_add, brows(d.w.x, T), brows(d.w.h.x, T), brows(d.w.x, T));
 }
 
-/* rad_block_gdn_fp8.h:505-513 over rows [r0, r0 + rows): the output projection of the normed,
+/* rad_block_gdn_fp8.h:534-542 over rows [r0, r0 + rows): the output projection of the normed,
  * quantised delta-net output, its all-reduce and residual add. */
 inline void gdn_out_rows(RadCtx* c, const GdnFP8& d, int64_t T, int64_t r0, int64_t rows) {
     const int64_t n = d.g.n_embd;
@@ -190,7 +191,7 @@ inline void gdn_out_rows(RadCtx* c, const GdnFP8& d, int64_t T, int64_t r0, int6
                     brow_slice(d.w.x, r0, rows, n));
 }
 
-/* rad_block_gdn_fp8.h:497-513 over the tail rows [r0, T): the delta net's output for them alone. */
+/* rad_block_gdn_fp8.h:526-542 over the tail rows [r0, T): the delta net's output for them alone. */
 inline void gdn_tail_rows(RadCtx* c, const GdnFP8& d, int64_t T, int64_t r0) {
     const int64_t rows = T - r0, conv_dim = d.cfg.conv_dim(), v_dim = d.cfg.v_dim();
     RAD_ISSUE_N(c, d.op_gnorm, rows, brow_slice(d.w.o.x, r0, rows, v_dim),
@@ -212,11 +213,11 @@ inline void gdn_straddle(RadCtx* c, const RidgeFill& k, const qwen4exp_fp8::Mode
     gdn_tail_rows(c, d, batch->n_tok, p.b);
 }
 
-/* The attention of a straddling chunk (rad_block_attn_gated_fp8.h:442-563): the indexer whole (block
+/* The attention of a straddling chunk (rad_block_attn_gated_fp8.h:473-602): the indexer whole (block
  * keys AND every row's selection -- both cheap), K/V of every row, the query path over every row (an
  * M-RoPE position plane cannot be column-sliced), then the attention, gate and output projection
  * for the tail rows only, through the per-row sparse gated form, whose rows are independent
- * queries (:487-519; the plan admits this path only when every late layer takes that form). The
+ * queries (:526-558; the plan admits this path only when every late layer takes that form). The
  * rows are [r0, r0 + rows): the straddle's tail, or the decoders' rows. */
 inline void attn_rows(RadCtx* c, const qwen4exp_fp8::Layer& l, const RadBatch* batch, int64_t r0,
                       int64_t rows) {
@@ -245,7 +246,7 @@ inline void attn_rows(RadCtx* c, const qwen4exp_fp8::Layer& l, const RadBatch* b
 }
 
 /* The delta net beside decoders: projections over every row (the bulk rows' scan needs them), the
- * in-tree decode half for the decoders (rad_block_gdn_fp8.h:450-475; it writes their normed, quantised
+ * in-tree decode half for the decoders (rad_block_gdn_fp8.h:479-504; it writes their normed, quantised
  * output itself), the corrected scan of the one prefill sequence, and the output projection for the
  * decoder rows alone. */
 inline void gdn_decoders(RadCtx* c, const RidgeFill& k, const qwen4exp_fp8::Model& m, int64_t li,
