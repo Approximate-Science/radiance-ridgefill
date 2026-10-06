@@ -19,9 +19,14 @@ RidgeFill builds on are at the end.
   `StillDeadcode/qwen3.8-next-flash-fp8-iq4r-moe` (LFS SHA256
   `0af5e96244e80c21ac8edca1719dae49b8a201b94a2f3994c3e24026ceaa4d20`,
   121,969,901,568 bytes). The container is never modified.
-- **GPUs:** two AMD `gfx1201` cards, `--tp 2` (the tested configuration).
-  TP1 is expected to work (the engine declares whole weights with no
-  collectives; the static test oracle covers TP1). TP4 is untested.
+- **GPUs:** AMD `gfx1201` (Radeon AI PRO R9700). By tensor-parallel size:
+
+  | `--tp` | status |
+  |---|---|
+  | 2 | **tested**: every number in this README |
+  | 1 | **tested for correctness** on one 32 GB card (radiance 1.1.1): `off` is byte-identical to stock and int8 quality matches TP2's (last-512 ΔNLL +0.0028 vs +0.0010). The routed experts that do not fit on the card (~44 GiB) live in pinned host RAM: `--host-pool-mib 40960 --ngram-placement disk` (the n-gram table read from the model file so RAM goes to experts). That pool must fit both in free RAM and under the driver's pinned-memory cap (`ttm.pages_limit`, half of RAM by default). Measured there (release profile otherwise): 32K prefill 67.8 s stock, 57.8 s quality (1.17x), 41.0 s speed (1.66x); requests that do not approximate +0.3% vs stock; decode 13.5 tok/s, quality 0.8% below stock. |
+  | 3 | **built and tested without the hardware**: radiance 1.1.1 serves three ranks (uneven delta-net heads, one rank without attention) and the plugin follows it -- the static test oracle and the GPU kernels at TP3's 18- and 15-head ranks pass -- but no three-card run has been made |
+  | 4 | untested |
 - **License:** Apache-2.0 for the plugin and the projector.
 
 ## Installation
