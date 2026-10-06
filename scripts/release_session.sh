@@ -13,7 +13,7 @@
 # is reused when it exists; extraction and the e2e work dir are per version (evidence/release/{extract,e2e}-<version>;
 # RK_RELEASE_EVIDENCE names another evidence dir, so a second session never touches the first one's).
 #
-# Every server runs radiance 1.0.13's shipped flashnext profile (RK_RELEASE_FLAGS, below: MTP 3, prefix cache on with
+# Every server runs the pinned radiance release's shipped flashnext profile (RK_RELEASE_FLAGS, below: MTP 3, prefix cache on with
 # host and disk tiers, 2,048-token steps, wht6 wire, 8 sequences), headroom 3,072 MiB instead of 96. Only the
 # R64 servers add --num-speculative-tokens 0 --profile-ops (the logits capture follows one greedy decoder and must
 # see every pass).
@@ -39,18 +39,18 @@ COMMIT=$(git rev-parse "${RK_RELEASE_COMMIT:-HEAD}") SHORT=$(git rev-parse --sho
 has() { case " $RK_RELEASE_PARTS " in *" $1 "*) return 0 ;; esac; return 1; }
 E=${RK_RELEASE_EVIDENCE:-$W/evidence/release}; mkdir -p "$E"   # a re-run names a fresh dir: e2e refuses a used one
 : "${RK_RELEASE_VERSION:=0.1.0}"
-# the radiance release the plugin is built against and served on (1.0.13 since the rebase, Dylan 2026-10-05):
-: "${RK_RADIANCE_VERSION:=1.0.13}"
-: "${RK_RADIANCE_SRC:=$D/radiance-src-1.0.13}"
-: "${RK_BUILD_IMAGE:=radiance-build:1.0.13}"
+# the radiance release the plugin is built against and served on: the one RADIANCE_VERSION pins
+: "${RK_RADIANCE_VERSION:=$(cut -d' ' -f1 "$W/RADIANCE_VERSION")}"
+: "${RK_RADIANCE_SRC:=$D/radiance-src-$RK_RADIANCE_VERSION}"
+: "${RK_BUILD_IMAGE:=radiance-build:$RK_RADIANCE_VERSION}"
 : "${RK_IMAGE:=stilldeadcode/radiance:$RK_RADIANCE_VERSION}"
 export RK_RADIANCE_SRC RK_BUILD_IMAGE RK_IMAGE
 : "${RK_RELEASE_DIST:=/var/home/dylan/AI-Work/radiance-kva-plugin-20261004/dist}"
 export RK_MODEL=/var/home/dylan/models/rad/qwen3.8-next-flash-fp8-iq4r-moe.rad
 export RK_DOCS=/var/home/dylan/AI-Work/kva-flashnext-tests-data/samples/quick/ppl.jsonl
-# THE USER'S CONFIG (orchestrator, 2026-10-05): radiance 1.0.13's own shipped profile for this model,
+# THE USER'S CONFIG (orchestrator, 2026-10-05): the pinned radiance release's own shipped profile for this model,
 # deploy/compose/flashnext.yaml, with ONE deviation -- --gpu-headroom-mib 3072 instead of 96, because the display runs
-# on card 0000:03:00.0 (Dylan's rule). Its prefix cache (VRAM + 4 GiB host + 128 GiB disk under --prefix-cache-dir) is
+# on card 0000:03:00.0 (Dylan's rule); radiance 1.1.0 dropped the profile's --expert-vs-cache-ratio. Its prefix cache (VRAM + 4 GiB host + 128 GiB disk under --prefix-cache-dir) is
 # ON: every server gets a FRESH cache dir (RK_CACHE_DIR, mounted at /kvcache by scripts/common.sh), so no server reuses
 # another's KV, and every timed prompt carries a leading nonce, so no TTFT is answered from the cache. Radiance's pure
 # defaults do not load this model on two 32 GB cards (--host-pool-mib 0: "DID NOT FIT", evidence/r1013/def13-a.serve.log).
@@ -58,7 +58,7 @@ export RK_DOCS=/var/home/dylan/AI-Work/kva-flashnext-tests-data/samples/quick/pp
 # models read-only); NOT mirrored here: network_mode host (it hides the GPUs under rootless docker: loopback -p
 # instead), user 1000:1000 (rootless root already maps to the host user), group_add (the scratch image has no group
 # entries; the device nodes are world-rw here), --api-key / restart / healthcheck (test runs).
-: "${RK_RELEASE_FLAGS:=--tp 2 --tp-wire wht6 --max-num-seqs 8 --max-model-len 200000 --placement expert_tiered --host-pool-mib 12288 --gpu-headroom-mib 3072 --expert-vs-cache-ratio 0.82 --kv-cache-dtype fp8 --prefix-cache-host-mib 4096 --prefix-cache-dir /kvcache --prefix-cache-disk-mib 131072 --num-speculative-tokens 3 --max-num-batched-tokens 2048}"
+: "${RK_RELEASE_FLAGS:=--tp 2 --tp-wire wht6 --max-num-seqs 8 --max-model-len 200000 --placement expert_tiered --host-pool-mib 12288 --gpu-headroom-mib 3072 --kv-cache-dtype fp8 --prefix-cache-host-mib 4096 --prefix-cache-dir /kvcache --prefix-cache-disk-mib 131072 --num-speculative-tokens 3 --max-num-batched-tokens 2048}"
 # the prefix cache's disk tier can fill its volume (2026-10-05: 19 GB a server filled /var/mnt/qwen-storage): the
 # cache root is a parameter, one server's dir at a time, removed before the next
 K=${RK_RELEASE_CACHE_ROOT:-$E/kvcache}; mkdir -p "$K"

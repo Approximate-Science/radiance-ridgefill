@@ -16,7 +16,7 @@ pci=${1:-0000:13:00.0}
 bus=$(printf '%s' "$pci" | cut -d: -f2) dev=$(printf '%s' "$pci" | cut -d: -f3 | cut -d. -f1)
 fn=$(printf '%s' "$pci" | cut -d. -f2)
 want=$(( (0x$bus << 8) | (0x$dev << 3) | 0x$fn ))
-img=${RK_BUILD_IMAGE:-radiance-build:1.0.13}
+img=$RK_BUILD_IMAGE
 info=$(docker run --rm --security-opt label=disable --device /dev/kfd --device /dev/dri "$img" rocminfo 2>/dev/null) ||
     rk_die "rocminfo failed in $img"
 printf '%s\n' "$info" | awk -v want="$want" '

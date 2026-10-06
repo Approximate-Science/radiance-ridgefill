@@ -16,8 +16,6 @@ set -eu
 [ "$#" -ge 1 ] || rk_die "usage: scripts/kernels_gpu_check.sh <commit> [<pci address>]"
 pci=${2:-0000:13:00.0}
 short=$(git -C "$RK_REPO" rev-parse --short "$1") || rk_die "not a commit: $1"
-: "${RK_BUILD_IMAGE:=radiance-build:1.0.13}"
-: "${RK_RADIANCE_SRC:=$RK_REPO/data/radiance-src-1.0.13}"
 export RK_BUILD_IMAGE RK_RADIANCE_SRC
 E=$RK_REPO/evidence/tpx; mkdir -p "$E"
 log=$E/kernels-gpu-$short.log

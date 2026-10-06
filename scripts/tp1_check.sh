@@ -9,7 +9,7 @@
 #      (RK_DOCKER_EXTRA), and the engine's own device line must say it uses ONE card.
 #   1. FIT + TP1 R3: the stock engine (`exact`) at --tp 1 with the flashnext profile's memory flags exactly as
 #      scripts/common.sh's RK_FLAGS states them (--placement expert_tiered --host-pool-mib 12288
-#      --gpu-headroom-mib 3072 --expert-vs-cache-ratio 0.82, fp8 KV, 2048-token steps, 49152 context) -- only
+#      --gpu-headroom-mib 3072, fp8 KV, 2048-token steps, 49152 context) -- only
 #      --tp changes. Radiance computes the card's budget at startup and refuses a shortfall by name; if it does,
 #      that reason is printed with the budget it computed, and the session STOPS (exit 3): one 32 GB card
 #      cannot hold it. Otherwise scripts/ident.sh records the TP1 R3 (stock's own six hashes at TP1).
