@@ -7,12 +7,19 @@
 #
 #   0. The card pinned: ROCR_VISIBLE_DEVICES = scripts/card_index.sh <pci>, passed into every container
 #      (RK_DOCKER_EXTRA), and the engine's own device line must say it uses ONE card.
-#   1. FIT + TP1 R3: the stock engine (`exact`) at --tp 1 with the flashnext profile's memory flags exactly as
-#      scripts/common.sh's RK_FLAGS states them (--placement expert_tiered --host-pool-mib 12288
-#      --gpu-headroom-mib 3072, fp8 KV, 2048-token steps, 49152 context) -- only
-#      --tp changes. Radiance computes the card's budget at startup and refuses a shortfall by name; if it does,
-#      that reason is printed with the budget it computed, and the session STOPS (exit 3): one 32 GB card
-#      cannot hold it. Otherwise scripts/ident.sh records the TP1 R3 (stock's own six hashes at TP1).
+#   1. FIT + TP1 R3: the stock engine (`exact`) at --tp 1 with scripts/common.sh's RK_FLAGS (expert_tiered, fp8
+#      KV, 2048-token steps, 49152 context) and three memory flags changed for one card (Dylan, 10-06):
+#        --host-pool-mib $RK_TP1_HOST_POOL_MIB (default 40960): the routed experts the card cannot hold live in
+#          pinned host RAM. At TP1 they are ~58 GiB; the 10-05 attempt's card held 15.7 GiB of them, so ~43.6 GiB
+#          is off-card, and 1.1.1's card keeps what the pool cannot (no --expert-vs-cache-ratio any more).
+#          Refused here, by name, above the driver's pinned cap (ttm pages_limit) or above MemAvailable less 8 GiB.
+#        --ngram-placement disk: the 47.68 GiB n-gram table read from the model file, so RAM goes to experts.
+#        --gpu-headroom-mib $RK_TP1_HEADROOM_MIB: 96 (the profile's own) on a card with no connected display,
+#          3072 (common.sh's display-card value) on one that drives a display -- read from the card's DRM
+#          connectors, not assumed.
+#      Radiance computes the card's budget at startup and refuses a shortfall by name; if it does, that reason
+#      is printed with the budget it computed, and the session STOPS (exit 3). Otherwise scripts/ident.sh
+#      records the TP1 R3 (stock's own six hashes at TP1).
 #   2. `off` with the plugin home at --tp 1: ident must equal that TP1 R3.
 #   3. A TP1 exact KL reference, recorded in this session (grade.sh record): the TP2 reference is not a TP1
 #      one -- the all-reduce sums partials in another order, so TP1's exact logits differ from TP2's in the
@@ -44,6 +51,25 @@ srv=$(docker ps --format '{{.Names}} {{.Image}}' | awk '$2 !~ /build/ {print $1}
 idx=$("$RK_SCRIPTS/card_index.sh" "$pci") || { log "STOP: no card at $pci"; exit 1; }
 RK_FLAGS=$(printf '%s' "$RK_FLAGS" | sed 's/--tp [0-9]*/--tp 1/')
 case " $RK_FLAGS " in *" --tp 1 "*) ;; *) log "STOP: RK_FLAGS has no --tp to set: $RK_FLAGS"; exit 1 ;; esac
+
+# memory flags for one card (header, step 1)
+displays=$(cat /sys/bus/pci/devices/"$pci"/drm/card*/card*-*/status 2>/dev/null | grep -c '^connected$')
+[ "$displays" -gt 0 ] && hr_default=3072 || hr_default=96
+: "${RK_TP1_HOST_POOL_MIB:=40960}" "${RK_TP1_HEADROOM_MIB:=$hr_default}"
+avail_mib=$(awk '/^MemAvailable:/ {print int($2 / 1024)}' /proc/meminfo)
+[ "$RK_TP1_HOST_POOL_MIB" -le $((avail_mib - 8192)) ] ||
+    { log "STOP: --host-pool-mib $RK_TP1_HOST_POOL_MIB exceeds MemAvailable $avail_mib MiB less 8 GiB"; exit 1; }
+if [ -r /sys/module/ttm/parameters/pages_limit ]; then
+    ttm_mib=$(( $(cat /sys/module/ttm/parameters/pages_limit) * $(getconf PAGESIZE) / 1048576 ))
+    [ "$RK_TP1_HOST_POOL_MIB" -le "$ttm_mib" ] ||
+        { log "STOP: --host-pool-mib $RK_TP1_HOST_POOL_MIB exceeds the driver's pinned cap (ttm pages_limit) $ttm_mib MiB"; exit 1; }
+fi
+RK_FLAGS=$(printf '%s' "$RK_FLAGS" | sed -e "s/--host-pool-mib [0-9]*/--host-pool-mib $RK_TP1_HOST_POOL_MIB/" \
+    -e "s/--gpu-headroom-mib [0-9]*/--gpu-headroom-mib $RK_TP1_HEADROOM_MIB/" -e 's/ *--ngram-placement [a-z]*//')
+RK_FLAGS="$RK_FLAGS --ngram-placement disk"
+for want in "--host-pool-mib $RK_TP1_HOST_POOL_MIB" "--gpu-headroom-mib $RK_TP1_HEADROOM_MIB"; do
+    case " $RK_FLAGS " in *" $want "*) ;; *) log "STOP: RK_FLAGS has no '$want': $RK_FLAGS"; exit 1 ;; esac
+done
 export RK_FLAGS RK_DOCKER_EXTRA="-e ROCR_VISIBLE_DEVICES=$idx"
 I8="$RK_DOCKER_EXTRA -v $D/projector-ridgefill-qwen38fn-int8:/projector:ro"
 log "tp1 start $(date -u +%FT%TZ) boot $(cat /proc/sys/kernel/random/boot_id) card $pci = ROCR_VISIBLE_DEVICES $idx"
