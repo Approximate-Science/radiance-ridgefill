@@ -113,7 +113,21 @@ On the release build (radiance 1.0.13, int8, quality mode, last 512 tokens of 9 
 
 Int8 halves the streamed bytes (0.639 GB vs 1.259 GB per pass per rank) and
 the ring slot (25.4 MiB vs 50 MiB), and is 2.5–4.7% faster on TTFT than bf16
-through the ring. On the release build (radiance 1.0.13's flashnext profile, two R9700, time to first token, warmed medians): quality mode 1.49x at 16K and 2.10x at 32K; speed mode 1.97x and 2.55x.
+through the ring.
+
+Prefill vs stock on the release build (two AMD R9700, `--tp 2`, radiance 1.0.13's flashnext profile with
+expert_tiered offload, MTP 3 and `--gpu-headroom-mib 3072`; stock = the same server with `RADIANCE_RIDGEFILL=off`):
+
+- **Typical use: a 32K-token prompt prefills 1.24x faster in quality mode and 1.70x in speed mode** (a fresh
+  server, or long prompts mixed with chat at 1 long to 6 short; a fresh server's first long prompts 1.07–1.13x
+  and 1.47–1.56x).
+- **Sustained long-prompt traffic: 2.05x and 2.81x at 32K** (1.85x and 2.33x at 16K), after about 15–18 long
+  prompts back to back. radiance's expert cache shifts toward the layers RidgeFill uses at a capped rate, and
+  short chats and decode shift it back. With every expert in VRAM there would be no such shift; not measured.
+- **Short prompts and decode: no loss** (decode within 0.5% of stock on a fresh server, 3–4% faster after
+  long-prompt traffic).
+
+Earlier copies of this card gave 2.10x / 2.55x at 32K; those were measured partway through that shift.
 
 ## Limitations
 
