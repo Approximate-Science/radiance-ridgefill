@@ -92,15 +92,16 @@ it, and refuses a tail below 512.
 
 ## What it costs
 
-Headline numbers are re-measured on the release build; placeholders below are
-filled in by the final release session.
+Measured on radiance 1.0.13 with its own `deploy/compose/flashnext.yaml` profile (MTP 3, prefix cache on, 8 sequences, 2,048-token steps; `--gpu-headroom-mib 3072` because the display ran on one card), int8 projector, two AMD R9700 (gfx1201), `--tp 2`. Speed: time to first token, warmed and settled servers, median of 7, two rounds within 0.3% of each other. Quality: last 512 tokens of 9 long documents, paired against exact, bootstrap 95% CI.
 
 | Dimension | Effect / Cost |
 |---|---|
-| Quality mode speedup (default flags) | «FINAL: TTFT speedup vs stock at 9K/16K/32K tokens, warmed-server medians» |
-| Quality mode quality (default flags) | «FINAL: ΔNLL vs stock, last-512 paired, with 95% CI» |
-| Speed mode speedup (default flags) | «FINAL: TTFT speedup vs stock at 9K/16K/32K tokens, warmed-server medians» |
-| Speed mode quality (default flags) | «FINAL: ΔNLL vs stock, last-512 paired, with 95% CI» |
+| Quality mode speedup | **1.49x** at 16K tokens (12.26 s → 8.22 s), **2.10x** at 32K (24.06 s → 11.46 s) |
+| Quality mode quality | ΔNLL +0.0010 per token (95% CI −0.0135 to +0.0153): no measurable difference from exact; perplexity ratio 1.0010, top-1 agreement 91.3% |
+| Speed mode speedup | **1.97x** at 16K (12.26 s → 6.24 s), **2.55x** at 32K (24.06 s → 9.45 s) |
+| Speed mode quality | ΔNLL +0.0242 per token (95% CI +0.0040 to +0.0446): a small measurable cost; perplexity ratio 1.0245, top-1 agreement 89.4% |
+| Retrieval (needle in a haystack) | 72/72 for stock, quality and speed: one fact (or the right one of four) hidden at 10–85% depth of a 16K or 32K chat prompt, plus exact-tail controls; no disagreements with stock |
+| Decode | Equal to stock, with MTP on: 8.87 vs 9.37 ms/token right after a 16K prompt, 8.18 vs 7.99 settled (stock vs quality) |
 | Prompts that run the stock path on a KVA server | ≈ +0.9% (2K) / +1.2% (8K) settled prefill time vs stock, because the plugin's VRAM displaces resident experts. Short prompts and the exact tail are unaffected in output, only in time. Decode equals stock. |
 | Projector memory | The projector always lives in host RAM (≈637 MiB host-mapped per rank for int8) and is streamed through ONE VRAM staging slot of 25.4 MiB per rank. Total plugin VRAM ≈ 61 MiB per card (slot + arena buffers). There is no VRAM placement. |
 | MTP drafting (`--num-speculative-tokens`, default auto) | Works with the plugin; decode is unaffected. The MTP `final` map is off by default and optional: +1.8% drafted tokens per step (paired) for +25 MiB VRAM per rank. |

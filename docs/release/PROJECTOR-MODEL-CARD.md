@@ -84,16 +84,13 @@ Every paired CI includes 0: int8 holds the bf16 projector's level. Headline
 quality vs stock exact (quality mode, last 512, paired): int8 +0.00103
 [−0.01348, +0.01529]; bf16 +0.00212 [−0.01255, +0.01565].
 
-Headline quality on the release build is re-measured by the final release
-session: «FINAL: quality-mode ΔNLL vs stock exact with 95% CI, protocol».
+On the release build (radiance 1.0.13, int8, quality mode, last 512 tokens of 9 long documents, paired against exact): ΔNLL +0.0010 per token, 95% CI −0.0135 to +0.0153 — no measurable difference; speed mode +0.0242 (+0.0040 to +0.0446). Needle-in-a-haystack retrieval at 16K and 32K: 72/72 in both modes, same as stock.
 
 ## Speed
 
 Int8 halves the streamed bytes (0.639 GB vs 1.259 GB per pass per rank) and
 the ring slot (25.4 MiB vs 50 MiB), and is 2.5–4.7% faster on TTFT than bf16
-through the ring. Headline TTFT on the release build is re-measured by the
-final release session: «FINAL: TTFT speedup vs stock at 16K/32K tokens,
-warmed-server medians, protocol».
+through the ring. On the release build (radiance 1.0.13's flashnext profile, two R9700, time to first token, warmed medians): quality mode 1.49x at 16K and 2.10x at 32K; speed mode 1.97x and 2.55x.
 
 ## Limitations
 
