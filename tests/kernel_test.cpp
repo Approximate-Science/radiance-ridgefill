@@ -1455,10 +1455,13 @@ TEST(mask_matches_fnlev_rules, "both") {
     }
 }
 
-/* ================================================================== per-rank extents (TP1 / TP2 / TP4)
- * The correction, the state read and the decay sums are per value head, and tensor parallelism hands
- * rank r the contiguous heads [r * H/W, (r + 1) * H/W) (the delta net's own split; the folder's st.L is
- * sliced the same way, ridgefill_projector.h plan_rank). So a rank's row at its extent -- 24 heads at TP2, 12
+/* ================================================================== per-rank extents (TP1 / TP2 / TP3 / TP4)
+ * The correction, the state read and the decay sums are per value head, and tensor parallelism hands each
+ * rank a contiguous span of heads (the delta net's own split; the folder's st.L is sliced the same way,
+ * ridgefill_projector.h plan_rank, from the adapter's StateShape::first). Even worlds: rank r holds
+ * [r * H/W, (r + 1) * H/W). TP3 is uneven: radiance 1.1.1 splits the 16 K heads 6/5/5 with the extra going
+ * first to the rank without attention (rank 2; qwen4exp_fp8.cpp's remainder_place), V = 3 x K, so ranks
+ * 0/1/2 hold [18, 33), [33, 48), [0, 18). A rank's row at its extent -- 24 heads at TP2, 15 or 18 at TP3, 12
  * at TP4 -- must compute, byte for byte, the slice of what the row computes over all 48 heads at TP1.
  * The host rows here; the device rows against them at each extent are the "gpu" cases above. */
 
@@ -1519,11 +1522,21 @@ TEST(each_ranks_heads_compute_their_slice_of_tp1, "host") {
     RhoRun rho1 = random_rho(r, 512, H, 0.1, true);
     rho1.pitch = 2 * H;
     CHECK_EQ(run_rho(rho, rho1), RAD_OK);
-    for (int world : { 2, 4 }) {
-        const int64_t hw = H / world;
+    struct Span { int64_t h0, n; };
+    struct Split { int world; std::vector<Span> ranks; };   /* rank order; see the block comment */
+    const Split splits[] = {
+        { 2, { { 0, 24 }, { 24, 24 } } },
+        { 3, { { 18, 15 }, { 33, 15 }, { 0, 18 } } },
+        { 4, { { 0, 12 }, { 12, 12 }, { 24, 12 }, { 36, 12 } } },
+    };
+    for (const Split& sp : splits) {
+        std::vector<int> owners((size_t)H, 0);   /* the table itself: every head on exactly one rank */
+        for (const Span& s : sp.ranks)
+            for (int64_t h = s.h0; h < s.h0 + s.n; ++h) owners[(size_t)h] += 1;
+        CHECK(std::count(owners.begin(), owners.end(), 1) == H);
         int64_t corr_diff = 0, read_diff = 0, rho_diff = 0;
-        for (int rank = 0; rank < world; ++rank) {
-            const int64_t h0 = rank * hw;
+        for (const Span& s : sp.ranks) {
+            const int64_t h0 = s.h0, hw = s.n;
             CorrectRun part = correct_operands(6, hw, D, D, { 4, -1, 1, 5 }, 8);
             copy_heads(full, part, h0);
             for (const Step& st : steps) CHECK_EQ(run_correct(corr, part, st.mode, st.alpha, st.nd), RAD_OK);
@@ -1554,8 +1567,11 @@ TEST(each_ranks_heads_compute_their_slice_of_tp1, "host") {
         CHECK_EQ(corr_diff, 0);
         CHECK_EQ(read_diff, 0);
         CHECK_EQ(rho_diff, 0);
-        std::fprintf(stderr, "  TP%d (%lld heads a rank): correct %lld, read %lld, decay sums %lld elements differ "
-                     "from TP1's slices\n", world, (long long)hw, (long long)corr_diff, (long long)read_diff,
+        std::string spans;
+        for (const Span& s : sp.ranks)
+            spans += " [" + std::to_string(s.h0) + "," + std::to_string(s.h0 + s.n) + ")";
+        std::fprintf(stderr, "  TP%d (heads%s): correct %lld, read %lld, decay sums %lld elements differ "
+                     "from TP1's slices\n", sp.world, spans.c_str(), (long long)corr_diff, (long long)read_diff,
                      (long long)rho_diff);
     }
 }
@@ -1563,7 +1579,7 @@ TEST(each_ranks_heads_compute_their_slice_of_tp1, "host") {
 /* ================================================================== device against host */
 
 /* R20: the device row and the host row on the same random operands -- every rank count's per-rank
- * value heads (48 at TP1, 24 at TP2, 12 at TP4) at the model's 128 x 128 state, padded
+ * value heads (48 at TP1, 24 at TP2, 18 and 15 at TP3, 12 at TP4) at the model's 128 x 128 state, padded
  * slot / head / row strides, nonzero applied scales, a skipped sequence -- agree to the bit, over
  * the whole buffers (padding included). */
 static void state_correct_device_vs_host(const RadKernelInfo* dev, const RadKernelInfo* host, int64_t heads) {
@@ -1609,13 +1625,13 @@ static void state_correct_device_vs_host(const RadKernelInfo* dev, const RadKern
         }
 }
 
-/* At every rank count's per-rank extent: TP1's 48 value heads, TP2's 24, TP4's 12. */
+/* At every rank count's per-rank extent: TP1's 48 value heads, TP2's 24, TP3's 18 and 15 (uneven), TP4's 12. */
 TEST(state_correct_device_matches_host, "gpu") {
     if (!group_runnable()) return;
     const RadKernelInfo* dev = find_row("ridgefill_state_correct", RAD_DOMAIN_DEVICE);
     const RadKernelInfo* host = find_row("ridgefill_state_correct", RAD_DOMAIN_HOST);
     REQUIRE(dev && host);
-    for (int64_t heads : { 48, 24, 12 }) state_correct_device_vs_host(dev, host, heads);
+    for (int64_t heads : { 48, 24, 18, 15, 12 }) state_correct_device_vs_host(dev, host, heads);
 }
 
 /* ridgefill_state_read, device vs host: model-sized heads at padded strides, a negative slot, a slot past
@@ -1643,7 +1659,7 @@ TEST(state_read_device_matches_host, "gpu") {
     const RadKernelInfo* dev = find_row("ridgefill_state_read", RAD_DOMAIN_DEVICE);
     const RadKernelInfo* host = find_row("ridgefill_state_read", RAD_DOMAIN_HOST);
     REQUIRE(dev && host);
-    for (int64_t heads : { 48, 24, 12 }) state_read_device_vs_host(dev, host, heads);
+    for (int64_t heads : { 48, 24, 18, 15, 12 }) state_read_device_vs_host(dev, host, heads);
 }
 
 /* A random window layout over an n-row step, the bulk end b kept within the device row's LDS
@@ -1752,7 +1768,7 @@ TEST(mask_device_fail_safe, "gpu") {
     CHECK_EQ(run_mask(host, big).rc, RAD_OK);
 }
 
-/* R34's device leg (at 48, 24 and 12 heads: TP1, TP2, TP4 a rank): device vs host on model-sized gates (bf16 a as a column slice of the a|b
+/* R34's device leg (at 48, 24, 18, 15 and 12 heads: TP1, TP2, TP3, TP4 a rank): device vs host on model-sized gates (bf16 a as a column slice of the a|b
  * buffer, carried over two chunks); rho within 1e-5, N and D reported. */
 TEST(rho_device_matches_host, "gpu") {
     if (!group_runnable()) return;
@@ -1761,7 +1777,7 @@ TEST(rho_device_matches_host, "gpu") {
     REQUIRE(dev && host);
     Rng r{ 51 };
     double worst_rho = 0, worst_rel = 0;
-    for (int64_t heads : { 48, 24, 12 })   /* TP1, TP2, TP4's value heads a rank */
+    for (int64_t heads : { 48, 24, 18, 15, 12 })   /* TP1, TP2, TP3 (18 / 15), TP4's value heads a rank */
     for (double exact : { 0.056, 0.5, 0.0 }) {
         RhoRun h = random_rho(r, 2048, heads, exact, true);
         h.pitch = 2 * heads;   /* a is the first half of the rank's a|b columns */

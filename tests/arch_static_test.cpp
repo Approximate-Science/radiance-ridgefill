@@ -2764,7 +2764,7 @@ void hold_ridgefill_i8(RadBuilder& b) {
  * block input it feeds is replicated on every rank (only the heads inside the blocks are split). So the
  * GEMM a rank declares at TP4 -- and the row the engine picks for it -- is TP1's: one shape for the
  * kernel tests (kernel_test's int8 case runs exactly N 2560, K 10240). The correction is what TP splits:
- * each rank's state heads are 48 / world (kernel_test each_ranks_heads_compute_their_slice_of_tp1). */
+ * each rank's state heads are 48 / world, or 15 / 15 / 18 at TP3 (kernel_test each_ranks_heads_compute_their_slice_of_tp1). */
 TEST(every_rank_at_every_tp_declares_the_full_width_int8_projector) {
     RadModelMeta meta = flash_next_meta();
     const int64_t tp3_heads[3] = {15, 15, 18};   /* 48 value heads over three ranks, the extra on the last */
