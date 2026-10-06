@@ -95,6 +95,8 @@ RadBuildCtx served_ctx(int rank = 0, int world = 1) {
  * tiny container's tokenizer hash; `model` may add members to the model block. */
 qwen4exp_ridgefill::Json test_manifest(const std::string& model = "") {
     const std::string text = std::string(R"({"format": 1, "adapter": "qwen4exp", "split": 4,
+        "name": "ridgefill-projector-test", "authors": ["Dylan Johnston", "tcclaviger"],
+        "license": "Apache-2.0", "doi": "10.5281/zenodo.23179168",
         "model": {"arch_id": "qwen4exp", "name": "test-q38-flashnext",
                   "meta": {"hc_count": "4", "linear_num_value_heads": "48"},
                   "vocab_sha256": ")") + kTinyVocab + "\"" + model + R"(},
@@ -445,6 +447,10 @@ TEST(speed_takes_the_folder_and_declares_its_kernel_ops) {
     CHECK_EQ(k.split, (int64_t)kSplit);
     CHECK(k.have_proj && k.have_st && !k.have_rowsel);
     CHECK(has(log, "matches test-q38-flashnext: arch ok, metadata 2/2, tokenizer ok, encodings 0/0, anchors 0/0"));
+    /* the credit the manifest carries ends the line; a manifest without it prints none */
+    CHECK(has(log, " files; RidgeFill projector ridgefill-projector-test by Dylan Johnston and tcclaviger "
+                   "(Apache-2.0, doi:10.5281/zenodo.23179168)\n"));
+    CHECK(qwen4exp_ridgefill::credit_of(qwen4exp_ridgefill::Json{}).empty());
     int undo = 0, apply = 0, gemm = 0;
     for (const RecOp& o : ridgefill.ops) {
         if (o.op == "ridgefill_gemm_nt_bias" || o.op == "ridgefill_state_correct" || o.op == "ridgefill_mask") CHECK(o.w.empty());

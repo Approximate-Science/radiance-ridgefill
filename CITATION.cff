@@ -1,0 +1,56 @@
+cff-version: 1.2.0
+message: "If you use RidgeFill, please cite it as below."
+title: RidgeFill
+abstract: >-
+  Long-prompt prefill acceleration for radiance: closed-form ridge maps predict the late layers'
+  inputs for bulk prompt tokens, so each late layer writes its own K/V and recurrent state while
+  an exact tail, exact-row selection and a recurrent-state correction keep the answer exact-quality.
+authors:
+  - given-names: Dylan
+    family-names: Johnston
+  - alias: tcclaviger
+version: 0.1.0
+doi: 10.5281/zenodo.23179168
+identifiers:
+  - type: doi
+    value: 10.5281/zenodo.23179168
+    description: The archived release (Zenodo).
+license: Apache-2.0
+repository-code: "https://huggingface.co/Dyluhn/radiance-ridgefill"
+url: "https://doi.org/10.5281/zenodo.23179168"
+keywords:
+  - radiance
+  - prefill acceleration
+  - ridge regression
+  - KV cache
+  - Qwen3.8-Flash-Next
+references:
+  - type: article
+    title: "DeepSeek-V4.1-Flash: Pushing the Limits of KV Cache Compression"
+    authors:
+      - name: DeepSeek-AI
+    identifiers:
+      - type: other
+        value: "arXiv:2609.19969"
+    notes: "§2.2, the Causal Encoder-Decoder"
+  - type: article
+    title: "You Only Cache Once: Decoder-Decoder Architectures for Language Models"
+    authors:
+      - {given-names: Yutao, family-names: Sun}
+      - {given-names: Li, family-names: Dong}
+      - {given-names: Yi, family-names: Zhu}
+      - {given-names: Shaohan, family-names: Huang}
+      - {given-names: Wenhui, family-names: Wang}
+      - {given-names: Shuming, family-names: Ma}
+      - {given-names: Quanlu, family-names: Zhang}
+      - {given-names: Jianyong, family-names: Wang}
+      - {given-names: Furu, family-names: Wei}
+    year: 2024
+    identifiers:
+      - type: other
+        value: "arXiv:2405.05254"
+  - type: software
+    title: "Q3-8B-KVA-Projector: Late Layer KV Approximation Projector for Qwen3-8B"
+    authors:
+      - alias: kishida
+    url: "https://huggingface.co/kishida/Q3-8B-KVA-Projector"

@@ -2,7 +2,7 @@
 
 package.py derives the repo root from its own location, so the tests build a SCRATCH
 REPO (tools/package.py + tools/ridgefill_template.py copied byte-identical, a README, a
-LICENSE) and run the copy; the real repo is never written to. The fake inputs mirror
+LICENSE, a NOTICE) and run the copy; the real repo is never written to. The fake inputs mirror
 the real shapes: a frozen home (architectures/qwen4exp_fp8.so + kernels/ridgefill.so), the
 projector folder (files + a ridgefill.json manifest with real sha256s, built for BOTH dtypes
 the release may ship -- bf16 and the int8 folder -- so the package naming is exercised),
@@ -112,9 +112,9 @@ def make_projector(projector: Path, dtype: str = "bf16") -> Path:
     return projector
 
 
-def make_repo(dst: Path, with_license: bool = True) -> Path:
+def make_repo(dst: Path, with_license: bool = True, with_notice: bool = True) -> Path:
     """A scratch repo: package.py and ridgefill_template.py copied byte-identical from the real
-    one, a README, a LICENSE (or none)."""
+    one, a README, a LICENSE (or none), the real NOTICE (or none)."""
     tools = dst / "tools"
     tools.mkdir(parents=True)
     shutil.copyfile(PACKAGE, tools / "package.py")
@@ -127,6 +127,8 @@ def make_repo(dst: Path, with_license: bool = True) -> Path:
         "---\nlicense: apache-2.0\n---\n# RidgeFill projector (model card)\n", encoding="utf-8")
     if with_license:
         (dst / "LICENSE").write_text("MIT test license\n", encoding="utf-8")
+    if with_notice:
+        shutil.copyfile(REPO / "NOTICE", dst / "NOTICE")
     return dst
 
 
@@ -194,26 +196,30 @@ def test_layout_and_sums_no_template_by_default(inputs, tmp_path):
     assert (plugin / "README.md").read_text(encoding="utf-8") == \
         (inputs["repo"] / "docs" / "release" / "PLUGIN-README.md").read_text(encoding="utf-8")
     assert (plugin / "LICENSE").is_file()
+    assert (plugin / "NOTICE").read_bytes() == (REPO / "NOTICE").read_bytes()
+    assert any(line.endswith("  NOTICE") for line in (plugin / "SHA256SUMS").read_text(encoding="utf-8").splitlines())
     assert (plugin / "VERSION.json").is_file()
     check_sums(plugin)
 
     projector = out / "ridgefill-projector-qwen3.8-flash-next-bf16"     # named by the manifest's dtype
     assert projector.is_dir()
     # an exact copy of every non-documentation file, byte-identical, nothing missing or extra; README.md is the
-    # model card (LICENSE and SHA256SUMS are the other two additions packaging makes on top)
+    # model card (LICENSE, NOTICE and SHA256SUMS are the other additions packaging makes on top)
     for name in sorted(p.name for p in inputs["projector"].iterdir() if p.name != "README.md"):
         assert (projector / name).is_file(), name
         assert sha256_file(projector / name) == sha256_file(inputs["projector"] / name), name
     assert sorted(p.name for p in projector.iterdir()
-                  if p.name not in ("SHA256SUMS", "LICENSE")) == \
+                  if p.name not in ("SHA256SUMS", "LICENSE", "NOTICE")) == \
         sorted(p.name for p in inputs["projector"].iterdir())
     assert (projector / "README.md").read_bytes() == \
         (inputs["repo"] / "docs" / "release" / "PROJECTOR-MODEL-CARD.md").read_bytes()
     assert "README.md" not in json.loads((projector / "ridgefill.json").read_text(encoding="utf-8"))["files"]
     assert (projector / "LICENSE").read_bytes() == \
         (inputs["repo"] / "LICENSE").read_bytes()
+    assert (projector / "NOTICE").read_bytes() == (inputs["repo"] / "NOTICE").read_bytes()
     sums_lines = (projector / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
     assert any(line.endswith("  LICENSE") for line in sums_lines)   # LICENSE is summed
+    assert any(line.endswith("  NOTICE") for line in sums_lines)    # so is NOTICE
     check_sums(projector)
 
     # no chat-template package anywhere: not built by default
@@ -265,6 +271,7 @@ def test_template_package_built_only_with_the_flag(inputs, tmp_path):
     assert (template / "README.md").is_file()
     assert (template / "LICENSE").read_bytes() == \
         (inputs["repo"] / "LICENSE").read_bytes()
+    assert (template / "NOTICE").read_bytes() == (inputs["repo"] / "NOTICE").read_bytes()
     template_readme = (template / "README.md").read_text(encoding="utf-8")
     assert "--override-chat-template" in template_readme
     assert "PARKED" in template_readme          # it says the feature is parked
@@ -336,6 +343,11 @@ def test_sha_sums_refuse_on_mismatch(inputs, tmp_path):
     result = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=projector,
                             capture_output=True, text=True)
     assert result.returncode != 0
+    (projector / "LICENSE").write_bytes((inputs["repo"] / "LICENSE").read_bytes())
+    (projector / "NOTICE").write_text("tampered notice\n", encoding="utf-8")
+    result = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=projector,
+                            capture_output=True, text=True)
+    assert result.returncode != 0
 
     template = out / "ridgefill-chat-template"
     (template / "LICENSE").write_text("tampered license\n", encoding="utf-8")
@@ -385,6 +397,15 @@ def test_missing_license_refuses_by_name(inputs, tmp_path):
     result = run_packager(inputs, tmp_path / "dist", expect_rc=2)
     assert "LICENSE" in result.stderr
     assert str(inputs["repo"] / "LICENSE") in result.stderr
+    assert not (tmp_path / "dist").exists()
+
+
+def test_missing_notice_refuses_by_name(inputs, tmp_path):
+    """Apache-2.0 §4(d): every package carries the NOTICE, so a repo without one packages nothing."""
+    inputs["repo"] = make_repo(tmp_path / "repo-nonotice", with_notice=False)
+    inputs["packager"] = inputs["repo"] / "tools" / "package.py"
+    result = run_packager(inputs, tmp_path / "dist", expect_rc=2)
+    assert str(inputs["repo"] / "NOTICE") in result.stderr
     assert not (tmp_path / "dist").exists()
 
 

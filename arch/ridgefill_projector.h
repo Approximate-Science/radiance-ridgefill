@@ -126,6 +126,24 @@ inline std::string check_tensors(const Folder& f, const RidgeFillAdapter& a, Loa
     return std::string();
 }
 
+/* The credit the manifest carries, for the "matches" line: "; RidgeFill projector <name> by A and B
+ * (<license>, doi:<doi>)". Empty for a folder whose manifest names no projector or no authors (one
+ * built before the credit fields existed): the credit is reported, never required. */
+inline std::string credit_of(const Json& manifest) {
+    const std::string name = manifest.text("name");
+    const Json* authors = manifest.get("authors");
+    std::vector<std::string> who;
+    for (size_t i = 0; authors && authors->kind == Json::ARR && i < authors->arr.size(); ++i)
+        if (authors->arr[i].kind == Json::STR && !authors->arr[i].str.empty()) who.push_back(authors->arr[i].str);
+    if (name.empty() || who.empty()) return std::string();
+    std::string by = who[0];
+    for (size_t i = 1; i < who.size(); ++i) by += (i + 1 == who.size() ? " and " : ", ") + who[i];
+    std::string terms = manifest.text("license");
+    const std::string doi = manifest.text("doi");
+    if (!doi.empty()) terms += (terms.empty() ? "doi:" : ", doi:") + doi;
+    return "; RidgeFill projector " + name + " by " + by + (terms.empty() ? "" : " (" + terms + ")");
+}
+
 /* Finds, reads and checks the folder once per process; every later declare reads the answer. */
 inline const Loaded& load_folder(const RadModelMeta* meta, RadBuilder* b, const RidgeFillAdapter& a) {
     std::lock_guard<std::mutex> lk(g_load_mu);
@@ -158,10 +176,11 @@ inline const Loaded& load_folder(const RadModelMeta* meta, RadBuilder* b, const 
         std::fprintf(stderr, "radiance: %s: RidgeFill: WARNING: projector %s: %s -- it runs, but "
                              "was fitted on another variant\n", g_log_name, at.dir.c_str(), w.c_str());
     std::fprintf(stderr, "radiance: %s: RidgeFill: projector %s (found %s) matches %s: %s, "
-                         "%zu warning(s); split %lld, %s, %.1f MiB in %zu files\n", g_log_name,
+                         "%zu warning(s); split %lld, %s, %.1f MiB in %zu files%s\n", g_log_name,
                  at.dir.c_str(), at.how.c_str(), meta->name ? meta->name : "(unnamed)", mt.summary.c_str(),
                  mt.warnings.size(), (long long)l.split, l.has_st ? "correction held" : "no correction",
-                 (double)l.folder.file_bytes / (1 << 20), l.folder.manifest.get("files")->obj.size());
+                 (double)l.folder.file_bytes / (1 << 20), l.folder.manifest.get("files")->obj.size(),
+                 credit_of(l.folder.manifest).c_str());
     l.usable = true;
     return l;
 }

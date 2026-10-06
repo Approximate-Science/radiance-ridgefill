@@ -128,6 +128,17 @@ def test_the_manifest_carries_the_fingerprint_and_every_files_hash(built):
     out, rad = built
     m = json.loads((out / "ridgefill.json").read_text())
     assert m["format"] == 1 and m["adapter"] == "qwen4exp" and m["split"] == 2
+    # the credit leads the manifest, and every tensor file's header carries it too
+    assert list(m)[:6] == ["format", "name", "authors", "license", "doi", "homepage"]
+    assert m["name"] == "ridgefill-projector-qwen3.8-flash-next-bf16"
+    assert m["authors"] == ["Dylan Johnston", "tcclaviger"] and m["license"] == "Apache-2.0"
+    assert m["doi"] == "10.5281/zenodo.23179168"
+    assert m["homepage"] == "https://huggingface.co/Dyluhn/ridgefill-projector-qwen3.8-flash-next-bf16"
+    for name in (n for n in m["files"] if n.endswith(".safetensors")):
+        with safe_open(str(out / name), "pt") as f:
+            assert f.metadata() == {"format": "ridgefill-projector-1", "name": m["name"],
+                                    "authors": "Dylan Johnston, tcclaviger", "license": "Apache-2.0",
+                                    "doi": "10.5281/zenodo.23179168"}, name
     assert m["layers"] == {"2": "recurrent", "3": "full_attn"}
     assert m["stream_width"] == 6 and m["block_in_width"] == 4
     assert m["model"]["meta"] == META and m["model"]["vocab_sha256"] == TINY_VOCAB
@@ -218,7 +229,8 @@ def test_int8_folder_keeps_every_other_file_and_names_its_source(tmp_path):
     m = json.loads((out / "ridgefill.json").read_text())
     assert m["projector"]["dtype"] == "i8" and m["projector"]["encoding"] == "i8*bf16[1x128]"
     assert m["projector"]["files"] == {"4": "proj8.L4.safetensors", "5": "proj8.L5.safetensors"}
-    assert m["projector"]["source"]["ridgefill_json_sha256"] == P.S.sha256_file(src / "ridgefill.json")
+    assert m["projector"]["source"]["manifest_sha256"] == P.S.sha256_file(src / "ridgefill.json")
+    assert m["name"] == "ridgefill-projector-qwen3.8-flash-next-i8" and m["authors"] == ["Dylan Johnston", "tcclaviger"]
     assert sorted(m["files"]) == ["proj8.L4.safetensors", "proj8.L5.safetensors"]   # README copied, never listed
     assert all(m["files"][n] == P.S.sha256_file(out / n) for n in m["files"])
     assert (out / "README.md").read_text() == "hello"
@@ -286,3 +298,70 @@ def test_reseal_unlists_documentation_and_touches_no_file(tmp_path):
     P.save({"proj.4.weight": torch.zeros(4, 8).to(torch.bfloat16)}, folder / "proj8.L4.safetensors")
     with pytest.raises(SystemExit):
         P.main(["reseal", "--folder", str(folder)])
+
+
+def test_credit_stamps_a_new_folder_and_changes_no_tensor_byte(tmp_path):
+    """credit: a folder built before the credit (and before the rename: its manifest under the working name) becomes a
+    NEW folder whose manifest leads with the credit and whose .safetensors headers carry it; every tensor's dtype,
+    shape and bytes are the source's; the parked marker's template is rebuilt with the RidgeFill kwargs over the same
+    base bytes; every other manifest field is kept. A changed source file and a non-empty --out are refused."""
+    from safetensors.torch import save_file
+    old = P.OLD_NAME                              # the working name, as the old folders spell it
+    src, out = tmp_path / "old", tmp_path / "new"
+    src.mkdir()
+    codes = torch.randint(-127, 128, (8, 256), dtype=torch.int8)
+    save_file({"proj.4.codes": codes, "proj.4.scale": torch.rand(8, 2).bfloat16()}, str(src / "proj8.L4.safetensors"),
+              metadata={"format": old + "-projector-1"})
+    save_file({"st.4": torch.randn(2, 3, 3)}, str(src / "correction.safetensors"), metadata={"format": old + "-projector-1"})
+    spec = json.loads((Path(__file__).resolve().parent / "fixtures" / "ridgefill-marker-spec.json").read_text())
+    spec = json.loads(json.dumps(spec).replace("ridgefill", old))
+    base = b"{{ messages }} the model's own template"
+    block = P.T.build_block(spec).replace("ridgefill-marker", old + "-marker")   # the old tool's marker comments
+    (src / "chat_template.jinja").write_bytes(block.encode() + base)
+    (src / "README.md").write_text("old docs")
+    names = ["chat_template.jinja", "correction.safetensors", "proj8.L4.safetensors"]
+    manifest = {"format": 1, "split": 4, "projector": {"dtype": "i8", "files": {"4": "proj8.L4.safetensors"},
+                                                       "source": {"folder": "bf16", old + "_json_sha256": "ab" * 32}},
+                "marker": {"spec": spec, "template_source_sha256": hashlib.sha256(base).hexdigest()},
+                "files": {n: P.S.sha256_file(src / n) for n in names}}
+    (src / P.OLD_MANIFEST).write_text(json.dumps(manifest))
+    assert P.main(["credit", "--from", str(src), "--out", str(out)]) == 0
+    m = json.loads((out / "ridgefill.json").read_text())
+    assert list(m)[:6] == ["format", "name", "authors", "license", "doi", "homepage"]
+    assert m["name"] == "ridgefill-projector-qwen3.8-flash-next-i8" and m["doi"] == "10.5281/zenodo.23179168"
+    assert m["split"] == 4 and m["projector"]["files"] == manifest["projector"]["files"]
+    assert m["projector"]["source"] == {"folder": "bf16", "manifest_sha256": "ab" * 32}
+    assert m["rebuilt_from"] == {"folder": "old", "manifest_sha256": P.S.sha256_file(src / P.OLD_MANIFEST)}
+    assert sorted(m["files"]) == names and all(m["files"][n] == P.S.sha256_file(out / n) for n in names)
+    assert not (out / "README.md").exists() and not (out / P.OLD_MANIFEST).exists()
+    for n in ("proj8.L4.safetensors", "correction.safetensors"):
+        assert P.same_tensors(src / n, out / n)
+        with safe_open(str(src / n), "pt") as a, safe_open(str(out / n), "pt") as b:
+            assert b.metadata()["authors"] == "Dylan Johnston, tcclaviger" and b.metadata()["license"] == "Apache-2.0"
+            for k in a.keys():
+                assert torch.equal(a.get_tensor(k), b.get_tensor(k)), k
+    with safe_open(str(out / "proj8.L4.safetensors"), "pt") as f:
+        assert torch.equal(f.get_tensor("proj.4.codes"), codes)
+    assert m["marker"]["spec"]["switch"]["kwarg"] == "ridgefill"
+    assert [d["kwarg"] for d in m["marker"]["spec"]["dials"]] == ["ridgefill_share", "ridgefill_alpha", "ridgefill_tail"]
+    merged = (out / "chat_template.jinja").read_bytes()
+    assert merged == P.T.build_block(m["marker"]["spec"]).encode() + base and old.encode() not in merged
+    with pytest.raises(SystemExit):   # --out must be new
+        P.main(["credit", "--from", str(src), "--out", str(out)])
+    (src / "correction.safetensors").write_bytes((src / "correction.safetensors").read_bytes()[:-4] + b"\0\0\0\0")
+    with pytest.raises(SystemExit):   # a changed source is never credited
+        P.main(["credit", "--from", str(src), "--out", str(tmp_path / "again")])
+
+
+def test_stamp_keeps_the_data_section_and_same_tensors_catches_a_changed_byte(tmp_path):
+    from safetensors.torch import save_file
+    a, b = tmp_path / "a.safetensors", tmp_path / "b.safetensors"
+    save_file({"x": torch.arange(12, dtype=torch.float32), "y": torch.ones(3, dtype=torch.bfloat16)}, str(a))
+    P.stamp(a, b, P.st_metadata("n"))
+    ra, rb = a.read_bytes(), b.read_bytes()
+    (_, da), (_, db) = P.st_header(ra), P.st_header(rb)
+    assert ra[da:] == rb[db:] and db % 8 == 0
+    assert P.same_tensors(a, b) == ["x", "y"]
+    b.write_bytes(rb[:-1] + bytes([rb[-1] ^ 1]))
+    with pytest.raises(SystemExit):
+        P.same_tensors(a, b)

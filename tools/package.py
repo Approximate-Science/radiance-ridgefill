@@ -13,9 +13,9 @@ the chat-template package is NOT built by default -- its code path stays behind 
 --with-template (which also requires --template-spec and --base-template).
 
 Produces, under --out:
-  radiance-ridgefill-<version>/        architectures/qwen4exp_fp8.so, kernels/ridgefill.so, README.md
-                                 (docs/release/PLUGIN-README.md), LICENSE (the repo's), VERSION.json,
-                                 SHA256SUMS
+  radiance-ridgefill-<version>/  architectures/qwen4exp_fp8.so, kernels/ridgefill.so, README.md
+                                 (docs/release/PLUGIN-README.md), LICENSE and NOTICE (the repo's),
+                                 VERSION.json, SHA256SUMS
   ridgefill-projector-qwen3.8-flash-next-<dtype>/  an exact copy of the projector folder's listed files
                                  (its ridgefill.json hashes verified BEFORE copying; a mismatch refuses
                                  by name), named after the dtype its own manifest carries in
@@ -23,10 +23,11 @@ Produces, under --out:
                                  tools/ridgefill_projector.py int8 builds, never hard-coded -- with
                                  README.md = docs/release/PROJECTOR-MODEL-CARD.md (the hub's model
                                  card: documentation is never in ridgefill.json, and a manifest that
-                                 lists any is refused -- reseal it) + LICENSE (the repo's) + SHA256SUMS
-  ridgefill-chat-template/             ONLY with --with-template: ridgefill_template.py, the marker spec,
+                                 lists any is refused -- reseal it) + LICENSE and NOTICE (the repo's)
+                                 + SHA256SUMS
+  ridgefill-chat-template/       ONLY with --with-template: ridgefill_template.py, the marker spec,
                                  a pre-merged template (ridgefill_template.py merge of
-                                 --base-template), a README, LICENSE (the repo's), SHA256SUMS
+                                 --base-template), a README, LICENSE and NOTICE (the repo's), SHA256SUMS
   <each>.tar.gz                  a tarball of each directory, byte-deterministic (sorted names,
                                  fixed mtime/uid/gid, gzip mtime 0): two runs give identical bytes
   SHA256SUMS                     every tarball (two; three with --with-template)
@@ -413,6 +414,7 @@ def package(args: argparse.Namespace) -> int:
     readme = require_file(repo / "docs" / "release" / "PLUGIN-README.md", "the plugin package's README")
     card = require_file(repo / "docs" / "release" / "PROJECTOR-MODEL-CARD.md", "the projector model card")
     license_ = require_file(repo / "LICENSE", "the repo LICENSE")
+    notice = require_file(repo / "NOTICE", "the repo NOTICE (Apache-2.0 §4(d): the attribution every package carries)")
     template_tool = require_file(repo / "tools" / "ridgefill_template.py", "the template tool")
 
     if not VERSION_RE.fullmatch(args.version):
@@ -454,13 +456,14 @@ def package(args: argparse.Namespace) -> int:
     copy_file(kernel_so, plugin_dir / KERNEL_SO)
     copy_file(readme, plugin_dir / "README.md")
     copy_file(license_, plugin_dir / "LICENSE")
+    copy_file(notice, plugin_dir / "NOTICE")
     write_text(plugin_dir / "VERSION.json",
                build_version_json(args.version, args.commit, radiance_version, radiance_source,
                                   gpu_targets, gpu_source, args.abi_version, abi_source))
     write_sums(plugin_dir)
 
     # ---- ridgefill-projector-qwen3.8-flash-next-<dtype>/ : the exact folder (whatever dtype its own
-    #      manifest carries), hashes already verified, plus the repo's LICENSE (the loader
+    #      manifest carries), hashes already verified, plus the repo's LICENSE and NOTICE (the loader
     #      only hashes the files ridgefill.json lists; an extra file beside them changes nothing
     #      on the load path)
     projector_dir.mkdir()
@@ -469,10 +472,11 @@ def package(args: argparse.Namespace) -> int:
             copy_file(path, projector_dir / path.name)
     copy_file(card, projector_dir / "README.md")
     copy_file(license_, projector_dir / "LICENSE")
+    copy_file(notice, projector_dir / "NOTICE")
     write_sums(projector_dir)
 
     # ---- ridgefill-chat-template/ : ONLY with --with-template (parked by default). The tool,
-    #      the spec, a pre-merged template, a README, and the repo's LICENSE (every
+    #      the spec, a pre-merged template, a README, and the repo's LICENSE and NOTICE (every
     #      package ships under the repo's terms)
     template_dir = None
     if args.with_template:
@@ -483,6 +487,7 @@ def package(args: argparse.Namespace) -> int:
         merge_template(template_tool, spec, base, template_dir)
         write_text(template_dir / "README.md", TEMPLATE_README.format(spec_name=spec.name))
         copy_file(license_, template_dir / "LICENSE")
+        copy_file(notice, template_dir / "NOTICE")
         write_sums(template_dir)
 
     # ---- the tarballs (deterministic) and dist/SHA256SUMS over them
@@ -500,12 +505,12 @@ def package(args: argparse.Namespace) -> int:
     n_files = sum(1 for p in out.rglob("*") if p.is_file())
     print(f"packaged {PLUGIN_NAME}-{args.version} (commit {args.commit}, radiance "
           f"{radiance_version}, gpu targets {gpu_targets or 'none recorded'}) into {out}")
-    print(f"  {plugin_dir.name}/ ({ARCH_SO}, {KERNEL_SO}, README.md, LICENSE, VERSION.json)")
+    print(f"  {plugin_dir.name}/ ({ARCH_SO}, {KERNEL_SO}, README.md, LICENSE, NOTICE, VERSION.json)")
     print(f"  {projector_dirname}/ ({len(list(projector_dir.iterdir()))} files, dtype {dtype}, "
-          "manifest verified, LICENSE added)")
+          "manifest verified, LICENSE and NOTICE added)")
     if template_dir is not None:
         print(f"  {TEMPLATE_DIRNAME}/ (ridgefill_template.py, {spec.name}, chat_template.jinja, "
-              "README.md, LICENSE)")
+              "README.md, LICENSE, NOTICE)")
     print(f"  {len(tarballs)} deterministic tarballs + SHA256SUMS; {n_files} files total")
     return 0
 

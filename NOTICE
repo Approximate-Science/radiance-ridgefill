@@ -1,0 +1,30 @@
+RidgeFill — Copyright 2026 Dylan Johnston and tcclaviger
+
+Licensed under the Apache License, Version 2.0 (the "License"); see the LICENSE file that
+accompanies this NOTICE, or https://www.apache.org/licenses/LICENSE-2.0.
+
+Cite as: Dylan Johnston and tcclaviger, "RidgeFill", version 0.1.0,
+doi:10.5281/zenodo.23179168 (https://doi.org/10.5281/zenodo.23179168).
+
+Source:
+  Plugin (radiance architecture + kernel library):
+    https://huggingface.co/Dyluhn/radiance-ridgefill
+  Projector for Qwen3.8-Flash-Next (int8):
+    https://huggingface.co/Dyluhn/ridgefill-projector-qwen3.8-flash-next-i8
+
+Prior work RidgeFill builds on:
+  - DeepSeek-V4.1-Flash's Causal Encoder-Decoder (DeepSeek technical report,
+    arXiv:2609.19969, §2.2): the decoder's global KV cache is built from the encoder's
+    outputs, so most prompt tokens skip the full decoder computation during prefill.
+  - YOCO, "You Only Cache Once: Decoder-Decoder Architectures for Language Models"
+    (Sun et al., 2024, arXiv:2405.05254): one KV cache, produced by the first half of the
+    model, serves the second half, so prefill can exit early.
+  - kishida's Q3-8B-KVA-Projector, "Late Layer KV Approximation Projector for Qwen3-8B"
+    (https://huggingface.co/kishida/Q3-8B-KVA-Projector): the first retrofit of the idea
+    onto an existing model, with a projector that approximates late layers' K/V. "KVA" is
+    that work's name; this project used it as a working name only.
+
+What RidgeFill adds: a closed-form ridge fit with no gradient training; maps to the
+late layers' INPUTS, so each late layer computes its own K/V and recurrent state; an
+exact tail of prompt tokens; exact-row selection; a correction of the recurrent
+(gated delta net) state; and a plugin for the radiance inference engine.

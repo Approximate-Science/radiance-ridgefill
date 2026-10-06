@@ -22,7 +22,8 @@
 #   1  no projector mounted (an EMPTY dir shadows any real projector/ the model dir may hold):
 #      the plugin logs the no-projector line and serves stock -> ident EQUALS the baseline.
 #   2  projector mounted, RADIANCE_RIDGEFILL=off: off never looks -> ident EQUALS the baseline.
-#   3  RADIANCE_RIDGEFILL=quality: the startup log has the projector line with 0 warning(s) AND at
+#   3  RADIANCE_RIDGEFILL=quality: the startup log has the projector line with 0 warning(s), ending in the
+#      credit the manifest carries (E2E_CREDIT), AND at
 #      least one approximate-step line (the approximation is logged), and a 16,384-token prompt
 #      (tools/speed.py's prompt builder) is FASTER than the baseline TTFT.
 #   4  RADIANCE_RIDGEFILL=speed: the same checks.
@@ -161,6 +162,10 @@ export RK_PLUGIN_HOME="$E2E_PLUGIN_HOME"     # rk_docker_prefix mounts it at /pl
 [ -f "$E2E_PLUGIN_HOME/architectures/qwen4exp_fp8.so" ] || rk_die "the packaged plugin home has no architectures/qwen4exp_fp8.so: $E2E_PLUGIN_HOME"
 [ -f "$E2E_PLUGIN_HOME/kernels/ridgefill.so" ] || rk_die "the packaged plugin home has no kernels/ridgefill.so: $E2E_PLUGIN_HOME"
 [ -f "$E2E_PROJECTOR/ridgefill.json" ] || rk_die "the extracted projector package has no ridgefill.json: $E2E_PROJECTOR"
+for e_dir in "$E2E_PLUGIN_HOME" "$E2E_PROJECTOR"; do   # Apache-2.0 §4(d): the attribution ships in every package
+    grep -q '^RidgeFill — Copyright 2026 Dylan Johnston and tcclaviger$' "$e_dir/NOTICE" 2>/dev/null ||
+        rk_die "the extracted package has no RidgeFill NOTICE: $e_dir"
+done
 if [ -n "$E2E_TEMPLATE_DIR" ]; then
     [ -f "$E2E_TEMPLATE_DIR/chat_template.jinja" ] || rk_die "the template package has no chat_template.jinja: $E2E_TEMPLATE_DIR"
 fi
@@ -434,8 +439,8 @@ titles = {
     "0": "stock baseline (image's own plugin home, no projector)",
     "1": "no projector mounted: plugin serves stock (ident == stock)",
     "2": "projector + RADIANCE_RIDGEFILL=off: ident == stock",
-    "3": "RADIANCE_RIDGEFILL=quality: projector 0-warning line + approximation logged + TTFT faster than stock",
-    "4": "RADIANCE_RIDGEFILL=speed: projector 0-warning line + approximation logged + TTFT faster than stock",
+    "3": "RADIANCE_RIDGEFILL=quality: projector 0-warning line with its credit + approximation logged + TTFT faster than stock",
+    "4": "RADIANCE_RIDGEFILL=speed: projector 0-warning line with its credit + approximation logged + TTFT faster than stock",
     "5": "corrupted projector: refused by name, ident == stock",
     "6": "RADIANCE_RIDGEFILL_PROJ_PLACE=vram: refused by name at startup",
     "7": "--override-chat-template + ridgefill:on request (parked: per-request RidgeFill)",
@@ -491,6 +496,9 @@ for case in cases:
 print(f"e2e: {len(failed)} failed case(s)")
 PY
 }
+
+# the credit the shipped manifest carries, as the plugin's "matches" line prints it (cases 3 and 4)
+E2E_CREDIT='RidgeFill projector ridgefill-projector-qwen3\.8-flash-next-i8 by Dylan Johnston and tcclaviger \(Apache-2\.0, doi:10\.5281/zenodo\.23179168\)'
 
 # ---------------------------------------------------------------- step 0: the stock baseline
 
@@ -552,6 +560,12 @@ else
     e2e_ev 3 "FAIL: no 'RidgeFill: projector ... matches ... 0 warning(s)' line in logs/3.log"
     e_rc=1
 fi
+if grep -Eq "RidgeFill: projector .* matches .*; $E2E_CREDIT" "$E2E_LOGS/3.log"; then
+    e2e_ev 3 "PASS: the matches line prints the projector's credit from its manifest ($E2E_CREDIT)"
+else
+    e2e_ev 3 "FAIL: the matches line in logs/3.log does not print the credit '$E2E_CREDIT'"
+    e_rc=1
+fi
 if e_n=$(grep -c 'ridgefill: approximate step (quality' "$E2E_LOGS/3.log"); then
     e2e_ev 3 "PASS: the log shows ${e_n} approximate step(s) in quality mode:"
     grep 'ridgefill: approximate step (quality' "$E2E_LOGS/3.log" | head -3 | while IFS= read -r e_line; do
@@ -572,7 +586,7 @@ if [ -n "$E2E_TTFT" ]; then
 else
     e_rc=1
 fi
-e2e_status 3 "RADIANCE_RIDGEFILL=quality: projector 0-warning line + approximation logged + TTFT faster than stock" "$e_rc"
+e2e_status 3 "RADIANCE_RIDGEFILL=quality: projector 0-warning line with its credit + approximation logged + TTFT faster than stock" "$e_rc"
 
 # ---------------------------------------------------------------- case 4: RADIANCE_RIDGEFILL=speed
 
@@ -590,6 +604,12 @@ if grep -Eq 'RidgeFill: projector .* matches .* 0 warning\(s\)' "$E2E_LOGS/4.log
     done
 else
     e2e_ev 4 "FAIL: no 'RidgeFill: projector ... matches ... 0 warning(s)' line in logs/4.log"
+    e_rc=1
+fi
+if grep -Eq "RidgeFill: projector .* matches .*; $E2E_CREDIT" "$E2E_LOGS/4.log"; then
+    e2e_ev 4 "PASS: the matches line prints the projector's credit from its manifest ($E2E_CREDIT)"
+else
+    e2e_ev 4 "FAIL: the matches line in logs/4.log does not print the credit '$E2E_CREDIT'"
     e_rc=1
 fi
 if e_n=$(grep -c 'ridgefill: approximate step (speed' "$E2E_LOGS/4.log"); then
@@ -612,7 +632,7 @@ if [ -n "$E2E_TTFT" ]; then
 else
     e_rc=1
 fi
-e2e_status 4 "RADIANCE_RIDGEFILL=speed: projector 0-warning line + approximation logged + TTFT faster than stock" "$e_rc"
+e2e_status 4 "RADIANCE_RIDGEFILL=speed: projector 0-warning line with its credit + approximation logged + TTFT faster than stock" "$e_rc"
 
 # ---------------------------------------------------------------- case 5: a corrupted projector copy
 

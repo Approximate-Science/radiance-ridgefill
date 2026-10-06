@@ -5,6 +5,7 @@
                          --rad-info-v FILE --spec ridgefill-marker-spec.json --out DIR
   ridgefill_projector.py int8 --from BF16_FOLDER --out DIR
   ridgefill_projector.py final --from FOLDER --proj P --out DIR
+  ridgefill_projector.py credit --from FOLDER --out DIR [--name NAME]
 
 The model file is only READ (its metadata, tokenizer, chat template and a few KiB of base tensors); nothing is
 written to it. Files written (L = the projector's layers, S the lowest):
@@ -14,7 +15,7 @@ written to it. Files written (L = the projector's layers, S the lowest):
   rowsel.safetensors      score / score_none / score_all [vocab] f32 (the class table and its two controls)
   chat_template.jinja     the model's own template with the ridgefill marker block in front (tools/ridgefill_template.py merge)
   README.md               the install flow (NOT in the manifest: documentation is never hashed, see is_doc)
-  ridgefill.json                the manifest: layout, defaults, the model fingerprint, every other file's sha256
+  ridgefill.json          the manifest: the credit, layout, defaults, the model fingerprint, every other file's sha256
 
 THE FINGERPRINT (arch/ridgefill_match.h reads it; Dylan's DD-K split):
   cannot run if different  -> arch_id, `meta` (the model's own metadata values, as the engine prints them),
@@ -29,7 +30,13 @@ row-major and a bf16 scale per 128 columns of a row, value = code * scale, the s
 each code rounded half-to-even against the ROUNDED scale (libquant's rtn rule). proj8.L<L>.safetensors holds
 proj.L.codes, proj.L.scale and the unchanged bf16 proj.L.bias. The file is canonical planes only: the plugin
 relayouts them at load through the int8 GEMM's own layout hook, so no kernel library's arrangement is ever written
-here. Every other file is copied byte for byte; the manifest says `"dtype": "i8"` and names its source folder.
+here. Every other file is carried over byte for byte (a .safetensors file's tensors are; its header gets the credit); the
+manifest says `"dtype": "i8"` and names its source folder.
+
+THE CREDIT travels inside the folder: the manifest's `name`, `authors`, `license`, `doi` and `homepage` (the plugin's
+startup "matches" line prints them), and every .safetensors file's `__metadata__` (name, authors, license, doi).
+`credit` puts it into a folder built before it existed -- manifest and headers only, every tensor's bytes unchanged
+(checked tensor by tensor) -- and renames the parked marker's kwargs in its template and spec.
 """
 import argparse
 import hashlib
@@ -55,6 +62,13 @@ ADAPTER = "qwen4exp"
 # The metadata the plugin compares as "cannot run": dimensions, the layer layout and the delta-net head geometry.
 META_KEYS = ("model_type", "n_layers", "n_embd", "n_vocab", "n_expert", "hc_count", "layer_types",
              "full_attention_interval", "linear_num_value_heads", "linear_value_head_dim", "linear_key_head_dim")
+# Who made the projector, its terms and the citable record (NOTICE, CITATION.cff).
+AUTHORS = ["Dylan Johnston", "tcclaviger"]
+LICENSE = "Apache-2.0"
+DOI = "10.5281/zenodo.23179168"
+HOMEPAGE = "https://huggingface.co/Dyluhn/{name}"
+NAME = "ridgefill-projector-qwen3.8-flash-next-{dtype}"
+ST_FORMAT = "ridgefill-projector-1"
 RAD_MAGIC, RAD_FORMAT_VER = 0x31444152, 2
 HEADER = struct.Struct("<IIQ5Q16Q8Q")          # RadFileHeader, 248 B
 KV = struct.Struct("<QII8s")                    # RadFileKV, 24 B
@@ -139,20 +153,75 @@ def rad_info_encodings(path, layers):
     return dict(sorted(out.items()))
 
 
-def save(tensors, path):
-    save_file({k: v.contiguous() for k, v in tensors.items()}, str(path), metadata={"format": "ridgefill-projector-1"})
+def credit(name):
+    """The manifest's credit members, in the order they lead it."""
+    return {"name": name, "authors": list(AUTHORS), "license": LICENSE, "doi": DOI,
+            "homepage": HOMEPAGE.format(name=name)}
 
 
-def write_tensors(args, out):
+def st_metadata(name):
+    """A projector file's safetensors __metadata__ (string values only, as the format requires); no `name` member
+    when there is no name."""
+    meta = {"format": ST_FORMAT, "name": name, "authors": ", ".join(AUTHORS), "license": LICENSE, "doi": DOI}
+    return {k: v for k, v in meta.items() if v}
+
+
+def st_header(raw):
+    """(header dict in file order, the data section's offset) of a safetensors file's bytes."""
+    (n,) = struct.unpack_from("<Q", raw, 0)
+    return json.loads(raw[8:8 + n]), 8 + n
+
+
+def stamp(src, dst, metadata):
+    """dst = src with its header's __metadata__ replaced by `metadata`: the header is rewritten (padded with spaces
+    to 8 bytes, as safetensors pads it) and the data section copied byte for byte -- the tensors' offsets are relative
+    to it, so no tensor moves within it. A fixed member order, so two runs write identical bytes."""
+    raw = Path(src).read_bytes()
+    header, data = st_header(raw)
+    out = {"__metadata__": dict(metadata), **{k: v for k, v in header.items() if k != "__metadata__"}}
+    text = json.dumps(out, separators=(",", ":")).encode("utf-8")
+    text += b" " * (-len(text) % 8)
+    Path(dst).write_bytes(struct.pack("<Q", len(text)) + text + raw[data:])
+
+
+def same_tensors(a, b):
+    """The tensor names both files hold, after checking every tensor's dtype, shape and data bytes are identical."""
+    ra, rb = Path(a).read_bytes(), Path(b).read_bytes()
+    (ha, da), (hb, db) = st_header(ra), st_header(rb)
+    ha.pop("__metadata__", None)
+    hb.pop("__metadata__", None)
+    if sorted(ha) != sorted(hb):
+        raise SystemExit(f"{b} holds {sorted(hb)}, {a} holds {sorted(ha)}")
+    for name, x in ha.items():
+        y = hb[name]
+        (alo, ahi), (blo, bhi) = x["data_offsets"], y["data_offsets"]
+        if x["dtype"] != y["dtype"] or x["shape"] != y["shape"] or ra[da + alo:da + ahi] != rb[db + blo:db + bhi]:
+            raise SystemExit(f"tensor {name} of {b} differs from {a}'s")
+    return sorted(ha)
+
+
+def credited(manifest, name):
+    """`manifest` with the credit members right after `format` (any earlier credit replaced)."""
+    head = credit(name)
+    return {"format": manifest["format"], **head,
+            **{k: v for k, v in manifest.items() if k != "format" and k not in head}}
+
+
+def save(tensors, path, name=None):
+    save_file({k: v.contiguous() for k, v in tensors.items()}, str(path))
+    stamp(path, path, st_metadata(name))
+
+
+def write_tensors(args, out, name):
     """The three tensor groups into their files; (split, layers, correction layers, projector source metadata)."""
     split, proj = S.projector_tensors(Path(args.proj), "proj")
     layers = sorted({int(k.split(".")[1]) for k in proj})
     for layer in layers:
-        save({k: v for k, v in proj.items() if k.startswith(f"proj.{layer}.")}, out / f"proj.L{layer}.safetensors")
+        save({k: v for k, v in proj.items() if k.startswith(f"proj.{layer}.")}, out / f"proj.L{layer}.safetensors", name)
     st = S.correction_tensors(Path(args.st[0]), Path(args.st[1]), split, "st", None)
-    save(st, out / "correction.safetensors")
+    save(st, out / "correction.safetensors", name)
     rowsel, kept, n_tok = S.rowsel_tensors(args.tokenizer, Path(args.freq))
-    save({k.replace("ridgefill.rowsel.", ""): v for k, v in rowsel.items()}, out / "rowsel.safetensors")
+    save({k.replace("ridgefill.rowsel.", ""): v for k, v in rowsel.items()}, out / "rowsel.safetensors", name)
     print(f"split {split}; {len(layers)} projector layers; {len(st)} correction layers; "
           f"rowsel {kept} of {len(rowsel['ridgefill.rowsel.score'])} rows kept ({n_tok} tokenizer ids)")
     first = proj[f"proj.{split}.weight"]
@@ -228,14 +297,15 @@ def build(args):
     out.mkdir(parents=True, exist_ok=True)
     rad = Rad(args.container)
     spec = T.load_spec(args.spec)
-    split, layers, st_layers, pshape, sshape = write_tensors(args, out)
+    name = args.name or NAME.format(dtype="bf16")
+    split, layers, st_layers, pshape, sshape = write_tensors(args, out, name)
     model = fingerprint(rad, args, split, layers)
     template_sha = write_template(rad, args, out)
     (out / "README.md").write_text(README.format(name=rad.name), encoding="utf-8")
     types = model["meta"]["layer_types"].split()
     table = dials(spec)
     manifest = {
-        "format": FORMAT, "plugin_min_version": "0.3.0", "adapter": ADAPTER, "adapter_abi": 1,
+        "format": FORMAT, **credit(name), "plugin_min_version": "0.3.0", "adapter": ADAPTER, "adapter_abi": 1,
         "model": model, "split": split, "stream": "hc", "stream_width": pshape[1], "block_in_width": pshape[0],
         "layers": {str(L): "full_attn" if types[L] == "full_attention" else "recurrent" for L in layers},
         "tail": {"default": 2048, "min": 512, "table": [int(t) for t in table["ridgefill_tail"]]},
@@ -279,21 +349,27 @@ def int8(args):
     if proj["dtype"] != "bf16":
         raise SystemExit(f"{src}: its projector is {proj['dtype']}; the int8 variant is made from a bf16 folder")
     out.mkdir(parents=True, exist_ok=True)
+    name = args.name or NAME.format(dtype="i8")
     files, worst = {}, 0.0
-    for layer, name in sorted(proj["files"].items(), key=lambda kv: int(kv[0])):
-        t = load_file(str(src / name))
+    for layer, fname in sorted(proj["files"].items(), key=lambda kv: int(kv[0])):
+        t = load_file(str(src / fname))
         codes, scale, err = quantise_i8(t[f"proj.{layer}.weight"])
         worst = max(worst, err)
         files[layer] = f"proj8.L{layer}.safetensors"
         save({f"proj.{layer}.codes": codes, f"proj.{layer}.scale": scale, f"proj.{layer}.bias": t[f"proj.{layer}.bias"]},
-             out / files[layer])
+             out / files[layer], name)
     kept = [n for n in manifest["files"] if n not in proj["files"].values()]
-    for name in kept:
-        shutil.copyfile(src / name, out / name)
+    for n in kept:
+        if n.endswith(".safetensors"):   # the correction and the row tables: the credit stamped, tensors unchanged
+            stamp(src / n, out / n, st_metadata(name))
+            same_tensors(src / n, out / n)
+        else:
+            shutil.copyfile(src / n, out / n)
     copy_docs(src, out)
+    manifest = credited(manifest, name)
     manifest["projector"] = {"dtype": "i8", "layout": "i8_row128", "encoding": "i8*bf16[1x128]",
                              "files": files, "source": {"folder": src.name,
-                                                        "ridgefill_json_sha256": S.sha256_file(src / "ridgefill.json")}}
+                                                        "manifest_sha256": S.sha256_file(src / "ridgefill.json")}}
     names = sorted(kept + list(files.values()))
     manifest["files"] = hashed(out, names)
     (out / "ridgefill.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
@@ -320,14 +396,87 @@ def final(args):
     if t.dtype != torch.bfloat16 or list(t.shape) != [wide, wide + 1]:
         raise SystemExit(f"final is {t.dtype} {list(t.shape)}; expected bf16 [{wide}, {wide + 1}]")
     out.mkdir(parents=True, exist_ok=True)
-    for name in manifest["files"]:
-        shutil.copyfile(src / name, out / name)
+    for n in manifest["files"]:
+        shutil.copyfile(src / n, out / n)
     copy_docs(src, out)
-    save({"final.weight": t[:, :-1], "final.bias": t[:, -1]}, out / "final.safetensors")
+    name = manifest.get("name") or NAME.format(dtype=(manifest.get("projector") or {}).get("dtype", "bf16"))
+    save({"final.weight": t[:, :-1], "final.bias": t[:, -1]}, out / "final.safetensors", name)
     manifest["final"] = {"file": "final.safetensors", "dtype": "bf16", "source_sha256": got}
     manifest["files"] = hashed(out, list(manifest["files"]) + ["final.safetensors"])
     (out / "ridgefill.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
     print(f"wrote {out}: {src.name} + final.safetensors ({(out / 'final.safetensors').stat().st_size} bytes)")
+
+
+OLD_NAME = "kva"                   # the working name: folders built before the rename carry it ...
+OLD_MANIFEST = OLD_NAME + ".json"  # ... in their manifest's file name and their template's marker comments
+
+
+def rekey(spec):
+    """The parked marker spec with its kwargs under the RidgeFill names: the switch kwarg becomes `ridgefill` and
+    every dial `<switch>_<dial>` becomes `ridgefill_<dial>` (the comment follows). Nothing else changes."""
+    old = spec["switch"]["kwarg"]
+    new = json.loads(json.dumps(spec))
+    new["switch"]["kwarg"] = "ridgefill"
+    for dial in new["dials"]:
+        dial["kwarg"] = "ridgefill" + dial["kwarg"][len(old):] if dial["kwarg"].startswith(old + "_") else dial["kwarg"]
+    if "comment" in new:
+        new["comment"] = new["comment"].replace(old + "_", "ridgefill_")
+    T._validate(new, "the rekeyed marker spec")
+    return new
+
+
+def credit_folder(args):
+    """FOLDER (one built before the credit, or before the rename: its manifest may be the old OLD_MANIFEST) -> a NEW
+    folder carrying the credit. Every listed file is first checked against the source manifest's hash. Each
+    .safetensors file gets the credit in its __metadata__ and is then checked tensor by tensor (dtype, shape, data
+    bytes) against its source; the parked marker's chat_template.jinja is rebuilt with the rekeyed spec over the very
+    base bytes the manifest names (marker.template_source_sha256); every other file is copied byte for byte. The
+    manifest keeps every field (the int8 source record's hash key is renamed manifest_sha256), leads with the credit,
+    records the folder it was rebuilt from, and lists the new hashes. Documentation is not copied (the package's
+    README.md is the model card)."""
+    src, out = Path(getattr(args, "from")), Path(args.out)
+    path = src / "ridgefill.json"
+    if not path.is_file():
+        path = src / OLD_MANIFEST
+    old = path.read_bytes()
+    manifest = json.loads(old)
+    for n, digest in manifest["files"].items():
+        got = S.sha256_file(src / n)
+        if got != digest:
+            raise SystemExit(f"{src / n} hashes {got[:12]}..., the manifest says {digest[:12]}...: not crediting a changed folder")
+    if out.exists() and any(out.iterdir()):
+        raise SystemExit(f"{out} is not empty: credit writes a new folder")
+    out.mkdir(parents=True, exist_ok=True)
+    name = args.name or manifest.get("name") or NAME.format(dtype=manifest["projector"]["dtype"])
+    tensors = 0
+    for n in sorted(manifest["files"]):
+        if n.endswith(".safetensors"):
+            stamp(src / n, out / n, st_metadata(name))
+            tensors += len(same_tensors(src / n, out / n))
+        elif n == "chat_template.jinja" and "marker" in manifest:
+            spec = manifest["marker"]["spec"]
+            text = (src / n).read_bytes()
+            ends = [e.encode("utf-8") for e in (T.MARKER_END, T.MARKER_END.replace("ridgefill", OLD_NAME))]
+            end = next((e for e in ends if e in text), b"")
+            at = text.find(end) if end else -1
+            base = text[at + len(end):] if at >= 0 else b""
+            if at < 0 or hashlib.sha256(base).hexdigest() != manifest["marker"]["template_source_sha256"]:
+                raise SystemExit(f"{src / n}: its base template is not the one the manifest names")
+            manifest["marker"]["spec"] = rekey(spec)
+            (out / n).write_bytes(T.build_block(manifest["marker"]["spec"]).encode("utf-8") + base)
+        else:
+            shutil.copyfile(src / n, out / n)
+    source = manifest["projector"].get("source")
+    if isinstance(source, dict):
+        key = next((k for k in source if k.endswith("json_sha256")), None)
+        if key:
+            source["manifest_sha256"] = source.pop(key)
+    manifest["rebuilt_from"] = {"folder": src.name, "manifest_sha256": hashlib.sha256(old).hexdigest()}
+    manifest = credited(manifest, name)
+    manifest["files"] = hashed(out, list(manifest["files"]))
+    (out / "ridgefill.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
+    print(f"wrote {out}: {len(manifest['files'])} files + ridgefill.json, credit '{name}' by {' and '.join(AUTHORS)} "
+          f"({LICENSE}, doi:{DOI}); {tensors} tensors byte-identical to {src}")
 
 
 def reseal(args):
@@ -364,17 +513,25 @@ def main(argv=None):
     b.add_argument("--rad-info-v", required=True, help="saved `rad-info -v` output of that container")
     b.add_argument("--spec", required=True, help="ridgefill-marker-spec.json (tools/ridgefill_template.py)")
     b.add_argument("--out", required=True, help="the folder to write (created)")
+    b.add_argument("--name", help="the projector's name (default " + NAME.format(dtype="bf16") + ")")
     q = sub.add_parser("int8", help="the int8 variant of a bf16 folder (its own folder)")
     q.add_argument("--from", required=True, help="a bf16 projector folder")
     q.add_argument("--out", required=True, help="the folder to write (created)")
+    q.add_argument("--name", help="the projector's name (default " + NAME.format(dtype="i8") + ")")
     fm = sub.add_parser("final", help="a folder plus the MTP final map (its own folder)")
     fm.add_argument("--from", required=True, help="a projector folder")
     fm.add_argument("--proj", required=True, help="the projector safetensors the folder was fitted from (holds `final`)")
     fm.add_argument("--out", required=True, help="the folder to write (created)")
+    cr = sub.add_parser("credit", help="a NEW folder: an existing one with the credit in its manifest and headers")
+    cr.add_argument("--from", required=True, help="a projector folder (ridgefill.json, or the working name's manifest)")
+    cr.add_argument("--out", required=True, help="the folder to write (created; must be empty)")
+    cr.add_argument("--name", help="the projector's name (default: the manifest's, else " + NAME + ")")
     rs = sub.add_parser("reseal", help="rewrite an existing folder's ridgefill.json without documentation; no file touched")
     rs.add_argument("--folder", required=True, help="a projector folder")
     args = ap.parse_args(argv)
-    if args.command == "reseal":
+    if args.command == "credit":
+        credit_folder(args)
+    elif args.command == "reseal":
         reseal(args)
     elif args.command == "final":
         final(args)
