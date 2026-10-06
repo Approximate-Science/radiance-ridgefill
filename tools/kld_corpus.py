@@ -22,7 +22,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import kva_rules as R  # noqa: E402
+import ridgefill_rules as R  # noqa: E402
 
 SEARCH = 64     # how far the cut may move to find a round-trip-stable boundary before the doc is refused
 

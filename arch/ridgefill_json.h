@@ -1,4 +1,4 @@
-/* kva_json.h -- the JSON the projector folder carries: its manifest (kva.json) and each
+/* ridgefill_json.h -- the JSON the projector folder carries: its manifest (ridgefill.json) and each
  * safetensors file's header. A reader, nothing more: objects, arrays, strings (with \u escapes),
  * numbers, true/false/null. Malformed text is refused, never guessed at -- a folder whose manifest
  * does not parse is "no projector" (PACKAGING.md §0).
@@ -8,8 +8,8 @@
  * not carry. The texts are small (a manifest of ~30 files, a safetensors header of a few KiB), so the
  * tree is plain values and vectors, built once at load.
  */
-#ifndef KVA_JSON_H
-#define KVA_JSON_H
+#ifndef RIDGEFILL_JSON_H
+#define RIDGEFILL_JSON_H
 
 #include <algorithm>
 #include <cstdint>
@@ -19,7 +19,7 @@
 #include <utility>
 #include <vector>
 
-namespace kva {
+namespace ridgefill {
 
 using namespace rad::arch;
 
@@ -179,6 +179,6 @@ inline bool json_parse(const char* text, size_t n, Json* out) {
     return r.p == r.end;
 }
 
-}  /* namespace kva */
+}  /* namespace ridgefill */
 
-#endif /* KVA_JSON_H */
+#endif /* RIDGEFILL_JSON_H */

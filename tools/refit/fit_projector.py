@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Stage 6 projector refit (R42): capture.py acc's running sums -> the research pipeline's own ridge solve (qfn.fit
-solve over kva.ridge.RidgeFit: centred ridge, unpenalised bias, one eigendecomposition for every lambda) -> lambda
+solve over ridgefill.ridge.RidgeFit: centred ridge, unpenalised bias, one eigendecomposition for every lambda) -> lambda
 by held-out mean block-input cosine -> the projector in tcc's per-layer layout + report-radiance-s<S>.json.
 
   fit_projector.py --sums DIR --held DIR --ckpt MODEL_DIR --shipped P.safetensors --out DIR
@@ -13,8 +13,8 @@ weights for kdir / ikdir / vrel), the same ones the shipped fit's report used. -
 radiance held-out rows (qfn.fit.his_metrics), the comparison that says what the refit buys on this engine.
 Chat rows are mixed in at --share of the weighted rows (w = share * n_raw / ((1 - share) * n_chat), qfn.fit's rule).
 
-Output <out>/kva-radiance-s<S>.safetensors: layer.S .. layer.{L-1} [hidden, hc*hidden + 1] bf16, the bias in the last
-column -- tcc's layer format WITHOUT `final` (not captured: it feeds only MTP), so tools/kva_sidecar.py reads it and
+Output <out>/ridgefill-radiance-s<S>.safetensors: layer.S .. layer.{L-1} [hidden, hc*hidden + 1] bf16, the bias in the last
+column -- tcc's layer format WITHOUT `final` (not captured: it feeds only MTP), so tools/ridgefill_sidecar.py reads it and
 tcc's own loader would not. The held-out cosines in the report are recomputed from the written (bf16) file, as the
 shipped file's are, so both sides of the comparison carry the same rounding.
 """
@@ -27,7 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import convert  # noqa: E402
-import kva_research  # noqa: E402
+import ridgefill_research  # noqa: E402
 
 LAMBDAS = "0.001,0.003,0.01,0.03,0.1,0.3"      # the shipped fit's grid (report-big-s24.json)
 
@@ -64,7 +64,7 @@ def load_sums(sums_dir):
 
 def mixed(raw, chat, share):
     """raw rows + w x chat rows, chat = `share` of the weighted rows (qfn.fit.main's mixed(), same formula)."""
-    from kva.ridge import combine
+    from ridgefill.ridge import combine
     w = share * raw["n"] / ((1 - share) * chat["n"])
     return combine(raw, chat, w), w
 
@@ -108,7 +108,7 @@ def main(argv=None):
     ap.add_argument("--lambdas", default=LAMBDAS)
     ap.add_argument("--threads", type=int, default=12)
     a = ap.parse_args(argv)
-    kva_research.root()
+    ridgefill_research.root()
     import torch
     import torch.nn.functional as F
     from qfn import fit
@@ -140,7 +140,7 @@ def main(argv=None):
     for lam in lambdas:
         log(f"lambda {lam}: {scores[lam]['summary']}")
     lam = fit.best(scores, "bi")
-    path = out / f"kva-radiance-s{split}.safetensors"
+    path = out / f"ridgefill-radiance-s{split}.safetensors"
     write_projector(path, pick, lam, lay, {"split": split, "lambda": lam, "share": a.share,
                                            "train_rows": rows["weighted"], "rows_raw": rows["raw"],
                                            "rows_chat": rows["chat"], "engine": "radiance",

@@ -1,15 +1,15 @@
 """test_package.py -- tests for tools/package.py (the release packager).
 
 package.py derives the repo root from its own location, so the tests build a SCRATCH
-REPO (tools/package.py + tools/kva_template.py copied byte-identical, a README, a
+REPO (tools/package.py + tools/ridgefill_template.py copied byte-identical, a README, a
 LICENSE) and run the copy; the real repo is never written to. The fake inputs mirror
-the real shapes: a frozen home (architectures/qwen4exp_fp8.so + kernels/kva.so), the
-projector folder (files + a kva.json manifest with real sha256s, built for BOTH dtypes
+the real shapes: a frozen home (architectures/qwen4exp_fp8.so + kernels/ridgefill.so), the
+projector folder (files + a ridgefill.json manifest with real sha256s, built for BOTH dtypes
 the release may ship -- bf16 and the int8 folder -- so the package naming is exercised),
 a marker spec and a base chat template. Standard library + pytest only; everything runs
 offline.
 
-The release shape: the chat-template package is NOT built by default (per-request KVA is
+The release shape: the chat-template package is NOT built by default (per-request RidgeFill is
 parked, notes/future/per-request.md) -- the template tests pass --with-template.
 """
 import hashlib
@@ -27,7 +27,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parent.parent
 PACKAGE = REPO / "tools" / "package.py"
-TEMPLATE_TOOL = REPO / "tools" / "kva_template.py"
+TEMPLATE_TOOL = REPO / "tools" / "ridgefill_template.py"
 
 
 # ------------------------------------------------------------------ the fixtures' builders
@@ -40,7 +40,7 @@ def sha256_file(path):
 
 
 def make_spec(path: Path) -> Path:
-    """A valid 64-token marker spec (the same structure as the real kva-marker-spec.json,
+    """A valid 64-token marker spec (the same structure as the real ridgefill-marker-spec.json,
     which the template tool refuses to hard-code anything from)."""
     spec = {
         "length": 64,
@@ -48,18 +48,18 @@ def make_spec(path: Path) -> Path:
                     "tokens": ["<|quad_start|>", "<|quad_end|>"],
                     "rule": "alternate, starting with the first token"},
         "dials": [
-            {"offset": 60, "kwarg": "kva_share", "default": "0.25",
+            {"offset": 60, "kwarg": "ridgefill_share", "default": "0.25",
              "table": {"0.10": "<|box_start|>", "0.25": "<|box_end|>",
                        "0.50": "<|object_ref_start|>"}},
-            {"offset": 61, "kwarg": "kva_alpha", "default": "1.0",
+            {"offset": 61, "kwarg": "ridgefill_alpha", "default": "1.0",
              "table": {"0": "<|box_start|>", "0.5": "<|box_end|>",
                        "1.0": "<|object_ref_start|>"}},
-            {"offset": 62, "kwarg": "kva_tail", "default": "2048",
+            {"offset": 62, "kwarg": "ridgefill_tail", "default": "2048",
              "table": {"1024": "<|box_start|>", "2048": "<|box_end|>",
                        "2560": "<|object_ref_start|>", "3072": "<|object_ref_end|>"}},
         ],
         "end": {"offset": 63, "token": "<|im_end|>"},
-        "switch": {"kwarg": "kva", "on_value": "on"},
+        "switch": {"kwarg": "ridgefill", "on_value": "on"},
         "token_ids": {"<|quad_start|>": 248051, "<|quad_end|>": 248052,
                       "<|box_start|>": 248049, "<|box_end|>": 248050,
                       "<|object_ref_start|>": 248047, "<|object_ref_end|>": 248048,
@@ -71,22 +71,22 @@ def make_spec(path: Path) -> Path:
 
 def make_home(home: Path) -> Path:
     """A frozen plugin home: the two .so files, with the radiance release string
-    (KVA_RADIANCE_VERSION, arch/CMakeLists.txt) and a gfx target embedded as the real
+    (RIDGEFILL_RADIANCE_VERSION, arch/CMakeLists.txt) and a gfx target embedded as the real
     HIP build would carry them."""
     (home / "architectures").mkdir(parents=True)
     (home / "kernels").mkdir()
     arch = (home / "architectures" / "qwen4exp_fp8.so").write_bytes(
         b"ELF fake\n\x001.0.8\x00GLIBCXX_3.4.32\x00amdgfx target gfx1201\x00\x00")
-    (home / "kernels" / "kva.so").write_bytes(
-        b"ELF fake kernel\x00gfx1201\x00kva_gemm_nt_bias\x00")
+    (home / "kernels" / "ridgefill.so").write_bytes(
+        b"ELF fake kernel\x00gfx1201\x00ridgefill_gemm_nt_bias\x00")
     return home
 
 
 def make_projector(projector: Path, dtype: str = "bf16") -> Path:
     """The projector folder's shape (notes/aprime.md §2, small): a few tensor files,
-    chat_template.jinja, README.md and the kva.json manifest listing every file's sha256.
+    chat_template.jinja, README.md and the ridgefill.json manifest listing every file's sha256.
     The manifest carries its own projector.dtype (bf16, or int8 -- the folder
-    `tools/kva_projector.py int8` builds), which is what names the package."""
+    `tools/ridgefill_projector.py int8` builds), which is what names the package."""
     projector.mkdir(parents=True, exist_ok=True)
     names = []
     for layer in (24, 25, 47):
@@ -102,29 +102,29 @@ def make_projector(projector: Path, dtype: str = "bf16") -> Path:
     files["correction.safetensors"] = sha256_file(projector / "correction.safetensors")
     files["rowsel.safetensors"] = sha256_file(projector / "rowsel.safetensors")
     files["chat_template.jinja"] = sha256_file(projector / "chat_template.jinja")
-    # README.md is documentation: written beside the files, never listed (tools/kva_projector.py is_doc)
+    # README.md is documentation: written beside the files, never listed (tools/ridgefill_projector.py is_doc)
     manifest = {"format": 1, "plugin_min_version": "0.3.0", "adapter": "qwen4exp",
                 "adapter_abi": 1, "split": 24, "files": files,
                 "projector": {"dtype": dtype, "layout": "plain_nk",
                                "files": {str(L): f"proj.L{L}.safetensors" for L in (24, 25, 47)}}}
-    (projector / "kva.json").write_text(json.dumps(manifest, indent=1) + "\n",
+    (projector / "ridgefill.json").write_text(json.dumps(manifest, indent=1) + "\n",
                                         encoding="utf-8")
     return projector
 
 
 def make_repo(dst: Path, with_license: bool = True) -> Path:
-    """A scratch repo: package.py and kva_template.py copied byte-identical from the real
+    """A scratch repo: package.py and ridgefill_template.py copied byte-identical from the real
     one, a README, a LICENSE (or none)."""
     tools = dst / "tools"
     tools.mkdir(parents=True)
     shutil.copyfile(PACKAGE, tools / "package.py")
-    shutil.copyfile(TEMPLATE_TOOL, tools / "kva_template.py")
-    (dst / "README.md").write_text("# radiance-kva (test repo README)\n", encoding="utf-8")
+    shutil.copyfile(TEMPLATE_TOOL, tools / "ridgefill_template.py")
+    (dst / "README.md").write_text("# radiance-ridgefill (test repo README)\n", encoding="utf-8")
     (dst / "docs" / "release").mkdir(parents=True)
-    (dst / "docs" / "release" / "PLUGIN-README.md").write_text("# radiance-kva plugin (release README)\n",
+    (dst / "docs" / "release" / "PLUGIN-README.md").write_text("# radiance-ridgefill plugin (release README)\n",
                                                                 encoding="utf-8")
     (dst / "docs" / "release" / "PROJECTOR-MODEL-CARD.md").write_text(
-        "---\nlicense: apache-2.0\n---\n# KVA projector (model card)\n", encoding="utf-8")
+        "---\nlicense: apache-2.0\n---\n# RidgeFill projector (model card)\n", encoding="utf-8")
     if with_license:
         (dst / "LICENSE").write_text("MIT test license\n", encoding="utf-8")
     return dst
@@ -143,7 +143,7 @@ def inputs(tmp_path):
         "home": make_home(tmp_path / "home"),
         "projector": make_projector(tmp_path / "projector"),
         "projector_int8": make_projector(tmp_path / "projector-int8", dtype="int8"),
-        "spec": make_spec(tmp_path / "kva-marker-spec.json"),
+        "spec": make_spec(tmp_path / "ridgefill-marker-spec.json"),
         "base": base,
     }
 
@@ -182,22 +182,22 @@ def check_sums(dir_path: Path):
 # ------------------------------------------------------------------ the layout
 
 def test_layout_and_sums_no_template_by_default(inputs, tmp_path):
-    """The release shape: the chat-template package is NOT built (per-request KVA is
+    """The release shape: the chat-template package is NOT built (per-request RidgeFill is
     parked, notes/future/per-request.md); two packages, two tarballs."""
     out = tmp_path / "dist"
     result = run_packager(inputs, out)
-    assert "radiance-kva-0.3.0" in result.stdout
+    assert "radiance-ridgefill-0.3.0" in result.stdout
 
-    plugin = out / "radiance-kva-0.3.0"
+    plugin = out / "radiance-ridgefill-0.3.0"
     assert (plugin / "architectures" / "qwen4exp_fp8.so").is_file()
-    assert (plugin / "kernels" / "kva.so").is_file()
+    assert (plugin / "kernels" / "ridgefill.so").is_file()
     assert (plugin / "README.md").read_text(encoding="utf-8") == \
         (inputs["repo"] / "docs" / "release" / "PLUGIN-README.md").read_text(encoding="utf-8")
     assert (plugin / "LICENSE").is_file()
     assert (plugin / "VERSION.json").is_file()
     check_sums(plugin)
 
-    projector = out / "projector-qwen3.8-flash-next-bf16"     # named by the manifest's dtype
+    projector = out / "ridgefill-projector-qwen3.8-flash-next-bf16"     # named by the manifest's dtype
     assert projector.is_dir()
     # an exact copy of every non-documentation file, byte-identical, nothing missing or extra; README.md is the
     # model card (LICENSE and SHA256SUMS are the other two additions packaging makes on top)
@@ -209,7 +209,7 @@ def test_layout_and_sums_no_template_by_default(inputs, tmp_path):
         sorted(p.name for p in inputs["projector"].iterdir())
     assert (projector / "README.md").read_bytes() == \
         (inputs["repo"] / "docs" / "release" / "PROJECTOR-MODEL-CARD.md").read_bytes()
-    assert "README.md" not in json.loads((projector / "kva.json").read_text(encoding="utf-8"))["files"]
+    assert "README.md" not in json.loads((projector / "ridgefill.json").read_text(encoding="utf-8"))["files"]
     assert (projector / "LICENSE").read_bytes() == \
         (inputs["repo"] / "LICENSE").read_bytes()
     sums_lines = (projector / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
@@ -217,10 +217,10 @@ def test_layout_and_sums_no_template_by_default(inputs, tmp_path):
     check_sums(projector)
 
     # no chat-template package anywhere: not built by default
-    assert not (out / "kva-chat-template").exists()
-    for tarball in ("radiance-kva-0.3.0.tar.gz", "projector-qwen3.8-flash-next-bf16.tar.gz"):
+    assert not (out / "ridgefill-chat-template").exists()
+    for tarball in ("radiance-ridgefill-0.3.0.tar.gz", "ridgefill-projector-qwen3.8-flash-next-bf16.tar.gz"):
         assert (out / tarball).is_file()
-    assert not (out / "kva-chat-template.tar.gz").exists()
+    assert not (out / "ridgefill-chat-template.tar.gz").exists()
     dist_sums = (out / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
     assert len(dist_sums) == 2
     for line in dist_sums:
@@ -230,14 +230,14 @@ def test_layout_and_sums_no_template_by_default(inputs, tmp_path):
 
 
 def test_int8_projector_folder_names_the_package_int8(inputs, tmp_path):
-    """The shipped projector may be the int8 folder (built by `kva_projector.py int8`):
+    """The shipped projector may be the int8 folder (built by `ridgefill_projector.py int8`):
     the package is named after the dtype the manifest ITSELF carries, never hard-coded."""
     inputs["projector"] = inputs["projector_int8"]
     out = tmp_path / "dist"
     result = run_packager(inputs, out)
-    projector = out / "projector-qwen3.8-flash-next-int8"
+    projector = out / "ridgefill-projector-qwen3.8-flash-next-int8"
     assert projector.is_dir()
-    assert not (out / "projector-qwen3.8-flash-next-bf16").exists()
+    assert not (out / "ridgefill-projector-qwen3.8-flash-next-bf16").exists()
     # an exact copy of the int8 folder's non-documentation files; README.md is the model card
     for name in sorted(p.name for p in inputs["projector_int8"].iterdir() if p.name != "README.md"):
         assert (projector / name).is_file(), name
@@ -245,10 +245,10 @@ def test_int8_projector_folder_names_the_package_int8(inputs, tmp_path):
     assert (projector / "README.md").read_bytes() == \
         (inputs["repo"] / "docs" / "release" / "PROJECTOR-MODEL-CARD.md").read_bytes()
     check_sums(projector)
-    assert (out / "projector-qwen3.8-flash-next-int8.tar.gz").is_file()
+    assert (out / "ridgefill-projector-qwen3.8-flash-next-int8.tar.gz").is_file()
     dist_sums = (out / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
     assert [line.split("  ", 1)[1] for line in dist_sums] == \
-        ["radiance-kva-0.3.0.tar.gz", "projector-qwen3.8-flash-next-int8.tar.gz"]
+        ["radiance-ridgefill-0.3.0.tar.gz", "ridgefill-projector-qwen3.8-flash-next-int8.tar.gz"]
     assert "dtype int8" in result.stdout
 
 
@@ -258,9 +258,9 @@ def test_template_package_built_only_with_the_flag(inputs, tmp_path):
     out = tmp_path / "dist"
     run_packager(inputs, out, template=True)
 
-    template = out / "kva-chat-template"
-    assert (template / "kva_template.py").read_bytes() == TEMPLATE_TOOL.read_bytes()
-    assert (template / "kva-marker-spec.json").is_file()
+    template = out / "ridgefill-chat-template"
+    assert (template / "ridgefill_template.py").read_bytes() == TEMPLATE_TOOL.read_bytes()
+    assert (template / "ridgefill-marker-spec.json").is_file()
     assert (template / "chat_template.jinja").is_file()
     assert (template / "README.md").is_file()
     assert (template / "LICENSE").read_bytes() == \
@@ -272,8 +272,8 @@ def test_template_package_built_only_with_the_flag(inputs, tmp_path):
     assert any(line.endswith("  LICENSE") for line in sums_lines)   # LICENSE is summed
     check_sums(template)
 
-    for tarball in ("radiance-kva-0.3.0.tar.gz", "projector-qwen3.8-flash-next-bf16.tar.gz",
-                    "kva-chat-template.tar.gz"):
+    for tarball in ("radiance-ridgefill-0.3.0.tar.gz", "ridgefill-projector-qwen3.8-flash-next-bf16.tar.gz",
+                    "ridgefill-chat-template.tar.gz"):
         assert (out / tarball).is_file()
     dist_sums = (out / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
     assert len(dist_sums) == 3
@@ -286,17 +286,17 @@ def test_version_json_records_every_field_and_its_source(inputs, tmp_path):
     out = tmp_path / "dist"
     run_packager(inputs, out, version="1.2.3", commit="0123456789abcdef",
                  extra=["--abi-version", "15.0.0"])
-    doc = json.loads((out / "radiance-kva-1.2.3" / "VERSION.json").read_text(encoding="utf-8"))
+    doc = json.loads((out / "radiance-ridgefill-1.2.3" / "VERSION.json").read_text(encoding="utf-8"))
     assert doc["plugin_version"] == "1.2.3"
     assert doc["plugin_commit"] == "0123456789abcdef"
-    # read from the .so (KVA_RADIANCE_VERSION): the fake arch .so embeds 1.0.8
+    # read from the .so (RIDGEFILL_RADIANCE_VERSION): the fake arch .so embeds 1.0.8
     assert doc["radiance_version"] == "1.0.8"
     assert doc["radiance_abi"] == "15.0.0"
     assert doc["gpu_targets"] == ["gfx1201"]
     sources = doc["fields"]
     assert set(sources) == {"plugin_version", "plugin_commit", "radiance_version",
                             "radiance_abi", "gpu_targets"}
-    assert "1.0.8" in sources["radiance_version"] or "KVA_RADIANCE_VERSION" in \
+    assert "1.0.8" in sources["radiance_version"] or "RIDGEFILL_RADIANCE_VERSION" in \
         sources["radiance_version"]
     assert "--abi-version" in sources["radiance_abi"]
     assert sources["gpu_targets"] == "gfx* strings extracted from the packaged .so files"
@@ -307,7 +307,7 @@ def test_version_json_records_every_field_and_its_source(inputs, tmp_path):
 def test_merged_template_is_snippet_plus_base(inputs, tmp_path):
     out = tmp_path / "dist"
     run_packager(inputs, out, template=True)
-    merged = (out / "kva-chat-template" / "chat_template.jinja")
+    merged = (out / "ridgefill-chat-template" / "chat_template.jinja")
     base = inputs["base"].read_bytes()
     # verify with the tool itself, and check the base bytes ride along unchanged
     result = subprocess.run(
@@ -316,7 +316,7 @@ def test_merged_template_is_snippet_plus_base(inputs, tmp_path):
         capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     block = merged.read_bytes()[: -len(base)]
-    assert block.endswith(b"{#- kva-marker-end v1 #}")
+    assert block.endswith(b"{#- ridgefill-marker-end v1 #}")
     assert merged.read_bytes().endswith(base)
 
 
@@ -325,19 +325,19 @@ def test_sha_sums_refuse_on_mismatch(inputs, tmp_path):
     and so must the projector's and the template's (their LICENSE included)."""
     out = tmp_path / "dist"
     run_packager(inputs, out, template=True)
-    plugin = out / "radiance-kva-0.3.0"
+    plugin = out / "radiance-ridgefill-0.3.0"
     (plugin / "README.md").write_text("tampered\n", encoding="utf-8")
     result = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=plugin,
                             capture_output=True, text=True)
     assert result.returncode != 0
 
-    projector = out / "projector-qwen3.8-flash-next-bf16"
+    projector = out / "ridgefill-projector-qwen3.8-flash-next-bf16"
     (projector / "LICENSE").write_text("tampered license\n", encoding="utf-8")
     result = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=projector,
                             capture_output=True, text=True)
     assert result.returncode != 0
 
-    template = out / "kva-chat-template"
+    template = out / "ridgefill-chat-template"
     (template / "LICENSE").write_text("tampered license\n", encoding="utf-8")
     result = subprocess.run(["sha256sum", "-c", "SHA256SUMS"], cwd=template,
                             capture_output=True, text=True)
@@ -352,12 +352,12 @@ def test_deterministic_tarballs(inputs, tmp_path):
     out1, out2 = tmp_path / "dist1", tmp_path / "dist2"
     run_packager(inputs, out1, template=True)
     run_packager(inputs, out2, template=True)
-    for name in ("radiance-kva-0.3.0.tar.gz", "projector-qwen3.8-flash-next-bf16.tar.gz",
-                 "kva-chat-template.tar.gz"):
+    for name in ("radiance-ridgefill-0.3.0.tar.gz", "ridgefill-projector-qwen3.8-flash-next-bf16.tar.gz",
+                 "ridgefill-chat-template.tar.gz"):
         assert sha256_file(out1 / name) == sha256_file(out2 / name), name
     assert (out1 / "SHA256SUMS").read_bytes() == (out2 / "SHA256SUMS").read_bytes()
-    assert (out1 / "radiance-kva-0.3.0" / "VERSION.json").read_bytes() == \
-        (out2 / "radiance-kva-0.3.0" / "VERSION.json").read_bytes()
+    assert (out1 / "radiance-ridgefill-0.3.0" / "VERSION.json").read_bytes() == \
+        (out2 / "radiance-ridgefill-0.3.0" / "VERSION.json").read_bytes()
 
 
 def test_tarball_metadata_is_pinned(inputs, tmp_path):
@@ -365,7 +365,7 @@ def test_tarball_metadata_is_pinned(inputs, tmp_path):
     environment can leak into the tarball."""
     out = tmp_path / "dist"
     run_packager(inputs, out)
-    with tarfile.open(out / "radiance-kva-0.3.0.tar.gz") as tar:
+    with tarfile.open(out / "radiance-ridgefill-0.3.0.tar.gz") as tar:
         members = tar.getmembers()
     assert [m.name for m in members] == sorted(m.name for m in members)
     for member in members:
@@ -373,8 +373,8 @@ def test_tarball_metadata_is_pinned(inputs, tmp_path):
         assert member.uid == 0 and member.gid == 0
         assert member.uname == "" and member.gname == ""
         assert member.mode == (0o755 if member.isdir() else 0o644)
-    assert members[0].isdir() and members[0].name == "radiance-kva-0.3.0"
-    assert "radiance-kva-0.3.0/VERSION.json" in [m.name for m in members]
+    assert members[0].isdir() and members[0].name == "radiance-ridgefill-0.3.0"
+    assert "radiance-ridgefill-0.3.0/VERSION.json" in [m.name for m in members]
 
 
 # ------------------------------------------------------------------ refusals
@@ -412,26 +412,26 @@ def test_projector_extra_file_refuses_by_name(inputs, tmp_path):
 
 def test_projector_dtype_refuses_by_name(inputs, tmp_path):
     """The package is named by the manifest's own projector.dtype: a manifest without
-    the field, or a dtype that cannot name a directory, refuses naming kva.json."""
-    manifest_path = inputs["projector"] / "kva.json"
+    the field, or a dtype that cannot name a directory, refuses naming ridgefill.json."""
+    manifest_path = inputs["projector"] / "ridgefill.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     del manifest["projector"]
     manifest_path.write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
     result = run_packager(inputs, tmp_path / "dist", expect_rc=2)
-    assert "kva.json" in result.stderr and "projector" in result.stderr
+    assert "ridgefill.json" in result.stderr and "projector" in result.stderr
     assert not (tmp_path / "dist").exists()
 
     manifest["projector"] = {"dtype": "bf16/../evil", "layout": "plain_nk"}
     manifest_path.write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
     result = run_packager(inputs, tmp_path / "dist2", expect_rc=2)
-    assert "kva.json" in result.stderr and "dtype" in result.stderr
+    assert "ridgefill.json" in result.stderr and "dtype" in result.stderr
     assert not (tmp_path / "dist2").exists()
 
 
 def test_missing_home_inputs_refuse_by_name(inputs, tmp_path):
-    (inputs["home"] / "kernels" / "kva.so").unlink()
+    (inputs["home"] / "kernels" / "ridgefill.so").unlink()
     result = run_packager(inputs, tmp_path / "dist", expect_rc=2)
-    assert "kernels/kva.so" in result.stderr
+    assert "kernels/ridgefill.so" in result.stderr
     assert not (tmp_path / "dist").exists()
 
 
@@ -463,7 +463,7 @@ def test_missing_spec_and_base_refuse_by_name(inputs, tmp_path):
     inputs["spec"].unlink()
     inputs["base"].unlink()
     result = run_packager(inputs, tmp_path / "dist-default", expect_rc=0)   # not inputs
-    assert (tmp_path / "dist-default" / "radiance-kva-0.3.0").is_dir()
+    assert (tmp_path / "dist-default" / "radiance-ridgefill-0.3.0").is_dir()
 
     missing = tmp_path / "nope.json"
     result = run_packager(inputs, tmp_path / "dist", template=True,
@@ -533,7 +533,7 @@ def test_radiance_version_requires_disambiguation(pkg, tmp_path):
         pkg.read_radiance_version(so, "3.0.0")       # not among the embedded strings
     so.write_bytes(b"\x001.0.8\x00")
     version, source = pkg.read_radiance_version(so, None)
-    assert version == "1.0.8" and "KVA_RADIANCE_VERSION" in source
+    assert version == "1.0.8" and "RIDGEFILL_RADIANCE_VERSION" in source
     so.write_bytes(b"no bare release string here")
     version, source = pkg.read_radiance_version(so, "1.0.8")  # accepted, flagged as not found
     assert version == "1.0.8" and "no NUL-delimited d.d.d string found" in source
@@ -569,12 +569,12 @@ def test_deterministic_tar_function_is_pure(pkg, tmp_path):
     assert names == ["src", "src/d", "src/d/y.txt", "src/x.txt"]
 
 def test_projector_manifest_listing_documentation_refuses_with_the_reseal_hint(inputs, tmp_path):
-    """A kva.json that hashes README.md would be refused on a user's machine once the hub serves the model card as
+    """A ridgefill.json that hashes README.md would be refused on a user's machine once the hub serves the model card as
     README.md: packaging refuses it by name and names the fix."""
     projector = inputs["projector"]
-    manifest = json.loads((projector / "kva.json").read_text(encoding="utf-8"))
+    manifest = json.loads((projector / "ridgefill.json").read_text(encoding="utf-8"))
     manifest["files"]["README.md"] = sha256_file(projector / "README.md")
-    (projector / "kva.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
+    (projector / "ridgefill.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
     result = run_packager(inputs, tmp_path / "dist", expect_rc=None)
     assert result.returncode != 0
     assert "lists documentation (README.md)" in result.stderr and "reseal" in result.stderr

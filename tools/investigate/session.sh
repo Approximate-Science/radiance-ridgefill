@@ -4,13 +4,13 @@
 #
 # WHY: instrument check of the +st apply on the engine (notes/investigate.md, labbook INV-apply). alpha=0 is the
 # no-correction control with the SAME declared weights (same placement); alpha=1 is the shipped correction. The
-# captures are the plugin's RADIANCE_KVA_CAPTURE_STATE files (notes/arch.md "Capture"): pre-apply at approximate
+# captures are the plugin's RADIANCE_RIDGEFILL_CAPTURE_STATE files (notes/arch.md "Capture"): pre-apply at approximate
 # chunk ends, after the step on exact chunks (the tail).
 #
 # USAGE: tools/investigate/session.sh ARM [ARM...]   ARM = name:alpha[:st]  e.g. st1:1 st0:0 swap1:1:swap
 # Env: RK_MODEL, RK_PLUGIN_HOME (frozen capture home), RK_GPU_LOCK (required); RK_INV_DATA (<repo>/data/investigate);
 #      RK_TAIL (512), RK_PROJ (refit), RK_ST (shipped), RK_PROMPTS (<repo>/data/refit/prompts/sterm.jsonl).
-# These set RADIANCE_KVA_PROJ/_ST/_DECLARE, which the current plugin refuses: run them only against the frozen
+# These set RADIANCE_RIDGEFILL_PROJ/_ST/_DECLARE, which the current plugin refuses: run them only against the frozen
 # home they were written for (see tools/dev/README.md).
 set -eu
 [ "$#" -ge 1 ] || { echo "usage: tools/investigate/session.sh name:alpha[:st] [...]" >&2; exit 1; }
@@ -35,19 +35,19 @@ one_arm() {
     case $rest in *:*) st=${rest#*:} ;; esac
     engine=$RK_INV_DATA/engine-$name store=$RK_INV_DATA/state-$name
     mkdir -p "$engine" "$store" || return 1
-    RADIANCE_KVA_CAPTURE_STATE=/cap RADIANCE_KVA_PROJ=$RK_PROJ RADIANCE_KVA_ST=$st RADIANCE_KVA_TAIL=$RK_TAIL \
-        RADIANCE_KVA_ALPHA=$alpha
-    export RADIANCE_KVA_CAPTURE_STATE RADIANCE_KVA_PROJ RADIANCE_KVA_ST RADIANCE_KVA_TAIL RADIANCE_KVA_ALPHA
+    RADIANCE_RIDGEFILL_CAPTURE_STATE=/cap RADIANCE_RIDGEFILL_PROJ=$RK_PROJ RADIANCE_RIDGEFILL_ST=$st RADIANCE_RIDGEFILL_TAIL=$RK_TAIL \
+        RADIANCE_RIDGEFILL_ALPHA=$alpha
+    export RADIANCE_RIDGEFILL_CAPTURE_STATE RADIANCE_RIDGEFILL_PROJ RADIANCE_RIDGEFILL_ST RADIANCE_RIDGEFILL_TAIL RADIANCE_RIDGEFILL_ALPHA
     echo "arm $name: alpha $alpha proj $RK_PROJ st $st tail $RK_TAIL"
     if ! RK_DOCKER_EXTRA="-v $engine:/cap -e RADIANCE_DEBUG_ARGSHA=1" "$repo/scripts/serve.sh" speed; then
-        docker logs radiance-kva-speed > "$store/engine-speed.log" 2>&1 || true
+        docker logs radiance-ridgefill-speed > "$store/engine-speed.log" 2>&1 || true
         "$repo/scripts/stop.sh"
         return 1
     fi
     status=0
     "$RK_PYTHON" "$repo/tools/refit/capture.py" run --what state --prompts "$RK_PROMPTS" --engine-dir "$engine" \
         --store "$store" --port "$RK_PORT" || status=$?
-    docker logs radiance-kva-speed > "$store/engine-speed.log" 2>&1 || true
+    docker logs radiance-ridgefill-speed > "$store/engine-speed.log" 2>&1 || true
     "$repo/scripts/stop.sh" || status=1
     return $status
 }

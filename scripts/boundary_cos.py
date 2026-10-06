@@ -3,7 +3,7 @@
 
   boundary_cos.py --dump DIR --capture CAPTURE.pt [--capture CAPTURE.pt ...] [--ids IDS.json]
 
-DIR is a RADIANCE_KVA_DUMP directory (boundary.jsonl + boundary.p<P>.npy, f32 [n_tok, hc*n_embd]: the
+DIR is a RADIANCE_RIDGEFILL_DUMP directory (boundary.jsonl + boundary.p<P>.npy, f32 [n_tok, hc*n_embd]: the
 residual stream entering layer S of the approximate chunk starting at absolute position P). Each capture
 file holds rows at absolute `positions` (stride 8) with `boundary_24` [rows, hc*n_embd] bf16 and
 `input_ids`. For every capture whose positions fall in a dumped chunk: the dumped token ids must equal

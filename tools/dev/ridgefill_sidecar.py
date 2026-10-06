@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
-"""Build and verify the KVA sidecar shard: the fitted projector, the GDN state correction and the row-selection
+"""Build and verify the RidgeFill sidecar shard: the fitted projector, the GDN state correction and the row-selection
 score tables, as one safetensors shard plus an index naming only it, so the directory is a checkpoint
 namespace `rad-convert --reuse --in-place` can append from.
 
-  kva_sidecar.py build  --proj P --st RANK0.pt RANK1.pt --freq F --tokenizer DIR --out DIR
-  kva_sidecar.py verify TARGET --proj P --st RANK0.pt RANK1.pt --freq F --tokenizer DIR [--rad-info CMD]
-  kva_sidecar.py build  --names refit --proj P [--st RANK0.pt RANK1.pt] --out DIR    (Stage 6 refit set)
+  ridgefill_sidecar.py build  --proj P --st RANK0.pt RANK1.pt --freq F --tokenizer DIR --out DIR
+  ridgefill_sidecar.py verify TARGET --proj P --st RANK0.pt RANK1.pt --freq F --tokenizer DIR [--rad-info CMD]
+  ridgefill_sidecar.py build  --names refit --proj P [--st RANK0.pt RANK1.pt] --out DIR    (Stage 6 refit set)
 
 Tensors written (L = the layers present in the inputs; no model number is typed here):
-  kva.proj.L.weight [H, W] bf16     projector layer.L[:, :W]   (W = its columns - 1)
-  kva.proj.L.bias   [H] bf16        projector layer.L[:, W]    (the bias column); `final` is not converted
-  kva.st.L          [2h, V, K] f32  cat(rank0 sum/count, rank1 sum/count) along heads: rank 0's heads first
-  kva.stswap.L      [2h, V, K] f32  the same with the halves swapped: the head-order negative control (R24)
-  kva.rowsel.score       [vocab] f32  rarity (-logfreq) where the token's class is kept, else -inf
-  kva.rowsel.score_none  [vocab] f32  all -inf: no row selected, rho = 1 (R41)
-  kva.rowsel.score_all   [vocab] f32  all 0: every row a match, ties by position (the all-rows check, R35)
-`--names refit` writes only kva.projr.L.{weight,bias} and kva.str.L (no swap control, no row tables) into
-kva-sidecar-refit.safetensors, with source-hash keys kva.src.{projr,str0,str1}.sha256. Its --st is optional: the
+  ridgefill.proj.L.weight [H, W] bf16     projector layer.L[:, :W]   (W = its columns - 1)
+  ridgefill.proj.L.bias   [H] bf16        projector layer.L[:, W]    (the bias column); `final` is not converted
+  ridgefill.st.L          [2h, V, K] f32  cat(rank0 sum/count, rank1 sum/count) along heads: rank 0's heads first
+  ridgefill.stswap.L      [2h, V, K] f32  the same with the halves swapped: the head-order negative control (R24)
+  ridgefill.rowsel.score       [vocab] f32  rarity (-logfreq) where the token's class is kept, else -inf
+  ridgefill.rowsel.score_none  [vocab] f32  all -inf: no row selected, rho = 1 (R41)
+  ridgefill.rowsel.score_all   [vocab] f32  all 0: every row a match, ties by position (the all-rows check, R35)
+`--names refit` writes only ridgefill.projr.L.{weight,bias} and ridgefill.str.L (no swap control, no row tables) into
+ridgefill-sidecar-refit.safetensors, with source-hash keys ridgefill.src.{projr,str0,str1}.sha256. Its --st is optional: the
 correction refit needs the refit projector IN the container (its speed run fills with it), so Stage 6 appends twice:
-first the projector alone (no --st: no kva.str.*, so RADIANCE_KVA_ST=refit serves with no correction), then the
-full refit set (the projector tensors are byte-identical and reused by name, only kva.str.* is new).
+first the projector alone (no --st: no ridgefill.str.*, so RADIANCE_RIDGEFILL_ST=refit serves with no correction), then the
+full refit set (the projector tensors are byte-identical and reused by name, only ridgefill.str.* is new).
 The controls share the container with the real tensors because an in-place append cannot replace a weight and
 there is no disk for a second container (orchestrator decision, 2026-10-04).
 
 Metadata (in the shard header AND in rad-convert-set.txt as `key=value` lines for `rad-convert --set`, so the
-container carries it): kva.split, kva.rowsel.share, kva.rowsel.classes, and kva.src.<role>.sha256 for every
+container carries it): ridgefill.split, ridgefill.rowsel.share, ridgefill.rowsel.classes, and ridgefill.src.<role>.sha256 for every
 file read. `verify` recomputes those hashes and compares them with a sidecar's header, a container's
 `rad-info --meta`, or a saved copy of that output (R13).
 """
@@ -40,22 +40,22 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # tools/: kva_rules
-import kva_rules as R  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # tools/: ridgefill_rules
+import ridgefill_rules as R  # noqa: E402
 
 SET_FILE = "rad-convert-set.txt"
-# Which copy of the fitted tensors a build writes (arch/kva_config.h selects among them at serve time).
+# Which copy of the fitted tensors a build writes (arch/ridgefill_config.h selects among them at serve time).
 # shipped: the published fits, with the head-swap control and the row-selection tables.
 # refit:   the Stage 6 fits from radiance's own captures, under their own names and source-hash keys, so
 #          the two copies sit in one container side by side (an in-place append cannot replace a weight).
 NAMES = {
-    "shipped": dict(shard="kva-sidecar.safetensors", proj="kva.proj", st="kva.st", swap="kva.stswap",
+    "shipped": dict(shard="ridgefill-sidecar.safetensors", proj="ridgefill.proj", st="ridgefill.st", swap="ridgefill.stswap",
                     roles=("proj", "st0", "st1")),
-    "refit": dict(shard="kva-sidecar-refit.safetensors", proj="kva.projr", st="kva.str", swap=None,
+    "refit": dict(shard="ridgefill-sidecar-refit.safetensors", proj="ridgefill.projr", st="ridgefill.str", swap=None,
                   roles=("projr", "str0", "str1")),
 }
 SHARD = NAMES["shipped"]["shard"]
-FORMAT = "kva-sidecar-1"
+FORMAT = "ridgefill-sidecar-1"
 # The selection share the paper's quality row was measured at (HANDOVER §2.4.5: changing it is Dylan's call).
 SHARE = 0.25
 TOKENIZER_FILES = {"config": "config.json", "tokenizer_json": "tokenizer.json",
@@ -91,7 +91,7 @@ def source_files(args):
 
 
 def source_hashes(files):
-    return {f"kva.src.{role}.sha256": sha256_file(path) for role, path in files.items()}
+    return {f"ridgefill.src.{role}.sha256": sha256_file(path) for role, path in files.items()}
 
 
 def projector_tensors(path, prefix):
@@ -149,9 +149,9 @@ def rowsel_tensors(tokenizer_dir, freq_path):
         raise SystemExit(f"tokenizer has {len(texts)} ids, more than the model's {vocab} vocab rows")
     score = torch.from_numpy(R.score_table(texts, logfreq))
     kept = int(torch.isfinite(score).sum())
-    return {"kva.rowsel.score": score,
-            "kva.rowsel.score_none": torch.full((vocab,), float("-inf"), dtype=torch.float32),
-            "kva.rowsel.score_all": torch.zeros(vocab, dtype=torch.float32)}, kept, len(texts)
+    return {"ridgefill.rowsel.score": score,
+            "ridgefill.rowsel.score_none": torch.full((vocab,), float("-inf"), dtype=torch.float32),
+            "ridgefill.rowsel.score_all": torch.zeros(vocab, dtype=torch.float32)}, kept, len(texts)
 
 
 def sort_header_metadata(path):
@@ -181,7 +181,7 @@ def build(args):
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     print("hashing sources ...", flush=True)
-    meta = {"kva.format": FORMAT, **source_hashes(files)}
+    meta = {"ridgefill.format": FORMAT, **source_hashes(files)}
     print("projector ...", flush=True)
     split, tensors = projector_tensors(files[names["roles"][0]], names["proj"])
     if args.st:
@@ -191,9 +191,9 @@ def build(args):
         print("row-selection tables ...", flush=True)
         rowsel, kept, n_tok = rowsel_tensors(args.tokenizer, files["freq"])
         tensors.update(rowsel)
-        meta.update({"kva.split": str(split), "kva.rowsel.share": repr(SHARE),
-                     "kva.rowsel.classes": ",".join(R.CLASSES)})
-        print(f"rowsel: {kept} of {len(rowsel['kva.rowsel.score'])} vocab rows kept ({n_tok} tokenizer ids)")
+        meta.update({"ridgefill.split": str(split), "ridgefill.rowsel.share": repr(SHARE),
+                     "ridgefill.rowsel.classes": ",".join(R.CLASSES)})
+        print(f"rowsel: {kept} of {len(rowsel['ridgefill.rowsel.score'])} vocab rows kept ({n_tok} tokenizer ids)")
     assert all(" " not in v and "\n" not in v for v in meta.values()), "metadata values go on a command line"
     shard = out_dir / names["shard"]
     print(f"writing {shard} ({len(tensors)} tensors) ...", flush=True)
@@ -207,11 +207,11 @@ def build(args):
 
 
 def parse_rad_info_meta(text):
-    """{key: value} of the kva.* rows of `rad-info --meta` output (rows are `  key  value`)."""
+    """{key: value} of the ridgefill.* rows of `rad-info --meta` output (rows are `  key  value`)."""
     meta = {}
     for line in text.splitlines():
         fields = line.split(None, 1)
-        if len(fields) == 2 and fields[0].startswith("kva."):
+        if len(fields) == 2 and fields[0].startswith("ridgefill."):
             meta[fields[0]] = fields[1].strip()
     return meta
 
@@ -245,7 +245,7 @@ def verify(args):
         else:
             bad += 1
             print(f"{'MISSING' if have is None else 'MISMATCH':9s} {key}: recorded {have}, recomputed {want}")
-    for key in ("kva.format",) + (("kva.split", "kva.rowsel.share", "kva.rowsel.classes")
+    for key in ("ridgefill.format",) + (("ridgefill.split", "ridgefill.rowsel.share", "ridgefill.rowsel.classes")
                                   if args.names == "shipped" else ()):
         bad += key not in meta
         print(f"{'' if key in meta else 'MISSING':9s} {key} = {meta.get(key)}")
@@ -259,14 +259,14 @@ def main(argv=None):
     for name in ("build", "verify"):
         p = sub.add_parser(name)
         if name == "verify":
-            p.add_argument("target", help="kva-sidecar.safetensors, a .rad container, or saved `rad-info --meta` output")
+            p.add_argument("target", help="ridgefill-sidecar.safetensors, a .rad container, or saved `rad-info --meta` output")
             p.add_argument("--rad-info", default="rad-info", help="rad-info command (a .rad target), e.g. a docker run prefix")
         p.add_argument("--proj", required=True, help="projector safetensors (layer.S..layer.L-1 [H, W+1] bf16)")
         p.add_argument("--st", nargs=2, metavar=("RANK0", "RANK1"),
                        help="correction .pt per TP rank; required for shipped, optional for refit (projector alone)")
         p.add_argument("--names", choices=sorted(NAMES), default="shipped",
-                       help="tensor-name set: shipped (kva.proj/kva.st + controls + row tables) or refit "
-                            "(kva.projr/kva.str, Stage 6)")
+                       help="tensor-name set: shipped (ridgefill.proj/ridgefill.st + controls + row tables) or refit "
+                            "(ridgefill.projr/ridgefill.str, Stage 6)")
         p.add_argument("--freq", help="unigram table safetensors (`logfreq` [vocab]); shipped only")
         p.add_argument("--tokenizer", help="checkpoint dir with config.json + tokenizer.json; shipped only")
         if name == "build":

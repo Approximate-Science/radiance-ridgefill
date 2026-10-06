@@ -1,20 +1,20 @@
-/* rows.cpp -- the kva kernel library's op schemas, its row table and its operand descriptions.
+/* rows.cpp -- the ridgefill kernel library's op schemas, its row table and its operand descriptions.
  *
  * NEW OPS, none of them in docs/OPS.md, so this plugin FIXES their schemas (the first plugin in
  * hierarchy order to declare an op does) and nothing else in the engine knows them. The fitted
  * tensors (projector, correction, score table) are IN operands, not weights: they live in memory
  * the arch plugin fills from the projector folder (PACKAGING.md §0), so nothing here asks the
- * container for them. kva_gemm_nt_bias's rows are the engine's own gemm_nt_bias rows (forward.cpp). Each has a
+ * container for them. ridgefill_gemm_nt_bias's rows are the engine's own gemm_nt_bias rows (forward.cpp). Each has a
  * host row -- plain C++, the oracle the device row is tested against (tests/kernel_test.cpp) --
- * and, in a HIP build, a device row. The plan they implement is PLAN.md §5 of the KVA plugin build
+ * and, in a HIP build, a device row. The plan they implement is PLAN.md §5 of the RidgeFill plugin build
  * and PLAN-FIX v2 Stage A (the device mask; schemas in notes/impl.md §1).
  *
  * Every row carries an `opd_shape`, so a tool can call it cold instead of skipping it by name. No
- * row has a scratch hook (kva_mask keeps its keys in LDS; the others need nothing), tunables, a
+ * row has a scratch hook (ridgefill_mask keeps its keys in LDS; the others need nothing), tunables, a
  * layout hook or a `describe`: each is one fixed launch issued once per layer per prefill chunk.
  * No parameter carries a role (R98): nothing here is a sequence chunk or a capacity.
  */
-#include "kva.h"
+#include "ridgefill.h"
 
 #include <cstring>
 #include <initializer_list>
@@ -80,8 +80,8 @@ static const RadOperandSpec oHazard[] = { OPD("cu_last"), OPD("positions"), OPD_
 static const RadOperandSpec oStateRead[] = { OPD("state"), OPD("state_idx"), OUT("out") };
 
 static const RadOpSchema kSchemas[] = {
-{ "kva_mask", ARR(pMask), ARR(oMask),
-  "Which rows of the step's LAST sequence run exact (KVA, the device mask). cu_last [2] = {s, e} "
+{ "ridgefill_mask", ARR(pMask), ARR(oMask),
+  "Which rows of the step's LAST sequence run exact (RidgeFill, the device mask). cu_last [2] = {s, e} "
   "(cu_seqlens + n_seq - 1, read on the device); b = token_ids' extent (rows [0, b) of the step, "
   "the bulk end; M is issued at b only to pick the band); b' = min(max(b, s), e); the window is "
   "W = [s, b'). mask [n] (n = its extent) is written on every row: 0 outside W. Inside W, mode "
@@ -99,31 +99,31 @@ static const RadOpSchema kSchemas[] = {
   "(row 0 is read, at the operand's strides); only random mode reads it. i32 cu_last, ids, "
   "positions, mask and bounds; f32 score table. Optional `zeros` i32: every element written 0 (the "
   "zero expert offsets the arch side's stager probes read, notes/impl.md)." },
-{ "kva_select", ARR(pSelect), ARR(oSelect),
-  "Approximated rows take their source's values (KVA, the device mask). n = mask's extent. For "
+{ "ridgefill_select", ARR(pSelect), ARR(oSelect),
+  "Approximated rows take their source's values (RidgeFill, the device mask). n = mask's extent. For "
   "every row i < n with mask[i] == 1, row i of each present destination is overwritten with row i "
   "of its source, byte for byte; nothing else is written (rows with any other mask value, rows "
   "past n, row padding). Pairs (x_src, x), (q_src, q), (s_src, s): x required, q and s optional, "
   "each pair present or absent together, one dtype and one row width (shape[1]) per pair, any "
   "dtype of whole bytes (bf16 activations, int8 or E4M3 codes, f32 scales); rank 2, last stride "
   "1, row pitches off each tensor, at least n rows each. i32 mask." },
-{ "kva_drop_rows", ARR(pDrop), ARR(oDrop),
-  "Approximated rows select nothing (KVA, the device mask). n = mask's extent. For every row "
+{ "ridgefill_drop_rows", ARR(pDrop), ARR(oDrop),
+  "Approximated rows select nothing (RidgeFill, the device mask). n = mask's extent. For every row "
   "i < n with mask[i] == 1, ids[i, 0 .. top_k) = -1; nothing else is written (columns >= top_k, "
   "rows with any other mask value, rows past n). ids i32 [>= n, >= top_k], last stride 1, row "
   "pitch off the tensor; top_k >= 0. i32 mask." },
-{ "kva_rho_update", ARR(pRho), ARR(oRho),
+{ "ridgefill_rho_update", ARR(pRho), ARR(oRho),
   "The decayed share of approximated rows in each GDN head's state, carried across one "
-  "sequence's chunks (KVA quality mode). Per head h, sequentially over the n rows of `a` "
+  "sequence's chunks (RidgeFill quality mode). Per head h, sequentially over the n rows of `a` "
   "[n, n_head] (read at its own strides, e.g. a column slice of the a|b buffer): g = -exp(A_log[h]) * "
   "softplus(a[t,h] + dt_bias[h]); D = e^g * D + 1; N = e^g * N + mask[t]. ND is a LINEAR slot "
   "[n_states, n_head, ...] holding (N, D) per head as two f32; the slot is state_idx[0] (one "
   "sequence); a slot outside the pool writes nothing. rho = clamp(N/D, 0, 1) is read by "
-  "kva_state_correct. Optional `bounds` i32 [>=1] (kva_mask's): the recurrence runs over rows "
+  "ridgefill_state_correct. Optional `bounds` i32 [>=1] (ridgefill_mask's): the recurrence runs over rows "
   "[clamp(bounds[0], 0, n), n) only; absent = every row. a bf16 or f32; mask i32; A_log, "
   "dt_bias, ND f32." },
-{ "kva_state_correct", ARR(pCorrect), ARR(oCorrect),
-  "Apply or undo the GDN terminal-state correction (KVA +st) on each sequence's slots. M = n_seq "
+{ "ridgefill_state_correct", ARR(pCorrect), ARR(oCorrect),
+  "Apply or undo the GDN terminal-state correction (RidgeFill +st) on each sequence's slots. M = n_seq "
   "(state_idx's rows). Every KV operand has its own group's index after it -- state_idx, "
   "applied_idx, nd_idx, each [n_seq] or [n_seq, pitch] with column 0 the slot -- and a sequence "
   "with any slot outside its pool is skipped. ND and nd_idx are present or absent together. Per (sequence, "
@@ -131,18 +131,18 @@ static const RadOpSchema kSchemas[] = {
   "(1 also while D is 0); state += s * C; applied = s. Nothing is added when the scale is 0, so "
   "alpha 0 leaves the state's bits alone. state [n_states, n_head, sd0, sd1] f32 with the strides "
   "the operand carries (linear slots may be padded); applied [n_states, n_head, ...] one f32 a "
-  "head; C [n_head, sd0, sd1] f32, dense (any rank of that many elements); ND as kva_rho_update's, optional. `alpha` is read in apply "
-  "mode and ignored in undo. Optional `bounds` i32 [>=2] (kva_mask's {s, b', ...}): when "
+  "head; C [n_head, sd0, sd1] f32, dense (any rank of that many elements); ND as ridgefill_rho_update's, optional. `alpha` is read in apply "
+  "mode and ignored in undo. Optional `bounds` i32 [>=2] (ridgefill_mask's {s, b', ...}): when "
   "bounds[1] <= bounds[0] (the step's last sequence had no bulk row) the op writes nothing, in "
   "either mode; otherwise it is the op without bounds." },
-{ "kva_state_read", ARR(pStateRead), ARR(oStateRead),
-  "Copy each sequence's GDN state slot out (KVA correction refit captures). M = n_seq "
+{ "ridgefill_state_read", ARR(pStateRead), ARR(oStateRead),
+  "Copy each sequence's GDN state slot out (RidgeFill correction refit captures). M = n_seq "
   "(state_idx's rows; column 0 is the slot). out[s, h, i, j] = state[slot_s, h, i, j]; a slot "
   "outside the pool reads zeros. state [n_states, n_head, sd0, sd1] f32 at the strides the "
   "operand carries (linear slots may be padded); out f32, written densely from its first element "
   "as [n_seq, n_head, sd0, sd1] (any contiguous operand at least that big)." },
-{ "kva_hazard", ARR(pHazard), ARR(oHazard),
-  "Prefix-cache branch hazard rows (KVA, DD-A's instrument). One sequence, the step's LAST: s, e from "
+{ "ridgefill_hazard", ARR(pHazard), ARR(oHazard),
+  "Prefix-cache branch hazard rows (RidgeFill, DD-A's instrument). One sequence, the step's LAST: s, e from "
   "cu_last [2]; P = positions[s]; span = the optional span operand's extent (T - n_ahead; absent = 0). "
   "meta [n_states, ..., 2] f32, the sequence's slot = meta_idx[0] (outside the pool: nothing): m0 = "
   "last approximated position + 1 (0 = none), m1 = positions counted below. If span > 0 and e > s: "
@@ -150,13 +150,13 @@ static const RadOpSchema kSchemas[] = {
   "count[0] += hi - lo and m1 = hi. Then, with the optional bounds [>=2] {s, b'} and b' > s: m0 = "
   "positions[b' - 1] + 1. i32 cu_last / positions / meta_idx / bounds, f32 meta / count. Refused "
   "(host row): s < 0 or s > e; the device row counts nothing instead." },
-{ "kva_gemm_nt_bias", ARR(pGemm), ARR(oGemm),
+{ "ridgefill_gemm_nt_bias", ARR(pGemm), ARR(oGemm),
   "gemm_nt_bias (docs/OPS.md) with the weight `b` [N, K] and `bias` [N] as IN operands -- memory "
   "the caller owns, e.g. a projector loaded from a folder rather than the container: y = res + "
   "act(a @ b^T + bias), rounded to bf16 after the biased product, after the activation and after "
   "the residual. Its rows are the engine's own gemm_nt_bias rows (libr4d's device row, libref's "
   "host row), offered only when that library is loaded." },
-{ "kva_gemm_nt_q", ARR(pGemmQ), ARR(oGemmQ),
+{ "ridgefill_gemm_nt_q", ARR(pGemmQ), ARR(oGemmQ),
   "gemm_nt_q (docs/OPS.md) with the weight `b` and its scale `b_scale` as IN operands, held in the "
   "STORED form the row's own layout hook describes (the caller runs that row's relayout on the "
   "canonical planes once, at load): y = (a, a_scale) @ dequant(b, b_scale)^T, bf16. Its rows are "
@@ -252,7 +252,7 @@ static int shape_rho(const RadParam* p, int n_p, int operand, RadOpdDesc* out) {
         opd(RAD_F32, { heads }),
         opd(RAD_F32, { slots, heads, 1, 2 }, RAD_FILL_SIGMOID),
         opd_idx({ 1, 1 }, slots),
-        opd_idx({ 4 }, n),   /* kva_mask's bounds: a first row inside the chunk */
+        opd_idx({ 4 }, n),   /* ridgefill_mask's bounds: a first row inside the chunk */
     });
 }
 
@@ -302,79 +302,79 @@ static int shape_hazard(const RadParam*, int, int operand, RadOpdDesc* out) {
 
 static const RadConstraint cMaskHost[] = { RAD_CIN("mode", "none class random all step") };
 static const RadConstraint cMaskDevice[] = { RAD_CIN("mode", "none class random all step"),
-                                             RAD_CLE("M", KVA_MASK_MAX_ROWS) };
+                                             RAD_CLE("M", RIDGEFILL_MASK_MAX_ROWS) };
 static const RadConstraint cCorrect[] = { RAD_CIN("mode", "undo apply") };
 
 #define ROW(nm, opname, what, shp, dts, dom, cons, fn, shapefn)                                  \
-    { nm, opname, "kva", what, shp, dts, dom, 0, ARR(cons), nullptr, 0, nullptr, nullptr,         \
+    { nm, opname, "ridgefill", what, shp, dts, dom, 0, ARR(cons), nullptr, 0, nullptr, nullptr,         \
       nullptr, fn, nullptr, nullptr, nullptr, shapefn, nullptr, nullptr, nullptr }
 #define ROW_NC(nm, opname, what, shp, dts, dom, fn, shapefn)                                     \
-    { nm, opname, "kva", what, shp, dts, dom, 0, nullptr, 0, nullptr, 0, nullptr, nullptr,        \
+    { nm, opname, "ridgefill", what, shp, dts, dom, 0, nullptr, 0, nullptr, 0, nullptr, nullptr,        \
       nullptr, fn, nullptr, nullptr, nullptr, shapefn, nullptr, nullptr, nullptr }
 
 static const RadKernelInfo kKernels[] = {
-ROW("kva_mask_host", "kva_mask", "last-sequence window mask, O(w^2) rank counting, the oracle",
+ROW("ridgefill_mask_host", "ridgefill_mask", "last-sequence window mask, O(w^2) rank counting, the oracle",
     "any n and b", "i32 cu_last / ids / mask / bounds, f32 score", RAD_DOMAIN_HOST, cMaskHost,
-    kva_mask_host, shape_mask),
-ROW_NC("kva_select_host", "kva_select", "masked row copy, bytewise, the oracle",
+    ridgefill_mask_host, shape_mask),
+ROW_NC("ridgefill_select_host", "ridgefill_select", "masked row copy, bytewise, the oracle",
        "any n and row widths", "any whole-byte dtype per pair, i32 mask", RAD_DOMAIN_HOST,
-       kva_select_host, shape_select),
-ROW_NC("kva_drop_rows_host", "kva_drop_rows", "masked top-k id drop, the oracle",
-       "any n and top_k", "i32 mask / ids", RAD_DOMAIN_HOST, kva_drop_host, shape_drop),
-ROW_NC("kva_rho_update_host", "kva_rho_update", "per-head decayed approximated share, the oracle",
+       ridgefill_select_host, shape_select),
+ROW_NC("ridgefill_drop_rows_host", "ridgefill_drop_rows", "masked top-k id drop, the oracle",
+       "any n and top_k", "i32 mask / ids", RAD_DOMAIN_HOST, ridgefill_drop_host, shape_drop),
+ROW_NC("ridgefill_rho_update_host", "ridgefill_rho_update", "per-head decayed approximated share, the oracle",
        "any n and n_head", "bf16 or f32 a, i32 mask, f32 A_log / dt_bias / ND", RAD_DOMAIN_HOST,
-       kva_rho_host, shape_rho),
-ROW("kva_state_correct_host", "kva_state_correct", "GDN state apply / undo, the oracle",
+       ridgefill_rho_host, shape_rho),
+ROW("ridgefill_state_correct_host", "ridgefill_state_correct", "GDN state apply / undo, the oracle",
     "any slot strides", "f32 state / applied / C / ND, i32 slots", RAD_DOMAIN_HOST, cCorrect,
-    kva_correct_host, shape_correct),
-ROW_NC("kva_state_read_host", "kva_state_read", "GDN state slot copy-out, the oracle",
-       "any slot strides", "f32 state / out, i32 slots", RAD_DOMAIN_HOST, kva_state_read_host,
+    ridgefill_correct_host, shape_correct),
+ROW_NC("ridgefill_state_read_host", "ridgefill_state_read", "GDN state slot copy-out, the oracle",
+       "any slot strides", "f32 state / out, i32 slots", RAD_DOMAIN_HOST, ridgefill_state_read_host,
        shape_state_read),
-ROW_NC("kva_hazard_host", "kva_hazard", "branch hazard count on the last sequence, the oracle",
+ROW_NC("ridgefill_hazard_host", "ridgefill_hazard", "branch hazard count on the last sequence, the oracle",
        "any slot strides", "i32 cu_last / positions / slots, f32 meta / count", RAD_DOMAIN_HOST,
-       kva_hazard_host, shape_hazard),
-#ifdef KVA_HAVE_HIP
-ROW_NC("kva_hazard_device", "kva_hazard", "one thread",
+       ridgefill_hazard_host, shape_hazard),
+#ifdef RIDGEFILL_HAVE_HIP
+ROW_NC("ridgefill_hazard_device", "ridgefill_hazard", "one thread",
        "any slot strides", "i32 cu_last / positions / slots, f32 meta / count", RAD_DOMAIN_DEVICE,
-       kva_hazard_device, shape_hazard),
-ROW("kva_mask_device", "kva_mask", "last-sequence window mask in one workgroup, keys in LDS",
-    "b up to the LDS key budget (KVA_MASK_MAX_ROWS), any n", "i32 cu_last / ids / mask / bounds, f32 score",
-    RAD_DOMAIN_DEVICE, cMaskDevice, kva_mask_device, shape_mask),
-ROW_NC("kva_select_device", "kva_select", "one workgroup per row, 16 / 4 / 1-byte words",
+       ridgefill_hazard_device, shape_hazard),
+ROW("ridgefill_mask_device", "ridgefill_mask", "last-sequence window mask in one workgroup, keys in LDS",
+    "b up to the LDS key budget (RIDGEFILL_MASK_MAX_ROWS), any n", "i32 cu_last / ids / mask / bounds, f32 score",
+    RAD_DOMAIN_DEVICE, cMaskDevice, ridgefill_mask_device, shape_mask),
+ROW_NC("ridgefill_select_device", "ridgefill_select", "one workgroup per row, 16 / 4 / 1-byte words",
        "any n and row widths", "any whole-byte dtype per pair, i32 mask", RAD_DOMAIN_DEVICE,
-       kva_select_device, shape_select),
-ROW_NC("kva_drop_rows_device", "kva_drop_rows", "one workgroup per row",
-       "any n and top_k", "i32 mask / ids", RAD_DOMAIN_DEVICE, kva_drop_device, shape_drop),
-ROW_NC("kva_rho_update_device", "kva_rho_update", "one thread a head, sequential over the rows",
+       ridgefill_select_device, shape_select),
+ROW_NC("ridgefill_drop_rows_device", "ridgefill_drop_rows", "one workgroup per row",
+       "any n and top_k", "i32 mask / ids", RAD_DOMAIN_DEVICE, ridgefill_drop_device, shape_drop),
+ROW_NC("ridgefill_rho_update_device", "ridgefill_rho_update", "one thread a head, sequential over the rows",
        "any n and n_head", "bf16 or f32 a, i32 mask, f32 A_log / dt_bias / ND", RAD_DOMAIN_DEVICE,
-       kva_rho_device, shape_rho),
-ROW("kva_state_correct_device", "kva_state_correct", "one workgroup per (sequence, head)",
+       ridgefill_rho_device, shape_rho),
+ROW("ridgefill_state_correct_device", "ridgefill_state_correct", "one workgroup per (sequence, head)",
     "any slot strides", "f32 state / applied / C / ND, i32 slots", RAD_DOMAIN_DEVICE, cCorrect,
-    kva_correct_device, shape_correct),
-ROW_NC("kva_state_read_device", "kva_state_read", "one workgroup per (head, sequence), a copy",
-       "any slot strides", "f32 state / out, i32 slots", RAD_DOMAIN_DEVICE, kva_state_read_device,
+    ridgefill_correct_device, shape_correct),
+ROW_NC("ridgefill_state_read_device", "ridgefill_state_read", "one workgroup per (head, sequence), a copy",
+       "any slot strides", "f32 state / out, i32 slots", RAD_DOMAIN_DEVICE, ridgefill_state_read_device,
        shape_state_read),
 #endif
 };
 
 /* ================================================================== plugin exports */
 
-#ifndef KVA_BUILD_TARGET
-#define KVA_BUILD_TARGET "host"
+#ifndef RIDGEFILL_BUILD_TARGET
+#define RIDGEFILL_BUILD_TARGET "host"
 #endif
 
 static const RadPluginInfo kInfo = {
     RAD_PLUGIN_KERNEL,
-    "kva",
+    "ridgefill",
     "0.1.0",
-    "KVA / RidgeFill prefill ops: kva_mask (which rows of the last sequence run exact, on the "
-    "device), kva_select (approximated rows take their source rows), kva_drop_rows (approximated "
-    "rows select no ids), kva_rho_update (decayed approximated share per GDN head), "
-    "kva_state_correct (GDN terminal-state correction), kva_state_read (GDN state slot copy-out "
-    "for the correction refit), kva_gemm_nt_bias (the engine's gemm_nt_bias with its weight as an "
-    "input), kva_gemm_nt_q (the engine's int8 gemm_nt_q with its weight as an input, device "
+    "RidgeFill prefill ops: ridgefill_mask (which rows of the last sequence run exact, on the "
+    "device), ridgefill_select (approximated rows take their source rows), ridgefill_drop_rows (approximated "
+    "rows select no ids), ridgefill_rho_update (decayed approximated share per GDN head), "
+    "ridgefill_state_correct (GDN terminal-state correction), ridgefill_state_read (GDN state slot copy-out "
+    "for the correction refit), ridgefill_gemm_nt_bias (the engine's gemm_nt_bias with its weight as an "
+    "input), ridgefill_gemm_nt_q (the engine's int8 gemm_nt_q with its weight as an input, device "
     "only). A host row (the oracle) and, in a HIP build, a device row each.",
-    KVA_BUILD_TARGET
+    RIDGEFILL_BUILD_TARGET
 };
 
 extern "C" uint32_t rad_plugin_abi_version(void) { return RAD_ABI_VERSION; }
@@ -388,10 +388,10 @@ extern "C" const RadOpSchema* rad_kernel_schema_at(int i) {
  * source library is loaded -- counted at the first call, which the loader makes after it has
  * dlopened every plugin. */
 static const int kOwnRows = (int)(sizeof kKernels / sizeof kKernels[0]);
-extern "C" int rad_kernel_count(void) { return kOwnRows + kva_forward_count(); }
+extern "C" int rad_kernel_count(void) { return kOwnRows + ridgefill_forward_count(); }
 extern "C" const RadKernelInfo* rad_kernel_at(int i) {
     if (i >= 0 && i < kOwnRows) return &kKernels[i];
-    return kva_forward_at(i - kOwnRows);
+    return ridgefill_forward_at(i - kOwnRows);
 }
 /* A forwarded row keeps its source's promise; this library's own rows make none (abi/rad_abi.h:591). */
-extern "C" int rad_kernel_concurrent(int i) { return i >= kOwnRows ? kva_forward_concurrent(i - kOwnRows) : 0; }
+extern "C" int rad_kernel_concurrent(int i) { return i >= kOwnRows ? ridgefill_forward_concurrent(i - kOwnRows) : 0; }

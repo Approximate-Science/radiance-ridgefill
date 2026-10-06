@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Radiance's projector captures (RADIANCE_KVA_CAPTURE, notes/arch.md "Capture") as tcc Capture records, so the
+"""Radiance's projector captures (RADIANCE_RIDGEFILL_CAPTURE, notes/arch.md "Capture") as tcc Capture records, so the
 research pipeline's own code reads them unchanged (R42): qfn.fit.Sums.add takes the record dict directly (no file
 round trip for the training rows), and fit.Held / fit.records read the held-out documents from the capture_NNNNN.pt
 files this tool writes.
@@ -8,7 +8,7 @@ files this tool writes.
   convert.py check CAPTURE_DIR --ckpt MODEL_DIR [--json OUT]   the HC identity check (instrument check)
 
 A record (b0/capture_files.py, the fields tcc's Capture.flush writes; final_multi_hidden is not captured, the
-`final` map feeds only MTP, which radiance's KVA path does not use):
+`final` map feeds only MTP, which radiance's RidgeFill path does not use):
   boundary_S       bf16 [R, hc*hidden]  b_h entering layer S at the captured rows
   block_input_L    bf16 [R, hidden]     layer L's bf16 block input x right after its connection read, L >= S
   positions        int64 [R]            absolute positions of the captured rows (multiples of the stride)
@@ -28,7 +28,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import kva_research  # noqa: E402
+import ridgefill_research  # noqa: E402
 
 
 def chunks(capture_dir):
@@ -98,7 +98,7 @@ def write_pt(capture_dir, out_dir):
 def hc_identity(rec, ck):
     """(mean row cosine of qfn.hc.mix(boundary_S, ck's layer-S read weights) vs block_input_S, S); ck is a
     qfn.weights.Checkpoint."""
-    kva_research.root()
+    ridgefill_research.root()
     import torch.nn.functional as F
     from qfn import hc as H
     split = min(int(k.split("_")[1]) for k in rec if k.startswith("boundary_"))
@@ -121,7 +121,7 @@ def main(argv=None):
         print(f"wrote {write_pt(a.capture_dir, a.out_dir)} capture file(s) to {a.out_dir}")
         return 0
     rec = read_document(a.capture_dir)
-    kva_research.root()
+    ridgefill_research.root()
     from qfn.weights import Checkpoint
     cos, split = hc_identity(rec, Checkpoint(a.ckpt))
     result = dict(capture_dir=str(a.capture_dir), rows=int(rec["positions"].numel()), split=split, hc_identity_cos=cos)

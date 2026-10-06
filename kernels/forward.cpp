@@ -1,4 +1,4 @@
-/* forward.cpp -- kva_gemm_nt_bias and kva_gemm_nt_q: the engine's own gemm_nt_bias and int8
+/* forward.cpp -- ridgefill_gemm_nt_bias and ridgefill_gemm_nt_q: the engine's own gemm_nt_bias and int8
  * gemm_nt_q rows, offered again under ops whose weight operands are IN operands (PACKAGING.md §0,
  * REFUTATION-3 §2.2).
  *
@@ -18,16 +18,16 @@
  * this library. The handle is kept, so a source the loader later unloads stays mapped.
  *
  * A SOURCE THAT IS NOT LOADED OFFERS NO ROW: the op then resolves to nothing, the arch plugin
- * refuses KVA by name and the engine serves stock. A row with tunables is never forwarded (the
+ * refuses RidgeFill by name and the engine serves stock. A row with tunables is never forwarded (the
  * tuning cache keys rows by name). The bf16 rows have no layout hooks and none is accepted: the
  * projector is read as the folder stores it. The int8 rows KEEP their layout and relayout hooks:
  * the engine consults a row's hooks only for WEIGHT operands (rad_builder.cpp:510-545,
  * ctx.cpp:470-490, oracle.cpp:463), which this op has none of, so here they are inert -- and they
  * are how the arch plugin turns the folder's canonical int8 planes into the stored form these
- * kernels read, once, at load (arch/kva_int8.h). The file never carries a library's layout.
+ * kernels read, once, at load (arch/ridgefill_int8.h). The file never carries a library's layout.
  * libref's int8 row is not forwarded: it reads canonical planes, and the operands are stored ones.
  */
-#include "kva.h"
+#include "ridgefill.h"
 
 #include <dlfcn.h>
 #include <link.h>
@@ -49,9 +49,9 @@ struct Source {
 };
 
 const Source kSources[] = {
-    { "libr4d", RAD_DOMAIN_DEVICE, "gemm_nt_bias", nullptr, false, "kva_gemm_nt_bias", "kva_gemm_nt_bias_r4d" },
-    { "libref", RAD_DOMAIN_HOST,   "gemm_nt_bias", nullptr, false, "kva_gemm_nt_bias", "kva_gemm_nt_bias_ref" },
-    { "libr4d", RAD_DOMAIN_DEVICE, "gemm_nt_q",    "i8a8",  true,  "kva_gemm_nt_q",    "kva_gemm_nt_q_r4d" },
+    { "libr4d", RAD_DOMAIN_DEVICE, "gemm_nt_bias", nullptr, false, "ridgefill_gemm_nt_bias", "ridgefill_gemm_nt_bias_r4d" },
+    { "libref", RAD_DOMAIN_HOST,   "gemm_nt_bias", nullptr, false, "ridgefill_gemm_nt_bias", "ridgefill_gemm_nt_bias_ref" },
+    { "libr4d", RAD_DOMAIN_DEVICE, "gemm_nt_q",    "i8a8",  true,  "ridgefill_gemm_nt_q",    "ridgefill_gemm_nt_q_r4d" },
 };
 constexpr int kMaxRows = 8;
 
@@ -135,15 +135,15 @@ void resolve() { dl_iterate_phdr(visit, nullptr); }
 
 }  /* namespace */
 
-extern "C" int kva_forward_count(void) {
+extern "C" int ridgefill_forward_count(void) {
     std::call_once(g_once, resolve);
     return g_count;
 }
 
-extern "C" const RadKernelInfo* kva_forward_at(int i) {
-    return i >= 0 && i < kva_forward_count() ? &g_rows[i] : nullptr;
+extern "C" const RadKernelInfo* ridgefill_forward_at(int i) {
+    return i >= 0 && i < ridgefill_forward_count() ? &g_rows[i] : nullptr;
 }
 
-extern "C" int kva_forward_concurrent(int i) {
-    return i >= 0 && i < kva_forward_count() ? g_concurrent[i] : 0;
+extern "C" int ridgefill_forward_concurrent(int i) {
+    return i >= 0 && i < ridgefill_forward_count() ? g_concurrent[i] : 0;
 }

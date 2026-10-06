@@ -5,11 +5,11 @@
 #
 # Exits non-zero with a named reason if:
 #   (a) any process other than this repo's own tooling and the engines inside the
-#       radiance-kva-* containers matches radiance|llama|vllm|r9v AND holds /dev/kfd open (pgrep -af; the check's
+#       radiance-ridgefill-* containers matches radiance|llama|vllm|r9v AND holds /dev/kfd open (pgrep -af; the check's
 #       own process tree is excluded -- the script, its launcher, every ancestor: a
 #       squatter is by definition not in it -- and the report is filtered with awk,
 #       not grep, so no grep process ever matches);
-#   (b) no radiance-kva container runs and any discrete GPU (mem_info_vram_total > 8 GiB)
+#   (b) no radiance-ridgefill container runs and any discrete GPU (mem_info_vram_total > 8 GiB)
 #       holds more than RK_PREFLIGHT_VRAM_MIB MiB of VRAM;
 #   (c) journalctl -k --since "$RK_PREFLIGHT_SINCE" has lines matching
 #       amdgpu.*(MES|SMU|ring.*timeout|GPU reset) -- a MES or SMU error invalidates every
@@ -72,7 +72,7 @@ printf '%s\n' "$provenance"
 # Ours = this check's own process tree (the script, its launcher and every ancestor:
 # the operator's shell, an agent or CI wrapper that deliberately ran this check -- a
 # squatter is by definition NOT in it), this repo's own tooling (command lines
-# containing the repo path) and the processes inside the radiance-kva-* containers.
+# containing the repo path) and the processes inside the radiance-ridgefill-* containers.
 # A process whose command line merely QUOTES the word (a wrapper embedding the pattern)
 # is not an engine either; no real radiance/llama/vllm/r9v carries a "|" in its name.
 ours=' '
@@ -83,8 +83,8 @@ while [ "$pid" != 1 ] && [ -r "/proc/$pid/status" ]; do
     ours="$ours$ppid "
     pid=$ppid
 done
-containers=$(docker ps --filter name=radiance-kva- --format '{{.Names}}' 2>/dev/null) \
-    || fail "docker ps failed: cannot tell which radiance-kva containers are ours"
+containers=$(docker ps --filter name=radiance-ridgefill- --format '{{.Names}}' 2>/dev/null) \
+    || fail "docker ps failed: cannot tell which radiance-ridgefill containers are ours"
 for c in $containers; do
     ours="$ours$(docker top "$c" -eo pid 2>/dev/null | awk 'NR > 1 { printf "%s ", $1 }')"
 done
@@ -122,7 +122,7 @@ if pgrep -af 'radiance|llama|vllm|r9v' > "$tmp_squat" 2>/dev/null; then
     fi
 fi
 
-# ---- (b) leftover VRAM when no radiance-kva container runs.
+# ---- (b) leftover VRAM when no radiance-ridgefill container runs.
 if [ -z "$containers" ]; then
     limit_bytes=$((RK_PREFLIGHT_VRAM_MIB * 1048576))
     for dev in /sys/class/drm/card*/device; do
@@ -133,7 +133,7 @@ if [ -z "$containers" ]; then
         if [ "$used" -gt "$limit_bytes" ]; then
             pci=$(basename "$(readlink -f "$dev")")
             used_mib=$(awk -v b="$used" 'BEGIN { printf "%.0f", b / 1048576 }')
-            fail "$pci holds ${used_mib} MiB of VRAM with no radiance-kva container running (ceiling ${RK_PREFLIGHT_VRAM_MIB} MiB)"
+            fail "$pci holds ${used_mib} MiB of VRAM with no radiance-ridgefill container running (ceiling ${RK_PREFLIGHT_VRAM_MIB} MiB)"
         fi
     done
 fi

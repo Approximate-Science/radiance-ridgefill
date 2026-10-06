@@ -8,8 +8,8 @@ directly: a fact ("The special magic number for <key> is <7 digits>.") is buried
 known token depth in filler cut to an EXACT token count, the model is asked to return
 the number, and the reply is either right or wrong.
 
-Why the bulk/tail labelling: the KVA prefill-acceleration plugin approximates most of a
-long prompt but keeps the last T = 2048 tokens exact (README.md `RADIANCE_KVA_TAIL`;
+Why the bulk/tail labelling: the RidgeFill prefill-acceleration plugin approximates most of a
+long prompt but keeps the last T = 2048 tokens exact (README.md `RADIANCE_RIDGEFILL_TAIL`;
 tools/speed.py tail_note).  A needle inside that exact tail can be retrieved from the
 approximated run too; a needle in the bulk before it is where approximation loses
 facts.  Every corpus item records which side its needle is on, and `compare` reports
@@ -43,7 +43,7 @@ import urllib.request
 BASE = None            # "http://host:port", set by each subcommand
 HTTP_TIMEOUT = 3600.0
 
-TAIL_TOKENS = 2048     # the plugin's exact tail T (README.md RADIANCE_KVA_TAIL)
+TAIL_TOKENS = 2048     # the plugin's exact tail T (README.md RADIANCE_RIDGEFILL_TAIL)
 N_DIGITS = 7           # every magic number is exactly 7 digits
 WRAP = ([], [])        # --chat: the template's ids before and after a user message (chat_wrap)
 

@@ -8,7 +8,7 @@
  * here, each a verbatim copy of the in-tree lines it cites (radiance 1.0.13 d0f639b; the files are
  * unchanged since 1.0.8), with the SAME handles and the SAME operands -- the stock wiring, including `w.h` (= the model's `x`) as the
  * input, because the projector writes its prediction there (notes/arch.md §6, the a_x decision).
- * Every other approximate shape takes the masked path (kva_layer.h), which runs the blocks whole.
+ * Every other approximate shape takes the masked path (ridgefill_layer.h), which runs the blocks whole.
  *
  * Every function assumes that one-sequence prefill step (n_seq_decode == 0, n_seq == 1); the
  * in-tree mixed-step offsets (D, DT) are therefore 0 and dropped. Each block's ops stay contiguous
@@ -17,7 +17,7 @@
 #ifndef QWEN4EXP_FILL_H
 #define QWEN4EXP_FILL_H
 
-namespace qwen4exp_kva {
+namespace qwen4exp_ridgefill {
 
 using namespace rad::arch;
 
@@ -109,6 +109,6 @@ inline void attn_kv(RadCtx* c, const AttnGatedFP8& a, const RadBatch* batch) {
               praw(kvb ? kvb->slot_mapping : nullptr, RAD_I32, T), kv_cache(a.kv, a.layer));
 }
 
-}  /* namespace qwen4exp_kva */
+}  /* namespace qwen4exp_ridgefill */
 
 #endif /* QWEN4EXP_FILL_H */

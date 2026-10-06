@@ -1,22 +1,22 @@
-# radiance-kva -- KVA / RidgeFill for radiance's Qwen4-Exp (Qwen3.8-Flash-Next), as plugins.
+# radiance-ridgefill -- RidgeFill for radiance's Qwen4-Exp (Qwen3.8-Flash-Next), as plugins.
 #
-#   arch/     qwen4exp_fp8.so, plugin name qwen4exp_kva: the in-tree Qwen4-Exp plugin #included and
+#   arch/     qwen4exp_fp8.so, plugin name qwen4exp_ridgefill: the in-tree Qwen4-Exp plugin #included and
 #             shadowed by FILE NAME on $RADIANCE_HOME (PLAN D1, D2)
-#   kernels/  kva.so, the three new ops (another lane's directory; added when it exists)
+#   kernels/  ridgefill.so, the three new ops (another lane's directory; added when it exists)
 #   tests/    host-only tests (`ctest -LE gpu`)
 #
 # Build: README.md. The two inputs are an installed radiance (CMAKE_PREFIX_PATH) and a source
 # checkout of the SAME radiance (RADIANCE_SRC), because the arch plugin compiles the in-tree
 # qwen4exp_fp8.cpp, which radiance does not install.
 cmake_minimum_required(VERSION 3.21)
-project(radiance_kva LANGUAGES CXX)
+project(radiance_ridgefill LANGUAGES CXX)
 
 # Where `cmake --install` puts the plugins: a $RADIANCE_HOME inside this repo (git-ignored), put in
 # front of the installation's home at run time. Set BEFORE find_package, whose config would
 # otherwise default it to the installed radiance's own home -- and an install there would replace
 # the in-tree qwen4exp_fp8.so instead of shadowing it.
 set(RAD_PLUGIN_INSTALL_HOME "${CMAKE_CURRENT_SOURCE_DIR}/home" CACHE PATH
-    "the \$RADIANCE_HOME the KVA plugins install under")
+    "the \$RADIANCE_HOME the RidgeFill plugins install under")
 
 set(RAD_WITH_HIP "AUTO" CACHE STRING
     "ON | OFF | AUTO -- compile kernels/'s device rows (AUTO: when the installed radiance has HIP)")
@@ -46,30 +46,30 @@ if(NOT RADIANCE_SRC OR NOT EXISTS "${RADIANCE_SRC}/arch/qwen4exp_fp8/qwen4exp_fp
     "RADIANCE_SRC='${RADIANCE_SRC}' is not a radiance source checkout (no "
     "arch/qwen4exp_fp8/qwen4exp_fp8.cpp). Pass -DRADIANCE_SRC=<checkout at the installed version>.")
 endif()
-file(STRINGS "${RADIANCE_SRC}/CMakeLists.txt" _kva_proj REGEX "^project\\(radiance VERSION ")
-string(REGEX MATCH "VERSION ([0-9]+\\.[0-9]+\\.[0-9]+)" _kva_m "${_kva_proj}")
+file(STRINGS "${RADIANCE_SRC}/CMakeLists.txt" _ridgefill_proj REGEX "^project\\(radiance VERSION ")
+string(REGEX MATCH "VERSION ([0-9]+\\.[0-9]+\\.[0-9]+)" _ridgefill_m "${_ridgefill_proj}")
 set(RADIANCE_SRC_VERSION "${CMAKE_MATCH_1}")
 if(NOT RADIANCE_SRC_VERSION)
   message(FATAL_ERROR "could not read project(radiance VERSION ...) from ${RADIANCE_SRC}/CMakeLists.txt")
 endif()
 
-get_filename_component(_kva_prefix "${RADIANCE_INCLUDE_DIR}/../.." ABSOLUTE)
-set(_kva_engine "${_kva_prefix}/bin/radiance")
-if(EXISTS "${_kva_engine}")
-  file(STRINGS "${_kva_engine}" _kva_versions REGEX "^[0-9]+\\.[0-9]+\\.[0-9]+$")
-  if(NOT RADIANCE_SRC_VERSION IN_LIST _kva_versions)
+get_filename_component(_ridgefill_prefix "${RADIANCE_INCLUDE_DIR}/../.." ABSOLUTE)
+set(_ridgefill_engine "${_ridgefill_prefix}/bin/radiance")
+if(EXISTS "${_ridgefill_engine}")
+  file(STRINGS "${_ridgefill_engine}" _ridgefill_versions REGEX "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+  if(NOT RADIANCE_SRC_VERSION IN_LIST _ridgefill_versions)
     message(FATAL_ERROR
       "RADIANCE_SRC is radiance ${RADIANCE_SRC_VERSION} and the installed radiance is not: "
-      "${_kva_engine} carries version string(s) '${_kva_versions}'. Check RADIANCE_SRC out at the "
+      "${_ridgefill_engine} carries version string(s) '${_ridgefill_versions}'. Check RADIANCE_SRC out at the "
       "installed release, or point CMAKE_PREFIX_PATH at an install of ${RADIANCE_SRC_VERSION}.")
   endif()
-  message(STATUS "radiance ${RADIANCE_SRC_VERSION}: RADIANCE_SRC and ${_kva_engine} agree")
+  message(STATUS "radiance ${RADIANCE_SRC_VERSION}: RADIANCE_SRC and ${_ridgefill_engine} agree")
 else()
-  message(STATUS "radiance release check SKIPPED: ${_kva_engine} does not exist (headers only); "
+  message(STATUS "radiance release check SKIPPED: ${_ridgefill_engine} does not exist (headers only); "
                  "the header check below still runs")
 endif()
 
-function(kva_require_same installed source)
+function(ridgefill_require_same installed source)
   set(have "")
   if(EXISTS "${installed}")
     file(SHA256 "${installed}" have)
@@ -83,13 +83,13 @@ function(kva_require_same installed source)
       "release, unmodified.")
   endif()
 endfunction()
-file(GLOB _kva_abi RELATIVE "${RADIANCE_SRC}/abi" "${RADIANCE_SRC}/abi/*.h")
-file(GLOB _kva_arch RELATIVE "${RADIANCE_SRC}/arch/common" "${RADIANCE_SRC}/arch/common/*.h")
-foreach(_h IN LISTS _kva_abi)
-  kva_require_same("${RADIANCE_INCLUDE_DIR}/${_h}" "${RADIANCE_SRC}/abi/${_h}")
+file(GLOB _ridgefill_abi RELATIVE "${RADIANCE_SRC}/abi" "${RADIANCE_SRC}/abi/*.h")
+file(GLOB _ridgefill_arch RELATIVE "${RADIANCE_SRC}/arch/common" "${RADIANCE_SRC}/arch/common/*.h")
+foreach(_h IN LISTS _ridgefill_abi)
+  ridgefill_require_same("${RADIANCE_INCLUDE_DIR}/${_h}" "${RADIANCE_SRC}/abi/${_h}")
 endforeach()
-foreach(_h IN LISTS _kva_arch)
-  kva_require_same("${RADIANCE_INCLUDE_DIR}/arch/${_h}" "${RADIANCE_SRC}/arch/common/${_h}")
+foreach(_h IN LISTS _ridgefill_arch)
+  ridgefill_require_same("${RADIANCE_INCLUDE_DIR}/arch/${_h}" "${RADIANCE_SRC}/arch/common/${_h}")
 endforeach()
 
 # ---------------------------------------------------------------- device code
@@ -108,7 +108,7 @@ if(RAD_HIP_FOUND)
   endif()
   enable_language(HIP)
 endif()
-message(STATUS "radiance-kva: device rows ${RAD_HIP_FOUND}, GPU targets '${RAD_GPU_TARGETS}', "
+message(STATUS "radiance-ridgefill: device rows ${RAD_HIP_FOUND}, GPU targets '${RAD_GPU_TARGETS}', "
                "installs into ${RAD_PLUGIN_INSTALL_HOME}")
 
 enable_testing()

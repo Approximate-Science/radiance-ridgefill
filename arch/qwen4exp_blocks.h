@@ -3,12 +3,12 @@
  * into the last sequence's scan. Verbatim copies of the in-tree blocks' step() pieces, cited per
  * function; the blocks they copy are unchanged from radiance 1.0.8 (140987f) through 1.0.13 (d0f639b),
  * so the citations hold for both, and the static oracle compares them issue for issue. The core's
- * layer drivers (kva_layer.h) call them; nothing here names the projector.
+ * layer drivers (ridgefill_layer.h) call them; nothing here names the projector.
  */
 #ifndef QWEN4EXP_BLOCKS_H
 #define QWEN4EXP_BLOCKS_H
 
-namespace qwen4exp_kva {
+namespace qwen4exp_ridgefill {
 
 using namespace rad::arch;
 
@@ -17,7 +17,7 @@ using namespace rad::arch;
  * zeroed at admission); `apply` at the bulk end adds alpha*C (times rho in quality) and records the
  * scale. ND only in quality (rho = 1 in speed). `bounds` on the masked path: a step whose last
  * sequence has no bulk row leaves the correction as it was (notes/impl.md §1). */
-inline void correct(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li, rad_op op,
+inline void correct(RadCtx* c, const RidgeFill& k, const qwen4exp_fp8::Model& m, int64_t li, rad_op op,
                     const RadBatch* batch, bool masked) {
     if (!op) return;
     const int L = (int)li;
@@ -31,8 +31,8 @@ inline void correct(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64
 }
 
 /* The decay sums of the rows the mask approximated, per head, over rows [s, rows) of the step
- * (kva_rho_update; s = bounds[0] on the device). */
-inline void decay_sums(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li,
+ * (ridgefill_rho_update; s = bounds[0] on the device). */
+inline void decay_sums(RadCtx* c, const RidgeFill& k, const qwen4exp_fp8::Model& m, int64_t li,
                        const RadBatch* batch, int64_t rows) {
     const rad_op op = k.op_rho[(size_t)li];
     if (!op) return;
@@ -42,9 +42,9 @@ inline void decay_sums(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, in
                 last_slot(batch, k.kv_rho), brows(k.b_bounds, 1));
 }
 
-/* Layer li's state slot of sequence `seq` of the step, copied by kva_state_read into the plugin's
+/* Layer li's state slot of sequence `seq` of the step, copied by ridgefill_state_read into the plugin's
  * buffer and appended to `out` on the host. Debug: synchronises. */
-inline bool copy_state(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li,
+inline bool copy_state(RadCtx* c, const RidgeFill& k, const qwen4exp_fp8::Model& m, int64_t li,
                        const RadBatch* batch, int64_t seq, std::vector<float>* out) {
     const GdnFP8::Config& g = m.gcfg;
     const int64_t n = g.n_head_v * g.head_v * g.head_k;
@@ -53,13 +53,13 @@ inline bool copy_state(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, in
     const size_t at = out->size();
     out->resize(at + (size_t)n);
     if (dump_read(c, out->data() + at, rad_buf_ptr(c, k.b_state), n * 4)) return true;
-    std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE_STATE: device read failed\n");
+    std::fprintf(stderr, "radiance: qwen4exp_ridgefill: RADIANCE_RIDGEFILL_CAPTURE_STATE: device read failed\n");
     out->resize(at);
     return false;
 }
 
-/* RADIANCE_KVA_CAPTURE_STATE: layer li's state slot of this step's one sequence. */
-inline void read_state(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li,
+/* RADIANCE_RIDGEFILL_CAPTURE_STATE: layer li's state slot of this step's one sequence. */
+inline void read_state(RadCtx* c, const RidgeFill& k, const qwen4exp_fp8::Model& m, int64_t li,
                        const RadBatch* batch, StateDump* sd) {
     if (!sd || !k.op_state_read) return;
     if (copy_state(c, k, m, li, batch, batch->n_seq - 1, &sd->data)) sd->layers.push_back((int)li);
@@ -131,7 +131,7 @@ inline void gdn_prefill_front(RadCtx* c, const GdnFP8& d, const RadBatch* batch,
 /* The prefill half's scans with the last sequence corrected (PLAN-FIX §4, DD-C): the other prefill
  * sequences as stock; then the last one -- split at the bulk end (scan [s, b), rho, apply, scan
  * [b, e)) or, for a whole bulk chunk and for STRADDLE=end, one scan with rho and apply after it. */
-inline void gdn_prefill_scans(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li,
+inline void gdn_prefill_scans(RadCtx* c, const RidgeFill& k, const qwen4exp_fp8::Model& m, int64_t li,
                               const RadBatch* batch, const Pass& p, StateDump* sd, int64_t D) {
     const GdnFP8& d = m.layers[(size_t)li].gdn;
     const RadKVGroupBatch* st = kv_batch(batch, d.kv_state);
@@ -153,7 +153,7 @@ inline void gdn_prefill_scans(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model
 
 /* GdnFP8::step (rad_block_gdn_fp8.h:397-514) with the last sequence's scan corrected. Its block
  * input is normed by the caller (ext_in, check_fill), so there is no norm here. */
-inline void gdn_masked(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li,
+inline void gdn_masked(RadCtx* c, const RidgeFill& k, const qwen4exp_fp8::Model& m, int64_t li,
                        const RadBatch* batch, const Pass& p, StateDump* sd) {
     const GdnFP8& d = m.layers[(size_t)li].gdn;
     const int64_t T = batch->n_tok, v_dim = d.cfg.v_dim(), conv_dim = d.cfg.conv_dim();
@@ -200,7 +200,7 @@ inline void gdn_tail_rows(RadCtx* c, const GdnFP8& d, int64_t T, int64_t r0) {
 
 /* The delta net of a straddling chunk: projections, conv window and the scans over every row (the
  * state needs them all), split at b around the correction; the output for the tail rows only. */
-inline void gdn_straddle(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li,
+inline void gdn_straddle(RadCtx* c, const RidgeFill& k, const qwen4exp_fp8::Model& m, int64_t li,
                          const RadBatch* batch, const Pass& p, StateDump* sd) {
     const GdnFP8& d = m.layers[(size_t)li].gdn;
     gdn_project(c, d, batch->n_tok);
@@ -246,7 +246,7 @@ inline void attn_rows(RadCtx* c, const qwen4exp_fp8::Layer& l, const RadBatch* b
  * in-tree decode half for the decoders (rad_block_gdn_fp8.h:450-475; it writes their normed, quantised
  * output itself), the corrected scan of the one prefill sequence, and the output projection for the
  * decoder rows alone. */
-inline void gdn_decoders(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, int64_t li,
+inline void gdn_decoders(RadCtx* c, const RidgeFill& k, const qwen4exp_fp8::Model& m, int64_t li,
                          const RadBatch* batch, const Pass& p, StateDump* sd) {
     const GdnFP8& d = m.layers[(size_t)li].gdn;
     int64_t D = 0, DT = 0;
@@ -259,6 +259,6 @@ inline void gdn_decoders(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m, 
     gdn_out_rows(c, d, batch->n_tok, 0, DT);
 }
 
-}  /* namespace qwen4exp_kva */
+}  /* namespace qwen4exp_ridgefill */
 
 #endif /* QWEN4EXP_BLOCKS_H */

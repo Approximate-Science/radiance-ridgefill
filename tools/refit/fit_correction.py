@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Stage 6 correction refit (R43): C_L = mean over approximate chunk ends of (S_exact - S_pred) per late delta-net
 layer and TP rank, from capture.py's filed state captures of an exact run and a speed run of the same prompts, written
-in b0/st_hook.py's fit format so tools/kva_sidecar.py --names refit --st reads it unchanged.
+in b0/st_hook.py's fit format so tools/ridgefill_sidecar.py --names refit --st reads it unchanged.
 
   fit_correction.py --exact DIR --pred DIR --out DIR [--min-count 50] [--min-prompts 13] [--shipped R0.pt R1.pt]
 
@@ -10,9 +10,9 @@ position + hash of its ids, i.e. the same prompt and chunk), the same rank and t
 record must be an `off`-mode, non-approximate one. Both are the state slot after that chunk (the speed one before any
 correction apply: capture_state copies between the scan and the apply, notes/arch.md). Exact-run records with no
 approximate partner (the tail chunks) are not used.
-Output (per rank r): <out>/kva-radiance-s<S>-st.rank<r>.pt = {"sum": {L: f32 [H_local, V, K]}, "count": {L: n}} with
+Output (per rank r): <out>/ridgefill-radiance-s<S>-st.rank<r>.pt = {"sum": {L: f32 [H_local, V, K]}, "count": {L: n}} with
 H_local the rank's contiguous value heads [r*H_local, (r+1)*H_local) (checked against each record's "heads"), so
-kva_sidecar's cat(rank0, rank1) is the model's head order. Sums are accumulated in f64 and stored f32.
+ridgefill_sidecar's cat(rank0, rank1) is the model's head order. Sums are accumulated in f64 and stored f32.
 report-radiance-st.json: prompts, chunk ends per layer, and per layer: the relative state error |S_exact - S_pred| /
 |S_exact|, the in-sample share of the error's energy the constant removes (n |C|^2 / sum |d|^2), and, with --shipped,
 the cosine between the refit and the shipped C (each rank's heads).
@@ -106,7 +106,7 @@ def main(argv=None):
         c = r["sum"] / n
         energy = (n * c.square().flatten(1).sum(1) / r["dd"]).tolist()
         rel = (r["dd"] / r["ss"]).sqrt().tolist()
-        path = out / f"kva-radiance-s{split}-st.rank{rank}.pt"
+        path = out / f"ridgefill-radiance-s{split}-st.rank{rank}.pt"
         torch.save({"sum": {L: r["sum"][i].float().contiguous() for i, L in enumerate(r["layers"])},
                     "count": {L: n for L in r["layers"]}}, path)
         info = dict(file=path.name, chunk_ends=n, prompts=sorted(r["prompts"]),

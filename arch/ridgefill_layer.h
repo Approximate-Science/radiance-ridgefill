@@ -1,18 +1,18 @@
-/* kva_layer.h -- one late layer of an approximate pass: the masked layer (PLAN-FIX §3, §4, §8) and
+/* ridgefill_layer.h -- one late layer of an approximate pass: the masked layer (PLAN-FIX §3, §4, §8) and
  * the lean fill (the pure all-bulk case). The blocks' own issues and the correction spliced into them
- * are the adapter's (its conn / late_block / ffn hooks, kva_adapter.h); what stays here is the
+ * are the adapter's (its conn / late_block / ffn hooks, ridgefill_adapter.h); what stays here is the
  * projection, the ring and the drivers that order them.
  *
  * THE MASKED LAYER runs every in-tree op over all n_tok rows with the stock handles and lets the
  * DEVICE decide which rows use the projection: the connection read writes the exact block input for
- * every row, kva_select overwrites the rows the mask marks with the projected input and its codes,
+ * every row, ridgefill_select overwrites the rows the mask marks with the projected input and its codes,
  * the block runs whole, and the MoE drops the marked rows' routing slots. Decode rows and every
  * other sequence are therefore computed exactly as stock computes them, at stock GEMM shapes.
  */
-#ifndef KVA_LAYER_H
-#define KVA_LAYER_H
+#ifndef RIDGEFILL_LAYER_H
+#define RIDGEFILL_LAYER_H
 
-namespace kva {
+namespace ridgefill {
 
 using namespace rad::arch;
 
@@ -38,7 +38,7 @@ inline RadOperand last_slot(const RadBatch* batch, rad_kvgroup g) {
  * lane 0 first. Each copy overlaps the rest of the layer after its projector (attention or the delta net,
  * the MoE). A second slot would let it overlap the GEMM too, for one more block of VRAM a card, which every
  * request pays in resident experts (notes/stagee.md §12-§14). */
-inline void ring_copy(RadCtx* c, const Kva& k, int64_t li) {
+inline void ring_copy(RadCtx* c, const RidgeFill& k, int64_t li) {
     rad_lane_join(c, 0, 1);
     rad_lane(c, 1);
     RAD_ISSUE_N(c, k.op_ring, k.ring_src[(size_t)li].rows, k.ring_src[(size_t)li], k.ring_dst[(size_t)li]);
@@ -46,13 +46,13 @@ inline void ring_copy(RadCtx* c, const Kva& k, int64_t li) {
 }
 
 /* Before block li's GEMM: lane 0 waits for its copy. Nothing without the ring. */
-inline void ring_wait(RadCtx* c, const Kva& k) {
+inline void ring_wait(RadCtx* c, const RidgeFill& k) {
     if (k.op_ring) rad_lane_join(c, 1, 0);
 }
 
 /* After block li's last reader (its GEMM, and the bias add on the int8 path): block li + 1's copy into the
  * same slot -- after the last layer, the final map's blocks (MTP). */
-inline void ring_after(RadCtx* c, const Kva& k, int64_t li) {
+inline void ring_after(RadCtx* c, const RidgeFill& k, int64_t li) {
     if (k.op_ring && li + 1 < k.ring_end) ring_copy(c, k, li + 1);
 }
 
@@ -60,7 +60,7 @@ inline void ring_after(RadCtx* c, const Kva& k, int64_t li) {
  * with an int8 folder (R79) the stream's int8 codes, the int8 GEMM and the bias. Every late layer
  * projects the SAME rows of the same stream (h_S on the masked path; b_h's bulk rows, which nothing
  * writes, on the lean and straddle paths), so the codes are made once a pass, at layer S. */
-inline void project_rows(RadCtx* c, const Kva& k, int64_t li, rad_buf src, int64_t r0, int64_t rows,
+inline void project_rows(RadCtx* c, const RidgeFill& k, int64_t li, rad_buf src, int64_t r0, int64_t rows,
                          int64_t wide, RadOperand dst) {
     const size_t L = (size_t)li;
     ring_wait(c, k);
@@ -81,9 +81,9 @@ inline void project_rows(RadCtx* c, const Kva& k, int64_t li, rad_buf src, int64
 
 /* The projected block input for the bulk superset [s_lb, b): the projector over the layer-S stream
  * h_S, its codes from the plugin's own quantiser (never re-quantised from bf16, so exact rows keep
- * the connection read's bytes), then kva_select puts the marked rows over `x` and its codes. */
-inline void project_masked(RadCtx* c, const Kva& k, int64_t li, const Pass& p, int64_t T) {
-    const KvaAdapter& a = k.ad;
+ * the connection read's bytes), then ridgefill_select puts the marked rows over `x` and its codes. */
+inline void project_masked(RadCtx* c, const RidgeFill& k, int64_t li, const Pass& p, int64_t T) {
+    const RidgeFillAdapter& a = k.ad;
     const int64_t r0 = p.s_lb, rows = p.b - p.s_lb, n = a.n_embd;
     /* int8 without the MTP map keeps no h_S: the codes are made at layer S from b_h, which still holds the
      * layer-S stream there (its connection write comes after this), and every later layer reads the codes */
@@ -101,9 +101,9 @@ inline void project_masked(RadCtx* c, const Kva& k, int64_t li, const Pass& p, i
  * late_block / ffn hooks) with the projection selected in after the connection read, the recurrent
  * block's last sequence corrected, and the FFN's bulk-row slots dropped. Plumb declares no projector
  * and no drop: it is the stock layer through the same path. */
-inline void masked_layer(RadCtx* c, const Kva& k, int64_t li, const RadBatch* batch, const Pass& p,
+inline void masked_layer(RadCtx* c, const RidgeFill& k, int64_t li, const RadBatch* batch, const Pass& p,
                          StateDump* sd) {
-    const KvaAdapter& a = k.ad;
+    const RidgeFillAdapter& a = k.ad;
     const int64_t T = batch->n_tok;
     a.conn(c, li, false, false, T, 0, T);
     if (k.op_select) project_masked(c, k, li, p, T);
@@ -119,8 +119,8 @@ inline void masked_layer(RadCtx* c, const Kva& k, int64_t li, const RadBatch* ba
 /* The bulk rows' block input, lean style: the projector over the layer-S stream rows [0, b) -- b_h's
  * bulk rows stay that stream, since only the tail rows are written from here on -- into `x` and its
  * codes. */
-inline void project_bulk(RadCtx* c, const Kva& k, int64_t li, int64_t b) {
-    const KvaAdapter& a = k.ad;
+inline void project_bulk(RadCtx* c, const RidgeFill& k, int64_t li, int64_t b) {
+    const RidgeFillAdapter& a = k.ad;
     const int64_t n = a.n_embd;
     project_rows(c, k, li, a.buf_stream, 0, b, a.wide, brows(a.buf_x, b));
     if (k.quant.op)
@@ -133,9 +133,9 @@ inline void project_bulk(RadCtx* c, const Kva& k, int64_t li, int64_t b) {
  * output, connection write, feed-forward read, FFN and write -- issued over that row range by the
  * adapter's hooks with the in-tree helpers' own r0/rows. Nothing reads a bulk row's late block output,
  * so none is computed. */
-inline void straddle_layer(RadCtx* c, const Kva& k, int64_t li, const RadBatch* batch, const Pass& p,
+inline void straddle_layer(RadCtx* c, const RidgeFill& k, int64_t li, const RadBatch* batch, const Pass& p,
                            StateDump* sd) {
-    const KvaAdapter& a = k.ad;
+    const RidgeFillAdapter& a = k.ad;
     const int64_t T = batch->n_tok, r0 = p.b, rows = T - p.b;
     a.conn(c, li, false, false, T, r0, rows);
     project_bulk(c, k, li, p.b);
@@ -151,8 +151,8 @@ inline void straddle_layer(RadCtx* c, const Kva& k, int64_t li, const RadBatch* 
 /* The bulk rows' block input [r0, T), lean style: the projector over the layer-S stream (b_h's rows
  * there stay that stream: only the decoder rows are written from here on) into `x` and its codes --
  * through project_rows, so the ring and an int8 folder serve this path as every other. */
-inline void project_beside(RadCtx* c, const Kva& k, int64_t li, int64_t r0, int64_t T) {
-    const KvaAdapter& a = k.ad;
+inline void project_beside(RadCtx* c, const RidgeFill& k, int64_t li, int64_t r0, int64_t T) {
+    const RidgeFillAdapter& a = k.ad;
     const int64_t rows = T - r0, n = a.n_embd;
     project_rows(c, k, li, a.buf_stream, r0, rows, a.wide, brow_slice(a.buf_x, r0, rows, n));
     if (k.quant.op)
@@ -165,9 +165,9 @@ inline void project_beside(RadCtx* c, const Kva& k, int64_t li, int64_t r0, int6
  * read/write, block, feed-forward read, MoE, write -- with the in-tree helpers' own r0/rows. The
  * decoders' dense GEMMs run at M = DT, as in a decode-only step, so their bytes may differ from a
  * 2,048-row step's within ident.sh's ksplit-from-M class. Nothing reads a bulk row's late output. */
-inline void decoders_layer(RadCtx* c, const Kva& k, int64_t li, const RadBatch* batch, const Pass& p,
+inline void decoders_layer(RadCtx* c, const RidgeFill& k, int64_t li, const RadBatch* batch, const Pass& p,
                            StateDump* sd) {
-    const KvaAdapter& a = k.ad;
+    const RidgeFillAdapter& a = k.ad;
     int64_t D = 0, DT = 0;
     batch_split(batch, &D, &DT);
     const int64_t T = batch->n_tok;
@@ -183,14 +183,14 @@ inline void decoders_layer(RadCtx* c, const Kva& k, int64_t li, const RadBatch* 
 /* ---------------------------------------------------------------- the lean fill */
 
 /* The projector writes the block input `x` from the stream entering layer S, for every row. */
-inline void project(RadCtx* c, const Kva& k, int64_t li, int64_t T) {
+inline void project(RadCtx* c, const RidgeFill& k, int64_t li, int64_t T) {
     project_rows(c, k, li, k.ad.buf_stream, 0, T, k.ad.wide, brows(k.ad.buf_x, T));
 }
 
 /* x's codes, as the connection read would have written them: QuantFP8::step without its
  * matvec-only row guard, because an int8 linear always reads the codes. */
-inline void quantise(RadCtx* c, const Kva& k, int64_t T) {
-    const KvaAdapter& a = k.ad;
+inline void quantise(RadCtx* c, const RidgeFill& k, int64_t T) {
+    const RidgeFillAdapter& a = k.ad;
     const int64_t n = a.n_embd;
     if (k.quant.op)
         RAD_ISSUE(c, k.quant.op, brow_slice(a.buf_x, 0, T, n), brow_slice(a.buf_x_q, 0, T, n),
@@ -200,7 +200,7 @@ inline void quantise(RadCtx* c, const Kva& k, int64_t T) {
 /* A LEAN late layer (speed, every row bulk): the projection and its codes, then only the
  * cache-writing pieces. No connection read or write and no MoE: `b_h` stays the layer-S stream for
  * every projector. */
-inline void fill_layer(RadCtx* c, const Kva& k, int64_t li, const RadBatch* batch, const Pass& p,
+inline void fill_layer(RadCtx* c, const RidgeFill& k, int64_t li, const RadBatch* batch, const Pass& p,
                        StateDump* sd) {
     const int64_t T = batch->n_tok;
     project(c, k, li, T);
@@ -208,6 +208,6 @@ inline void fill_layer(RadCtx* c, const Kva& k, int64_t li, const RadBatch* batc
     k.ad.late_block(c, k, li, batch, p, sd, PATH_LEAN, 0, T);
 }
 
-}  /* namespace kva */
+}  /* namespace ridgefill */
 
-#endif /* KVA_LAYER_H */
+#endif /* RIDGEFILL_LAYER_H */

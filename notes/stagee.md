@@ -4,7 +4,7 @@ Worker: account-B Opus 5.5, worktree `radiance-kva-wt-e`, branch `stage-e` off `
 re-run). radiance `140987f` (v1.0.8), read only. Plan: `fix-246/HANDOVER-FIX.md` §6, `PLAN-FIX.md` §6.4, §14-§17 and
 "DECISIONS RECORDED", `PACKAGING.md`, `REFUTATION-3-selfload.md` §2.2, `REQUIREMENTS-FIX.md` R77-R80 (+ v1 R85-R91).
 Model: the PUBLISHED file `~/models/rad/qwen3.8-next-flash-fp8-iq4r-moe.rad` (sha256 `0af5e962…4d20`, never written);
-projector `~/models/rad/projector/` by discovery unless a row says `RADIANCE_KVA_PROJECTOR`. Boot
+projector `~/models/rad/projector/` by discovery unless a row says `RADIANCE_RIDGEFILL_PROJECTOR`. Boot
 `75e3e39b-cc5b-49de-8087-a4791f372a92`. Image `stilldeadcode/radiance:1.0.8`, `RK_FLAGS` of `scripts/common.sh`
 (`--gpu-headroom-mib 3072`). Every engine arm under `flock gpu.lock`; scripts in `evidence/stagee/scripts/`.
 
@@ -27,15 +27,15 @@ projector `~/models/rad/projector/` by discovery unless a row says `RADIANCE_KVA
 
 | commit | what |
 |---|---|
-| `915494a` | kva.so: `kva_gemm_nt_q` = libr4d's int8 `gemm_nt_q` rows (dtype `i8a8`: `gemm_i8a8_nt_m16`, `gemm_i8a8_tiled`) forwarded with b / b_scale as IN operands, **layout/relayout/unrelayout hooks kept** (the engine consults a row's hooks only for WEIGHT operands -- `rad_builder.cpp:510-545`, `ctx.cpp:470-490`, `oracle.cpp:463` -- so they are inert here, and they are what the arch calls at load). Device only: libref's int8 row reads canonical planes, the operands are stored ones. bf16 forward unchanged (first row, same name). |
-| `ab3f57a` | arch: an int8 folder (manifest `"projector": {"dtype": "i8"}`), `arch/kva_int8.h` finds kva.so's `kva_gemm_nt_q` rows in the loaded objects and relayouts each map's canonical planes through their hooks before the per-rank upload (all rows must describe the same stored bytes, else refused by name); `project_rows` (kva_layer.h) replaces the three projector issue sites: bf16 = the old issue, int8 = `quant_act_i8g` over the layer-S stream ONCE a pass (at layer S; every late layer projects the same rows), then per layer `kva_gemm_nt_q` + the in-tree row-broadcast `add` for the bias. Host placement + int8 = serving stock, said by name (the ring moves bf16 rows). |
-| `d8f19eb` | `tools/kva_projector.py int8 --from <bf16 folder> --out <dir>`: i8*bf16[1x128] (the container trunk's own encoding: absmax/127 per 128 of a row, bf16 scale, codes half-to-even against the ROUNDED scale), canonical planes only; other files copied byte for byte; the source manifest's sha256 recorded. |
+| `915494a` | ridgefill.so: `ridgefill_gemm_nt_q` = libr4d's int8 `gemm_nt_q` rows (dtype `i8a8`: `gemm_i8a8_nt_m16`, `gemm_i8a8_tiled`) forwarded with b / b_scale as IN operands, **layout/relayout/unrelayout hooks kept** (the engine consults a row's hooks only for WEIGHT operands -- `rad_builder.cpp:510-545`, `ctx.cpp:470-490`, `oracle.cpp:463` -- so they are inert here, and they are what the arch calls at load). Device only: libref's int8 row reads canonical planes, the operands are stored ones. bf16 forward unchanged (first row, same name). |
+| `ab3f57a` | arch: an int8 folder (manifest `"projector": {"dtype": "i8"}`), `arch/ridgefill_int8.h` finds ridgefill.so's `ridgefill_gemm_nt_q` rows in the loaded objects and relayouts each map's canonical planes through their hooks before the per-rank upload (all rows must describe the same stored bytes, else refused by name); `project_rows` (ridgefill_layer.h) replaces the three projector issue sites: bf16 = the old issue, int8 = `quant_act_i8g` over the layer-S stream ONCE a pass (at layer S; every late layer projects the same rows), then per layer `ridgefill_gemm_nt_q` + the in-tree row-broadcast `add` for the bias. Host placement + int8 = serving stock, said by name (the ring moves bf16 rows). |
+| `d8f19eb` | `tools/ridgefill_projector.py int8 --from <bf16 folder> --out <dir>`: i8*bf16[1x128] (the container trunk's own encoding: absmax/127 per 128 of a row, bf16 scale, codes half-to-even against the ROUNDED scale), canonical planes only; other files copied byte for byte; the source manifest's sha256 recorded. |
 | `255fad6` | R87 static TP4 cases; `scripts/ident_long.sh` (R89's instrument) |
 
 **The int8 folder** `data/projector-qwen38fn-int8` (from `~/models/rad/projector`, i.e. data/projector-qwen38fn):
 29 files, 698,753,818 B (0.651 GiB; bf16 folder 1.228 GiB); 24 maps, worst |w − dequant| = 0.39% of a map's
-max |w|; kva.json sha256 `5b699e27e88d…85ae`; 0644. Built in 5.8 s. Selected with
-`RADIANCE_KVA_PROJECTOR=<folder>` (the switch; defaults unchanged).
+max |w|; ridgefill.json sha256 `5b699e27e88d…85ae`; 0644. Built in 5.8 s. Selected with
+`RADIANCE_RIDGEFILL_PROJECTOR=<folder>` (the switch; defaults unchanged).
 
 ## 2. Static results (HIP build in radiance-build, `ctest -LE gpu` 3/3)
 - `arch_static_test`: 52 cases, 1,148,836 checks, all ok. New: `an_int8_folder_uploads_its_maps_in_the_gemms_stored_form`
@@ -45,7 +45,7 @@ max |w|; kva.json sha256 `5b699e27e88d…85ae`; 0644. Built in 5.8 s. Selected w
   (graph == stock), `an_int8_folder_without_one_agreed_stored_form_is_refused_by_name` (no row; rows that disagree;
   dtype i4 = cannot run → stock). TP4 added to off == in-tree, raw-operand head slices (12 a rank), straddle issues.
 - `kernel_test host` (libr4d + libref preloaded): `int8_forward_is_libr4ds_int8_rows_with_their_hooks` ok; alone:
-  no `kva_gemm_nt_q` row. pytest `tests/test_kva_projector.py` 8 passed (2 new: the rounding rule, the folder).
+  no `ridgefill_gemm_nt_q` row. pytest `tests/test_ridgefill_projector.py` 8 passed (2 new: the rounding rule, the folder).
 - Mutants (scratch copy, `evidence/stagee/scripts/mutate_int8.py`, output `evidence/stagee/mutate_int8.out`): 9/9
   caught -- I1 quantise every layer, I2 no bias, I3 scales at the codes' offset (caught only after the s_lb 65 case
   was added), I4 canonical planes uploaded, I5 int8 + host allowed, I6 disagreeing rows accepted, I7 bias before the
@@ -53,17 +53,17 @@ max |w|; kva.json sha256 `5b699e27e88d…85ae`; 0644. Built in 5.8 s. Selected w
 
 ## R91 -- external draft model: REFUSED BY THE ENGINE, by name (no plugin claim)
 `docker run stilldeadcode/radiance:1.0.8 --model … --tp 2 --draft-model /models/draft` with the plugin home and
-`RADIANCE_KVA=quality` (no GPU attached; it fails at flag parsing, before any plugin loads), exit 2
+`RADIANCE_RIDGEFILL=quality` (no GPU attached; it fails at flag parsing, before any plugin loads), exit 2
 (`evidence/stagee/r91/draft-model.log`):
 `E --draft-model is not implemented. This engine loads its drafter from the model container, not from a second one:
 merge it at conversion time with rad-convert --draft-model DIR and pass the container to --model. An MTP head that
 ships inside the target checkpoint needs neither flag.` (radiance `core/config.cpp:415-430`).
 
 ## 3. Session e1 -- what the projector's VRAM costs a request (R80 / R77 / R78), 2026-10-05 11:46-14:22Z
-Home `data/home-7ec3603` (arch d877e61f…, kva.so e73dc71b… = A′'s code), published model, projector by discovery,
+Home `data/home-7ec3603` (arch d877e61f…, ridgefill.so e73dc71b… = A′'s code), published model, projector by discovery,
 boot 75e3e39b…, RK_FLAGS (headroom 3072), `--max-num-seqs 8`, `--debug-placement`. Quality ON servers (T 2048).
 Warmed TTFT (A.1's protocol: one RK_REPS=2 pass of 1K/2K/4K/8K discarded, then RK_REPS=7, median of the last 5;
-rounds a+b pooled where both exist). **held** = `RADIANCE_KVA_FORCE_SPLIT=2048` (b = n_tok − 2048 ≤ 0 on every pass:
+rounds a+b pooled where both exist). **held** = `RADIANCE_RIDGEFILL_FORCE_SPLIT=2048` (b = n_tok − 2048 ≤ 0 on every pass:
 the projector is loaded and EVERY pass runs the stock step -- what a request that is not approximated pays, i.e. an
 OFF request on a Stage F server). Logs/JSON `evidence/stagee/e1/`, table `evidence/stagee/scripts/table.py e1`.
 
@@ -133,7 +133,7 @@ boot), window 2 = settled. Labbook HE-dec-vram-slots / HE-dec-host-alloc registe
 ## 5. The int8 device leg (R79's oracle) -- green after a bound fix
 First run (e2/try1/kernel-gpu.log): 2 of 5 runs over a 2-bf16-ulp bound (worst 1.47x) on outputs the 80 f32 block
 sums cancel toward zero. Bound now 2 ulp + 2^-9 × RMS (5b991e1); re-run on card 0000:13:00.0
-(evidence/stagee/devleg-green.log): `kva_gemm_nt_q_r4d_gemm_i8a8_nt_m16` M 1 / 64 and `_tiled` M 1 / 64 / 2048 vs
+(evidence/stagee/devleg-green.log): `ridgefill_gemm_nt_q_r4d_gemm_i8a8_nt_m16` M 1 / 64 and `_tiled` M 1 / 64 / 2048 vs
 libref's gemm_nt_q on canonical planes, 0 of 5.57 M outputs over, worst 0.80 of the bound. A negative control
 (canonical scale plane fed un-relaid) is built in /tmp/stagee-mut/neg but NOT yet run (needs a quiet GPU slot).
 
@@ -174,22 +174,22 @@ the pinned pool -- and the plugin has no budget ABI at declare to choose safely 
 trade it removes: vram ON TTFT 6% / 10% faster than host at 16K / 32K (A′ R148); settled decode equal (§4); the
 stock-pass prefill penalty equal for both (§3).
 Work list (in order, after the held-prefill penalty which stays first):
-1. Delete the vram path and the zero-copy (RING=0) path; `RADIANCE_KVA_PROJ_PLACE` / `RADIANCE_KVA_PROJ_RING` become
+1. Delete the vram path and the zero-copy (RING=0) path; `RADIANCE_RIDGEFILL_PROJ_PLACE` / `RADIANCE_RIDGEFILL_PROJ_RING` become
    retired switches refused by name ("the projector is always streamed from host memory through the staging ring").
 2. int8 THROUGH THE RING: per layer the stored codes + stored scales + bias laid out as rows of `hc·n` bf16 (codes
    1,280 rows, scales 20, bias 1 → 1,301 rows), copied by the same `cast` bf16→bf16 (libr4d `r4d_p2p_copy2d`, a pure
    byte copy -- no value passes through a float), slots 2 × 25.4 MiB; the GEMM's codes/scale/bias = slot offsets.
 3. Option C (correction + row table to host memory) only if it measures free on ON TTFT (paired, warmed).
-4. kva_config.h comments, README, notes: nothing documents vram placement.
+4. ridgefill_config.h comments, README, notes: nothing documents vram placement.
 5. Tests: B's 8192/10 config starts and serves; retired-switch refusals + mutants; off ≡ stock.
 6. Measure int8-ring vs bf16-ring: ON TTFT 9K/16K/32K warmed + paired; bytes a pass and copy time per rank.
 
 ### Ring-only placement: COMMITTED 0003294 (static 51 cases green, 1,124,919 checks); not yet: mutants
 (`evidence/stagee/scripts/mutate_ring.py`, R1-R7), frozen home, engine checks (list below). Was:
-Ring-only placement + int8 through the ring: `arch/kva_config.h` (PLACE/RING retired, refused by name),
-`arch/kva_declare.h` (`decl_ring`, always declared, int8 too), `arch/kva_projector.h` (RowBlock: bf16 [n+1] rows /
+Ring-only placement + int8 through the ring: `arch/ridgefill_config.h` (PLACE/RING retired, refused by name),
+`arch/ridgefill_declare.h` (`decl_ring`, always declared, int8 too), `arch/ridgefill_projector.h` (RowBlock: bf16 [n+1] rows /
 int8 stored codes + scales + bias at the hook's sizes; host block + 2 VRAM slots only; upload key mode × table),
-`arch/kva_declare_masked.h` (int8+host refusal removed), `tests/arch_static_test.cpp` (run_step sets the ring's lanes
+`arch/ridgefill_declare_masked.h` (int8+host refusal removed), `tests/arch_static_test.cpp` (run_step sets the ring's lanes
 and copies aside for the in-tree oracle -- `Run::all` keeps them; raw-operand, host-memory, int8-upload cases check
 the host row blocks' bytes; retired-switch refusals for PLACE/RING; the int8 comparison names ring copies by layer),
 README switch table + "Where the projector lives", folder README template. NEXT: build (`/tmp/stagee-build.sh`) and
@@ -221,7 +221,7 @@ copy counters / RADIANCE_LOG_STEPS on a slow vs fast server, and whether a stock
 (headroom +128 MiB / +1,228 MiB) shows the same slow start.
 
 ## 10. Resume order (written 16:01Z; supersedes §7's list)
-1. Mutants for 0003294: `python3 evidence/stagee/scripts/mutate_ring.py` (R1-R7) -- compiles: only when no radiance-kva
+1. Mutants for 0003294: `python3 evidence/stagee/scripts/mutate_ring.py` (R1-R7) -- compiles: only when no radiance-ridgefill
    container is up (`/tmp/stagee-gapbuild.sh` pattern) or between my own sessions.
 2. Frozen home of the ring-only commit: `RK_RADIANCE_SRC=~/projects/inference/radiance scripts/frozen_home.sh <HEAD>`.
 3. `flock gpu.lock env HOME_E=<that home> sh evidence/stagee/scripts/ering.sh` (detached, nohup setsid): off ident,
@@ -232,11 +232,11 @@ copy counters / RADIANCE_LOG_STEPS on a slow vs fast server, and whether a stock
    same VRAM taken (headroom +128 / +1,228 MiB), RADIANCE_LOG_STEPS through the transition.
 5. Then e3 (int8 short-prompt table, now ring-only: drop qv arms), e4 (R85/R86/R89/R90), e5 (R88) -- each under ONE lock.
 
-## 11. Resume session S1 (2026-10-05 16:26-16:48Z, one gpu.lock; home `data/home-bc7e742` = ring-only 0003294 + tools; arch 1dad9831…, kva.so f0911d4a…; boot 75e3e39b…; evidence/stagee/ering/)
+## 11. Resume session S1 (2026-10-05 16:26-16:48Z, one gpu.lock; home `data/home-bc7e742` = ring-only 0003294 + tools; arch 1dad9831…, ridgefill.so f0911d4a…; boot 75e3e39b…; evidence/stagee/ering/)
 - Mutants (`mutate_ring.py`, `ering/mutate_ring.out`): **7/7 caught** -- R1/R2 retired switches not refused, R3 int8
   scales at the slot start, R4 int8 bias at the bf16 block's place, R5 canonical codes uploaded, R6 copy into the other
   slot, R7 bias at the codes' start.
-- **off ident = R3** (R6/R7 for the ring-only code). `RADIANCE_KVA_PROJ_PLACE=vram` and `RADIANCE_KVA_PROJ_RING=0`:
+- **off ident = R3** (R6/R7 for the ring-only code). `RADIANCE_RIDGEFILL_PROJ_PLACE=vram` and `RADIANCE_RIDGEFILL_PROJ_RING=0`:
   startup refused, "is retired: the projector is always streamed from host memory through the staging ring …".
 - **bf16 through the ring, rows byte-IDENTICAL to A′'s R144 rows**: plumb FORCE_STREAM, speed T2048, quality T2048,
   quality T2560 (67 approximate steps each).
@@ -290,7 +290,7 @@ stock at headroom 3200 (= the ring's 128 MiB taken away) 1,377.7 → **1,270.4**
 4300 (1,228 MiB, the old vram maps) stuck slow (1,562); quality held int8 stuck slow (1,584); **plumb held (masked
 declare, nothing uploaded) 1,367.5 → 1,251.7 = stock**. So the held +2.6% is VRAM taken from resident experts, not
 declarations or per-pass work: ring 2 × 50 MiB (+ correction 27 + row table 1) + arena h_S 40 + x_P ~16 ≈ 212 MiB bf16.
-**Not accepted as a cost** (Dylan: requests that do not use KVA lose nothing). Built in **6a68dde**:
+**Not accepted as a cost** (Dylan: requests that do not use RidgeFill lose nothing). Built in **6a68dde**:
 - (a) the ring's slot follows the loaded folder's row block: 50 MiB bf16, 25.4 MiB int8 (a bf16 block with the MTP map).
 - (b) each rank's correction heads and the row table live in the host block (zero-copy reads, approximate passes only).
 - (c) instead of half-layer blocks: **one slot**. Layer l+1's copy is issued right after layer l's GEMM (and the int8
@@ -340,14 +340,14 @@ round's stock 9,981 / 19,393 ms; tables: `evidence/stagee/scripts/s4table.py evi
 - **R85 (production wire `--tp-wire wht6`), minimal: GREEN.** plumb rows byte-identical to stock under wht6. Quality
   T2560 paired vs stock under wht6: last 512 −0.0025 [−0.0145, +0.0103]; whole tail (last 2,047) +0.0102 [+0.0025,
   +0.0176] -- the same metric on the exact wire (S1's rows, plumb = stock) is +0.0021 [−0.0126, +0.0157] and +0.0131
-  [+0.0020, +0.0235]: the production wire adds nothing to KVA's cost.
+  [+0.0020, +0.0235]: the production wire adds nothing to RidgeFill's cost.
 - The held-cost controls of this session are in §14.
 
 ## 16. main merged into stage-e (b316096, 2026-10-05 ~19:25Z) -- merge-readiness
 - main had moved (Stage B merged: 185e31b R56's min-bulk-rows gate, 1252304 R53' mixed set, 173dfc4 speed beside
-  decoders, Stage C/F tools, release docs). `git merge-tree` showed one textual conflict (kva_config.h, two switch docs
+  decoders, Stage C/F tools, release docs). `git merge-tree` showed one textual conflict (ridgefill_config.h, two switch docs
   added at the same line: both kept) and the build would have hidden two semantic ones, fixed in the merge:
-  - `RADIANCE_KVA_MIN_BULK_ROWS` defaulted on the placement (`c->place == PLACE_HOST`); host is the only placement
+  - `RADIANCE_RIDGEFILL_MIN_BULK_ROWS` defaulted on the placement (`c->place == PLACE_HOST`); host is the only placement
     here, so the default is 1,024 unconditionally; B's test no longer sets the retired PROJ_PLACE (refused by name).
   - B's speed-beside-decoders path projected with its own bf16-only GEMM after the two-slot `ring_next`: with an
     int8 folder it would have run a bf16 GEMM over int8 codes. It now goes through `project_rows` (`project_beside`),
@@ -360,7 +360,7 @@ round's stock 9,981 / 19,393 ms; tables: `evidence/stagee/scripts/s4table.py evi
 ## 17. S4 correctness half on 5a3115b (2026-10-05 19:58-20:18Z, boot 75e3e39b; evidence/stagee/s4/session.log)
 - Frozen home **5a3115b** (= 6a68dde's reductions + main merged + the static fixes + the straddle line): `ctest -LE gpu`
   3/3 (arch_static with every case: R74 media, straddle downgrade, int8 vs bf16 on the decoders path, B's set). arch
-  14b7d304…, kva.so ff82ad62…. (S4's first attempt at 19:33Z and D1's at 19:34Z aborted at this step on 6a68dde/
+  14b7d304…, ridgefill.so ff82ad62…. (S4's first attempt at 19:33Z and D1's at 19:34Z aborted at this step on 6a68dde/
   b316096: two cases read the pre-6a68dde log text, and the merge's 1,024-row gate sent small static chunks to stock.)
 - **off ident = R3.** **KL rows byte-identical**: bf16 speed and quality T2048 = A′'s R144 rows (one slot, correction
   and row table in host memory, merged code); int8 speed and quality T2048 = S1's int8-ring rows (codes from b_h at
@@ -376,11 +376,11 @@ round's stock 9,981 / 19,393 ms; tables: `evidence/stagee/scripts/s4table.py evi
   `evidence/stagee/INT8_ONLY` exists (Dylan's decision pending).
 
 ## 18. DYLAN'S DECISION (2026-10-05 ~20:30Z, via the orchestrator): int8 is the only projector going forward
-- **Shipped folder: `data/projector-qwen38fn-int8`** (shared data dir, `<radiance-kva>/data/projector-qwen38fn-int8`):
-  28 files, 698,753,818 bytes; manifest `kva.json` sha256 **5b699e27e88d2e27cb546c174c6cb6f257e20433555e96b37fe17781aa3a85ae**
-  (it lists every file's sha256; built by `tools/kva_projector.py int8 --from data/projector-qwen38fn`, d8f19eb).
-  With the MTP final map (Stage D, `tools/kva_projector.py final`): `data/projector-qwen38fn-int8-final`, 29 files,
-  908,489,957 bytes, `kva.json` sha256 fd6f3a28b0b9344117004d04d471be4d1e762991669ea7a3ca7c58b058e7cf1e -- the folder for
+- **Shipped folder: `data/projector-qwen38fn-int8`** (shared data dir, `<radiance-ridgefill>/data/projector-qwen38fn-int8`):
+  28 files, 698,753,818 bytes; manifest `ridgefill.json` sha256 **5b699e27e88d2e27cb546c174c6cb6f257e20433555e96b37fe17781aa3a85ae**
+  (it lists every file's sha256; built by `tools/ridgefill_projector.py int8 --from data/projector-qwen38fn`, d8f19eb).
+  With the MTP final map (Stage D, `tools/ridgefill_projector.py final`): `data/projector-qwen38fn-int8-final`, 29 files,
+  908,489,957 bytes, `ridgefill.json` sha256 fd6f3a28b0b9344117004d04d471be4d1e762991669ea7a3ca7c58b058e7cf1e -- the folder for
   deployments that draft (`--num-speculative-tokens` > 0), if R70 (D1) is green; without MTP the map is not declared.
 - bf16 results already measured stay as history (§11, §15, S4's round a). Every bf16 arm not yet run is dropped: S4's
   bf16-a was stopped mid-sample at 20:31:52Z and held-bf16-b, bf16-b, p-bf16 are stopped at their start (a watcher,
@@ -413,22 +413,22 @@ Settle from /health, settled 2K / 8K, ratio to the same round's stock (exact-a 1
   synchronises every op, so these are each copy alone); the h_S copy is gone with int8.
 
 ### THE DOCUMENTED RESIDUAL (Dylan, 2026-10-05 ~20:55Z: "1% is fine" -- ACCEPTED; no half-layer slot)
-Requests that do not use KVA, int8 folder: **+0.9% (2K) / +1.2% (8K) settled prefill** against stock started in the
+Requests that do not use RidgeFill, int8 folder: **+0.9% (2K) / +1.2% (8K) settled prefill** against stock started in the
 same lock session, matched settled state (settle.py from /health, round a), because the plugin's ~67 MiB of VRAM a
 rank (the ring's one 25.4 MiB slot + 41 MiB of activation buffers) displaces ~63 of ~16,850 resident expert slots. Decode
 is unchanged (R77). The intermittent extra 29.3 MiB the engine sometimes reads as "already held" at startup is not
 the plugin's (a stock boot shows it too) and cannot be removed plugin-side; a boot that reads it serves with ~26 fewer
-slots whatever the mode. README "What a request that does not use KVA pays" carries this paragraph's numbers.
+slots whatever the mode. README "What a request that does not use RidgeFill pays" carries this paragraph's numbers.
 
 ## 20. Merge-readiness (2026-10-05 ~21:25Z) -- stage-e HEAD merges into main (7bbf161) with no conflict
 - Verified builds: 5a3115b (S4: ctest -LE gpu 3/3), 406e746 (= + main with Stage C; D1: 3/3), working tree at 6cc3f5e
   (63 static cases, 1,125,472 checks). Engine on 5a3115b/406e746: off ident = R3; KL rows byte-identical (bf16 = A′,
   int8 = S1); B's 8192/10 starts and serves; R76 green. Mutants 34/34 (+ X5).
 - **For the core/adapter split worker:** the shipped projector is the plain int8 folder (`data/projector-qwen38fn-int8`,
-  kva.json sha256 5b699e27…, §18); `RADIANCE_KVA_FINAL` defaults OFF (6cc3f5e) -- the MTP final map is not in the
+  ridgefill.json sha256 5b699e27…, §18); `RADIANCE_RIDGEFILL_FINAL` defaults OFF (6cc3f5e) -- the MTP final map is not in the
   release, nothing of it is declared/held/streamed unless `=on`; the ring is one slot sized to the folder's block
   (25.4 MiB int8); correction + row table live in the host block; int8 without the final map declares no h_S;
-  `RADIANCE_KVA_MIN_BULK_ROWS` defaults to 1,024 unconditionally (host is the only placement); retired switches
+  `RADIANCE_RIDGEFILL_MIN_BULK_ROWS` defaults to 1,024 unconditionally (host is the only placement); retired switches
   (PROJ_PLACE, PROJ_RING) are refused by name. The static suite runs with the min-bulk gate off (tests/arch_static_test.cpp
   `g_min_bulk_off`) and `Env` restores what it overwrote.
 - Residual accepted (Dylan): +0.9-1.2% held prefill (§18-§19, README). Dropped by decision: R86-R90, R87 TP1 (§13);

@@ -1,4 +1,4 @@
-"""Tests for tools/kva_template.py (KVA chat-template marker snippet).
+"""Tests for tools/ridgefill_template.py (RidgeFill chat-template marker snippet).
 
 Offline verification only — the inference engine is never run:
   * jinja2 stands in for the template engine (with minimal stubs for the
@@ -8,7 +8,7 @@ Offline verification only — the inference engine is never run:
 
 The spec and the container base template are portable fixtures beside this
 file; the operator template and the tokenizer are OPTIONAL machine-local
-inputs, pointed at by `KVA_TEST_OPERATOR_TEMPLATE` and `KVA_TEST_TOKENIZER`.
+inputs, pointed at by `RIDGEFILL_TEST_OPERATOR_TEMPLATE` and `RIDGEFILL_TEST_TOKENIZER`.
 """
 
 import json
@@ -23,13 +23,13 @@ from jinja2 import Environment
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from tools.kva_template import build_block, load_spec  # noqa: E402
+from tools.ridgefill_template import build_block, load_spec  # noqa: E402
 
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
-SPEC_PATH = FIXTURES_DIR / "kva-marker-spec.json"
+SPEC_PATH = FIXTURES_DIR / "ridgefill-marker-spec.json"
 
-OPERATOR_TEMPLATE_ENV = "KVA_TEST_OPERATOR_TEMPLATE"
-TOKENIZER_ENV = "KVA_TEST_TOKENIZER"
+OPERATOR_TEMPLATE_ENV = "RIDGEFILL_TEST_OPERATOR_TEMPLATE"
+TOKENIZER_ENV = "RIDGEFILL_TEST_TOKENIZER"
 _operator_template = os.environ.get(OPERATOR_TEMPLATE_ENV)
 OPERATOR_TEMPLATE = Path(_operator_template) if _operator_template else None
 _tokenizer_dir = os.environ.get(TOKENIZER_ENV)
@@ -62,7 +62,7 @@ def _base_params(names):
     return params
 
 
-TOOL = REPO_ROOT / "tools" / "kva_template.py"
+TOOL = REPO_ROOT / "tools" / "ridgefill_template.py"
 
 SCENARIOS = [
     (
@@ -274,7 +274,7 @@ def test_merge_refuses_a_second_merge(tmp_path):
                    "--out", merged).returncode == 0
     result = run_cli("merge", "--spec", SPEC_PATH, "--base", merged, "--out", twice)
     assert result.returncode != 0
-    assert "already contains a kva marker block" in result.stderr
+    assert "already contains a ridgefill marker block" in result.stderr
     assert str(merged) in result.stderr  # the reason names the file
     assert not twice.exists()
 
@@ -283,7 +283,7 @@ def test_strip_refuses_a_file_without_marker(tmp_path):
     out = tmp_path / "base.jinja"
     result = run_cli("strip", "--merged", BASE_PATHS["container"], "--out", out)
     assert result.returncode != 0
-    assert "no kva marker block to strip" in result.stderr
+    assert "no ridgefill marker block to strip" in result.stderr
     assert str(BASE_PATHS["container"]) in result.stderr
     assert not out.exists()
 
@@ -303,7 +303,7 @@ def test_off_case_renders_byte_identically(env, block, base_name, scenario):
 
 
 # ---------------------------------------------------------------------------
-# Rendering: requests WITH kva="on" get exactly the 64-token marker first
+# Rendering: requests WITH ridgefill="on" get exactly the 64-token marker first
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("base_name", _base_params(BASE_PATHS))
@@ -313,21 +313,21 @@ def test_on_case_renders_marker_plus_base(env, block, spec, base_name, scenario)
     context = dict(messages=messages, add_generation_prompt=add_generation_prompt)
     marker = expected_marker(spec)
     base = render(env, base_source(base_name), **context)
-    on = render(env, merged_source(block, base_name), kva="on", **context)
+    on = render(env, merged_source(block, base_name), ridgefill="on", **context)
     assert on == marker + base  # marker is the very first thing in the prompt
 
 
 def test_block_alone_emits_nothing_when_off(env, block):
     assert render(env, block) == ""
-    assert render(env, block, kva="off") == ""
+    assert render(env, block, ridgefill="off") == ""
     assert render(env, block, messages=[{"role": "user", "content": "hi"}]) == ""
 
 
 @pytest.mark.parametrize(
-    "kva_value", ["off", "ON", "on ", "", 1, True, None], ids=lambda v: repr(v)
+    "ridgefill_value", ["off", "ON", "on ", "", 1, True, None], ids=lambda v: repr(v)
 )
-def test_non_on_switch_values_disable_the_marker(env, block, kva_value):
-    context = dict(messages=SCENARIOS[0][1], add_generation_prompt=True, kva=kva_value)
+def test_non_on_switch_values_disable_the_marker(env, block, ridgefill_value):
+    context = dict(messages=SCENARIOS[0][1], add_generation_prompt=True, ridgefill=ridgefill_value)
     base = render(env, base_source("container"), **context)
     assert render(env, merged_source(block, "container"), **context) == base
 
@@ -353,7 +353,7 @@ def dial_cases(spec):
 @pytest.mark.parametrize("kwarg,value", list(dial_cases(json.loads(SPEC_PATH.read_text()))))
 @needs_tokenizer
 def test_each_dial_value_selects_its_token(env, spec, tokenizer, kwarg, value):
-    context = dict(kva="on", **{kwarg: value})
+    context = dict(ridgefill="on", **{kwarg: value})
     marker = render(env, build_block(spec), **context)
     expected = expected_marker(spec, {kwarg: value})
     assert marker == expected
@@ -362,11 +362,11 @@ def test_each_dial_value_selects_its_token(env, spec, tokenizer, kwarg, value):
 
 
 def test_defaults_used_when_dials_absent(env, spec):
-    with_defaults = render(env, build_block(spec), kva="on")
+    with_defaults = render(env, build_block(spec), ridgefill="on")
     explicit = render(
         env,
         build_block(spec),
-        kva="on",
+        ridgefill="on",
         **{dial["kwarg"]: dial["default"] for dial in spec["dials"]},
     )
     assert with_defaults == explicit == expected_marker(spec)
@@ -377,7 +377,7 @@ def test_defaults_used_when_dials_absent(env, spec):
 )
 def test_unknown_dial_value_suppresses_the_marker(env, block, kwarg):
     context = dict(messages=SCENARIOS[0][1], add_generation_prompt=True,
-                   kva="on", **{kwarg: "not-a-table-value"})
+                   ridgefill="on", **{kwarg: "not-a-table-value"})
     base = render(env, base_source("container"), **context)
     assert render(env, merged_source(block, "container"), **context) == base
 
@@ -386,10 +386,10 @@ def test_unknown_dial_value_suppresses_the_marker(env, block, kwarg):
 def test_numeric_dial_values_match_the_string_tables(env, spec, tokenizer):
     """chat_template_kwargs arrive as JSON: numbers like 0.5 / 2048 must resolve
     via |string to the table keys '0.5' / '2048'."""
-    marker = render(env, build_block(spec), kva="on", kva_alpha=0.5, kva_tail=2048)
-    assert marker == expected_marker(spec, {"kva_alpha": "0.5", "kva_tail": "2048"})
+    marker = render(env, build_block(spec), ridgefill="on", ridgefill_alpha=0.5, ridgefill_tail=2048)
+    assert marker == expected_marker(spec, {"ridgefill_alpha": "0.5", "ridgefill_tail": "2048"})
     ids = tokenizer(marker, add_special_tokens=False)["input_ids"]
-    assert ids == expected_ids(spec, {"kva_alpha": "0.5", "kva_tail": "2048"})
+    assert ids == expected_ids(spec, {"ridgefill_alpha": "0.5", "ridgefill_tail": "2048"})
 
 
 # ---------------------------------------------------------------------------
@@ -423,7 +423,7 @@ def test_spec_with_overlapping_offsets_is_refused(tmp_path):
 
 def test_spec_with_missing_offsets_is_refused(tmp_path):
     def drop_share_dial(spec):
-        spec["dials"] = [d for d in spec["dials"] if d["kwarg"] != "kva_share"]
+        spec["dials"] = [d for d in spec["dials"] if d["kwarg"] != "ridgefill_share"]
 
     assert_refused(tmp_path, drop_share_dial, "missing offset 60")
 

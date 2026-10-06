@@ -1,7 +1,7 @@
 """tools/refit/fit_projector.py end to end on synthetic captures whose block inputs ARE a linear map of the boundary:
 filed -> summed (capture.py acc) -> solved -> written. The refit must recover the map (held-out cosine ~1, far above a
 random "shipped" projector scored on the same rows), write tcc's per-layer layout without `final`, and be readable by
-tools/kva_sidecar.py. Needs KVA_RESEARCH_ROOT; SKIPPED without it."""
+tools/ridgefill_sidecar.py. Needs RIDGEFILL_RESEARCH_ROOT; SKIPPED without it."""
 import argparse
 import json
 import os
@@ -15,7 +15,7 @@ from safetensors.torch import load_file, save_file
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "refit"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "dev"))   # the append route (A')
-pytestmark = pytest.mark.skipif(not os.environ.get("KVA_RESEARCH_ROOT"), reason="KVA_RESEARCH_ROOT not set")
+pytestmark = pytest.mark.skipif(not os.environ.get("RIDGEFILL_RESEARCH_ROOT"), reason="RIDGEFILL_RESEARCH_ROOT not set")
 
 from test_refit_capture import CHUNK, HC, HIDDEN, LAYERS, SPLIT, write_prompt  # noqa: E402
 
@@ -44,7 +44,7 @@ def write_checkpoint(root):
 def test_refit_recovers_a_linear_map_and_beats_a_random_one(tmp_path):
     import capture
     import fit_projector
-    import kva_sidecar
+    import ridgefill_sidecar
     g = torch.Generator().manual_seed(7)
     maps = {L: (torch.randn(HIDDEN, HC * HIDDEN, generator=g) * 0.3, torch.randn(HIDDEN, generator=g)) for L in LAYERS}
     bi_of = lambda L, b: b @ maps[L][0].T + maps[L][1]  # noqa: E731
@@ -70,8 +70,8 @@ def test_refit_recovers_a_linear_map_and_beats_a_random_one(tmp_path):
     assert report["chosen_lambda"] in report["lambdas"]
     assert report["rows"]["raw"] == report["rows"]["chat"] == 12 * (8 * CHUNK // 8)      # 16 rows a document
     assert report["heldout"]["refit"]["bi"] > 0.99 > report["heldout"]["shipped"]["bi"]
-    written = load_file(str(out / f"kva-radiance-s{SPLIT}.safetensors"))
+    written = load_file(str(out / f"ridgefill-radiance-s{SPLIT}.safetensors"))
     assert sorted(written) == [f"layer.{L}" for L in LAYERS]
     assert all(t.dtype == torch.bfloat16 and t.shape == (HIDDEN, HC * HIDDEN + 1) for t in written.values())
-    split, tensors = kva_sidecar.projector_tensors(out / f"kva-radiance-s{SPLIT}.safetensors", "kva.projr")
-    assert split == SPLIT and torch.allclose(tensors[f"kva.projr.{SPLIT}.weight"].float(), maps[SPLIT][0], atol=0.05)
+    split, tensors = ridgefill_sidecar.projector_tensors(out / f"ridgefill-radiance-s{SPLIT}.safetensors", "ridgefill.projr")
+    assert split == SPLIT and torch.allclose(tensors[f"ridgefill.projr.{SPLIT}.weight"].float(), maps[SPLIT][0], atol=0.05)

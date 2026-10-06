@@ -2,13 +2,13 @@
 
 Three layers, matching what the tool itself can prove offline:
 
-  * the suite (what `suite` writes: shapes, kva variants, spellings);
+  * the suite (what `suite` writes: shapes, ridgefill variants, spellings);
   * the pure diff rules on hand-made id lists (no server, no tokenizer);
   * an end-to-end run against a FAKE radiance server whose /tokenize renders
     a chat template through jinja2 and tokenises with the real served-model
-    tokenizer named by $KVA_TEST_TOKENIZER (the served model's tokenizer directory)
+    tokenizer named by $RIDGEFILL_TEST_TOKENIZER (the served model's tokenizer directory)
     when it is present (the whole layer is skipped when it is not, naming
-    that path; KVA_TEST_TOKENIZER overrides it). The fake is a stand-in: the
+    that path; RIDGEFILL_TEST_TOKENIZER overrides it). The fake is a stand-in: the
     engine renders with minja, so the real R119 check runs `render` against
     two real servers; here the fake only exercises the plumbing end to end.
 
@@ -31,17 +31,17 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
 
-from tools.kva_template import build_block, load_spec  # noqa: E402
+from tools.ridgefill_template import build_block, load_spec  # noqa: E402
 import tools.template_identity as ti  # noqa: E402
 
 TOOL = REPO_ROOT / "tools" / "template_identity.py"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
-SPEC_PATH = FIXTURES / "kva-marker-spec.json"
+SPEC_PATH = FIXTURES / "ridgefill-marker-spec.json"
 BASE_TEMPLATE_PATH = FIXTURES / "container-chat-template.jinja"
 
 # The tokenizer the engine is stated to serve (the shipped model's own); the
 # whole fake-server layer skips without it, naming the path.
-TOKENIZER_ENV = "KVA_TEST_TOKENIZER"
+TOKENIZER_ENV = "RIDGEFILL_TEST_TOKENIZER"
 TOKENIZER_DIR = Path(os.environ.get(TOKENIZER_ENV, ""))
 needs_tokenizer = pytest.mark.skipif(
     not os.environ.get(TOKENIZER_ENV) or not TOKENIZER_DIR.is_dir(),
@@ -93,7 +93,7 @@ def suite_from_cli(tmp_path):
 # The suite
 # ---------------------------------------------------------------------------
 
-def test_suite_covers_every_shape_in_every_kva_variant(tmp_path):
+def test_suite_covers_every_shape_in_every_ridgefill_variant(tmp_path):
     path, suite = suite_from_cli(tmp_path)
     assert suite["endpoint"] == "/tokenize"
     assert set(suite["usage"]) == {"render_stock", "render_merged", "diff", "replyfmt"}
@@ -115,29 +115,29 @@ def test_suite_covers_every_shape_in_every_kva_variant(tmp_path):
         else:
             assert request["add_generation_prompt"] is True
 
-        # the kva variant folded into the shape's own kwargs
+        # the ridgefill variant folded into the shape's own kwargs
         kwargs = request.get("chat_template_kwargs") or {}
         if suffix == "":
-            assert "kva" not in kwargs                 # no kva kwarg at all
+            assert "ridgefill" not in kwargs                 # no ridgefill kwarg at all
             assert case["expect"] == "identical"
         elif suffix == "__on_invalid":
-            # the shape's own kwargs (if any) ride along under the kva ones
-            assert kwargs["kva"] == "on" and kwargs["kva_share"] == "0.75"
+            # the shape's own kwargs (if any) ride along under the ridgefill ones
+            assert kwargs["ridgefill"] == "on" and kwargs["ridgefill_share"] == "0.75"
             assert case["expect"] == "identical"      # unknown dial keeps it off
         else:
-            assert kwargs["kva"] == "on"
+            assert kwargs["ridgefill"] == "on"
             assert case["expect"] == "marker"
         if suffix == "__on_share":
-            assert kwargs["kva_share"] == "0.50"
+            assert kwargs["ridgefill_share"] == "0.50"
         if suffix == "__on_alpha":
-            assert kwargs["kva_alpha"] == "0.5"
+            assert kwargs["ridgefill_alpha"] == "0.5"
         if suffix == "__on_tail":
-            assert kwargs["kva_tail"] == "2560"
+            assert kwargs["ridgefill_tail"] == "2560"
 
-    # the shape's own kwargs ride along under the kva variants
+    # the shape's own kwargs ride along under the ridgefill variants
     kwargs = by_name["enable_thinking_false__on_share"]["request"]["chat_template_kwargs"]
-    assert kwargs == {"enable_thinking": False, "kva": "on", "kva_share": "0.50"}
-    assert "kva" not in (by_name["enable_thinking_true"]["request"].get("chat_template_kwargs") or {})
+    assert kwargs == {"enable_thinking": False, "ridgefill": "on", "ridgefill_share": "0.50"}
+    assert "ridgefill" not in (by_name["enable_thinking_true"]["request"].get("chat_template_kwargs") or {})
 
     # the shape fields the task names
     assert by_name["thinking_budget"]["request"]["thinking_budget"] == 2048
@@ -185,10 +185,10 @@ def expected_ids(spec, dial_values=None):
 
 
 def test_resolve_marker_matches_the_spec_tables(spec):
-    ids, reason = ti.resolve_marker(spec, {"kva": "on"})
+    ids, reason = ti.resolve_marker(spec, {"ridgefill": "on"})
     assert ids == expected_ids(spec)                     # dials at their defaults
-    assert "kva_share=0.25" in reason and "kva_alpha=1.0" in reason \
-        and "kva_tail=2048" in reason
+    assert "ridgefill_share=0.25" in reason and "ridgefill_alpha=1.0" in reason \
+        and "ridgefill_tail=2048" in reason
     assert ids[0] == 248051 and ids[1] == 248052        # the pattern, pinned
     assert ids[63] == 248044                            # the end token
     assert ids[60:63] == [248050, 248047, 248050]       # share .25, alpha 1.0, tail 2048
@@ -196,11 +196,11 @@ def test_resolve_marker_matches_the_spec_tables(spec):
 
 
 @pytest.mark.parametrize("kwargs,dial_values", [
-    ({"kva": "on", "kva_share": "0.50"}, {"kva_share": "0.50"}),
-    ({"kva": "on", "kva_alpha": "0.5"}, {"kva_alpha": "0.5"}),
-    ({"kva": "on", "kva_tail": "2560"}, {"kva_tail": "2560"}),
-    ({"kva": "on", "kva_share": "0.10", "kva_alpha": "0", "kva_tail": "3072"},
-     {"kva_share": "0.10", "kva_alpha": "0", "kva_tail": "3072"}),
+    ({"ridgefill": "on", "ridgefill_share": "0.50"}, {"ridgefill_share": "0.50"}),
+    ({"ridgefill": "on", "ridgefill_alpha": "0.5"}, {"ridgefill_alpha": "0.5"}),
+    ({"ridgefill": "on", "ridgefill_tail": "2560"}, {"ridgefill_tail": "2560"}),
+    ({"ridgefill": "on", "ridgefill_share": "0.10", "ridgefill_alpha": "0", "ridgefill_tail": "3072"},
+     {"ridgefill_share": "0.10", "ridgefill_alpha": "0", "ridgefill_tail": "3072"}),
 ])
 def test_resolve_marker_resolves_every_dial(spec, kwargs, dial_values):
     ids, reason = ti.resolve_marker(spec, kwargs)
@@ -210,13 +210,13 @@ def test_resolve_marker_resolves_every_dial(spec, kwargs, dial_values):
 
 
 @pytest.mark.parametrize("kwargs,reason_part", [
-    ({}, "no `kva` kwarg"),
-    ({"kva": "off"}, "not the on value"),
-    ({"kva": True}, "not the on value"),                # a boolean is not the string "on"
-    ({"enable_thinking": False}, "no `kva` kwarg"),
-    ({"kva": "on", "kva_share": "0.75"}, "not one of its table's values"),
-    ({"kva": "on", "kva_share": 0.5}, "not one of its table's values"),
-    ({"kva": "on", "kva_alpha": "nine"}, "not one of its table's values"),
+    ({}, "no `ridgefill` kwarg"),
+    ({"ridgefill": "off"}, "not the on value"),
+    ({"ridgefill": True}, "not the on value"),                # a boolean is not the string "on"
+    ({"enable_thinking": False}, "no `ridgefill` kwarg"),
+    ({"ridgefill": "on", "ridgefill_share": "0.75"}, "not one of its table's values"),
+    ({"ridgefill": "on", "ridgefill_share": 0.5}, "not one of its table's values"),
+    ({"ridgefill": "on", "ridgefill_alpha": "nine"}, "not one of its table's values"),
 ])
 def test_resolve_marker_off_cases_name_the_reason(spec, kwargs, reason_part):
     ids, reason = ti.resolve_marker(spec, kwargs)
@@ -261,14 +261,14 @@ def run_diff(tmp_path, stock_cases, merged_cases):
 def test_diff_passes_when_the_rules_hold(tmp_path, spec):
     marker = expected_ids(spec)
     stock = [ids_case("plain", "identical", {}, [10, 11, 12]),
-             ids_case("on", "marker", {"kva": "on"}, [10, 11, 12]),
-             ids_case("tail", "marker", {"kva": "on", "kva_tail": "2560"}, [20, 21]),
-             ids_case("invalid", "identical", {"kva": "on", "kva_share": "0.75"}, [30, 31])]
+             ids_case("on", "marker", {"ridgefill": "on"}, [10, 11, 12]),
+             ids_case("tail", "marker", {"ridgefill": "on", "ridgefill_tail": "2560"}, [20, 21]),
+             ids_case("invalid", "identical", {"ridgefill": "on", "ridgefill_share": "0.75"}, [30, 31])]
     merged = [ids_case("plain", "identical", {}, [10, 11, 12]),
-              ids_case("on", "marker", {"kva": "on"}, marker + [10, 11, 12]),
-              ids_case("tail", "marker", {"kva": "on", "kva_tail": "2560"},
-                       expected_ids(spec, {"kva_tail": "2560"}) + [20, 21]),
-              ids_case("invalid", "identical", {"kva": "on", "kva_share": "0.75"}, [30, 31])]
+              ids_case("on", "marker", {"ridgefill": "on"}, marker + [10, 11, 12]),
+              ids_case("tail", "marker", {"ridgefill": "on", "ridgefill_tail": "2560"},
+                       expected_ids(spec, {"ridgefill_tail": "2560"}) + [20, 21]),
+              ids_case("invalid", "identical", {"ridgefill": "on", "ridgefill_share": "0.75"}, [30, 31])]
     result = run_diff(tmp_path, stock, merged)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "4 cases: 4 pass, 0 fail" in result.stdout
@@ -277,15 +277,15 @@ def test_diff_passes_when_the_rules_hold(tmp_path, spec):
 
 def test_diff_fails_when_the_marker_is_missing(tmp_path, spec):
     marker = expected_ids(spec)
-    stock = [ids_case("on", "marker", {"kva": "on"}, [10, 11])]
-    merged = [ids_case("on", "marker", {"kva": "on"}, [10, 11])]   # no marker rendered
+    stock = [ids_case("on", "marker", {"ridgefill": "on"}, [10, 11])]
+    merged = [ids_case("on", "marker", {"ridgefill": "on"}, [10, 11])]   # no marker rendered
     result = run_diff(tmp_path, stock, merged)
     assert result.returncode == 1
     assert "the 64 marker ids are missing" in result.stdout
     assert "1 fail" in result.stdout
 
 
-def test_diff_fails_when_a_request_without_kva_gains_the_marker(tmp_path, spec):
+def test_diff_fails_when_a_request_without_ridgefill_gains_the_marker(tmp_path, spec):
     marker = expected_ids(spec)
     stock = [ids_case("plain", "identical", {}, [10, 11])]
     merged = [ids_case("plain", "identical", {}, marker + [10, 11])]
@@ -295,9 +295,9 @@ def test_diff_fails_when_a_request_without_kva_gains_the_marker(tmp_path, spec):
 
 
 def test_diff_fails_when_a_dial_token_is_wrong(tmp_path, spec):
-    stock = [ids_case("tail", "marker", {"kva": "on", "kva_tail": "2560"}, [10])]
+    stock = [ids_case("tail", "marker", {"ridgefill": "on", "ridgefill_tail": "2560"}, [10])]
     # the default marker: offset 62 carries the 2048 token, not 2560's
-    merged = [ids_case("tail", "marker", {"kva": "on", "kva_tail": "2560"},
+    merged = [ids_case("tail", "marker", {"ridgefill": "on", "ridgefill_tail": "2560"},
                        expected_ids(spec) + [10])]
     result = run_diff(tmp_path, stock, merged)
     assert result.returncode == 1
@@ -305,8 +305,8 @@ def test_diff_fails_when_a_dial_token_is_wrong(tmp_path, spec):
 
 
 def test_diff_fails_when_the_base_part_differs(tmp_path, spec):
-    stock = [ids_case("on", "marker", {"kva": "on"}, [10, 11, 12])]
-    merged = [ids_case("on", "marker", {"kva": "on"},
+    stock = [ids_case("on", "marker", {"ridgefill": "on"}, [10, 11, 12])]
+    merged = [ids_case("on", "marker", {"ridgefill": "on"},
                        expected_ids(spec) + [10, 99, 12])]
     result = run_diff(tmp_path, stock, merged)
     assert result.returncode == 1
@@ -328,20 +328,20 @@ def test_diff_fails_when_identical_ids_differ(tmp_path):
 
 def test_diff_resolves_numeric_dial_values(tmp_path, spec):
     # JSON numbers resolve through |string: 2560 -> "2560" matches; 0.5 -> "0.5"
-    # does not match kva_share's "0.50", so the request stays off
-    stock = [ids_case("tail", "marker", {"kva": "on", "kva_tail": 2560}, [10]),
-             ids_case("share", "identical", {"kva": "on", "kva_share": 0.5}, [20])]
-    merged = [ids_case("tail", "marker", {"kva": "on", "kva_tail": 2560},
-                       expected_ids(spec, {"kva_tail": "2560"}) + [10]),
-              ids_case("share", "identical", {"kva": "on", "kva_share": 0.5}, [20])]
+    # does not match ridgefill_share's "0.50", so the request stays off
+    stock = [ids_case("tail", "marker", {"ridgefill": "on", "ridgefill_tail": 2560}, [10]),
+             ids_case("share", "identical", {"ridgefill": "on", "ridgefill_share": 0.5}, [20])]
+    merged = [ids_case("tail", "marker", {"ridgefill": "on", "ridgefill_tail": 2560},
+                       expected_ids(spec, {"ridgefill_tail": "2560"}) + [10]),
+              ids_case("share", "identical", {"ridgefill": "on", "ridgefill_share": 0.5}, [20])]
     result = run_diff(tmp_path, stock, merged)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_diff_fails_when_the_suites_expectation_is_wrong(tmp_path, spec):
     # the suite declares a marker, but the dial value keeps the request off
-    stock = [ids_case("bad", "marker", {"kva": "on", "kva_share": "0.75"}, [10])]
-    merged = [ids_case("bad", "marker", {"kva": "on", "kva_share": "0.75"}, [10])]
+    stock = [ids_case("bad", "marker", {"ridgefill": "on", "ridgefill_share": "0.75"}, [10])]
+    merged = [ids_case("bad", "marker", {"ridgefill": "on", "ridgefill_share": "0.75"}, [10])]
     result = run_diff(tmp_path, stock, merged)
     assert result.returncode == 1
     assert "declares 'marker'" in result.stdout
@@ -552,7 +552,7 @@ def test_end_to_end_stock_vs_merged_over_the_fake_servers(tmp_path, spec, tokeni
     assert on == marker + stock_by_name["system_user__on"]["tokens"]
     assert on[:64] == marker
     assert merged_by_name["system_user__on_share"]["tokens"][:64] == \
-        expected_ids(spec, {"kva_share": "0.50"})
+        expected_ids(spec, {"ridgefill_share": "0.50"})
     assert merged_by_name["long_special_token_text__on_invalid"]["tokens"] == \
         stock_by_name["long_special_token_text__on_invalid"]["tokens"]
 
@@ -562,7 +562,7 @@ def test_end_to_end_a_broken_gate_is_caught(tmp_path, spec, tokenizer):
     """A gate that fires on every request is exactly the regression `diff`
     exists to catch: the cases without the kwarg gain the marker."""
     base = BASE_TEMPLATE_PATH.read_text(encoding="utf-8")
-    broken_gate = build_block(spec).replace("kva is defined and kva == 'on'", "true")
+    broken_gate = build_block(spec).replace("ridgefill is defined and ridgefill == 'on'", "true")
     suite_path, _ = suite_from_cli(tmp_path)
     with FakeRadiance(base, tokenizer).serve() as stock_url, \
             FakeRadiance(broken_gate + base, tokenizer).serve() as merged_url:
@@ -571,7 +571,7 @@ def test_end_to_end_a_broken_gate_is_caught(tmp_path, spec, tokenizer):
         result = run_cli("diff", "--stock", stock_file, "--merged", merged_file,
                          "--spec", SPEC_PATH)
     assert result.returncode == 1
-    # every no-kva case gained the marker; the invalid-dial cases stay off even
-    # with a broken switch, because the dial checks (_kva_ok_*) are in the gate
+    # every no-ridgefill case gained the marker; the invalid-dial cases stay off even
+    # with a broken switch, because the dial checks (_ridgefill_ok_*) are in the gate
     assert "55 pass, 11 fail (11 identical, 44 marker+64)" in result.stdout
     assert "no marker was expected" in result.stdout

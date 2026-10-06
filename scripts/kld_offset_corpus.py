@@ -20,7 +20,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
 import kld_corpus as K  # noqa: E402
-import kva_rules as R  # noqa: E402
+import ridgefill_rules as R  # noqa: E402
 
 
 def main(argv=None):

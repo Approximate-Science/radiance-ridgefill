@@ -1,39 +1,39 @@
-/* kva_declare_masked.h -- the masked path's declarations (PLAN-FIX §3, §6.1), the selected set's
- * declare, and the debug captures' declarations. Included by kva_declare.h only.
+/* ridgefill_declare_masked.h -- the masked path's declarations (PLAN-FIX §3, §6.1), the selected set's
+ * declare, and the debug captures' declarations. Included by ridgefill_declare.h only.
  */
-#ifndef KVA_DECLARE_MASKED_H
-#define KVA_DECLARE_MASKED_H
+#ifndef RIDGEFILL_DECLARE_MASKED_H
+#define RIDGEFILL_DECLARE_MASKED_H
 
-namespace kva {
+namespace ridgefill {
 
-/* THE STAGER PROBES' BUFFERS (notes/impl.md §2): expert offsets that are all zero -- kva_mask writes
+/* THE STAGER PROBES' BUFFERS (notes/impl.md §2): expert offsets that are all zero -- ridgefill_mask writes
  * them every masked pass -- and the rows a probe's gate-up GEMM writes its zeros into, sized for the
  * widest routed layer. Both take the whole program. */
-static int decl_probes(RadBuilder* b, Kva& k) {
-    const KvaAdapter& a = k.ad;
+static int decl_probes(RadBuilder* b, RidgeFill& k) {
+    const RidgeFillAdapter& a = k.ad;
     if (a.top_k == 0) return RAD_OK;   /* dense: nothing is staged, so nothing to steer */
     k.n_zeros = std::max(a.n_expert + 1, a.top_k);
-    k.b_zeros = decl_b(b, k.nm.f("kva_zero_offsets"), RAD_I32, {k.n_zeros});
-    k.b_probe = decl_b(b, k.nm.f("kva_probe_rows"), RAD_BF16, {a.top_k, 2 * a.n_ff_exp});
+    k.b_zeros = decl_b(b, k.nm.f("ridgefill_zero_offsets"), RAD_I32, {k.n_zeros});
+    k.b_probe = decl_b(b, k.nm.f("ridgefill_probe_rows"), RAD_BF16, {a.top_k, 2 * a.n_ff_exp});
     if (!k.b_zeros || !k.b_probe) return RAD_E_INVAL;
     RAD_ARCH_TRY(rad_buf_concurrent(b, k.b_zeros));
     return rad_buf_concurrent(b, k.b_probe);
 }
 
 /* The projected block input and its codes: the same code pair the connection read writes into `x`
- * (int8 when the trunk is fed int8 codes, E4M3 otherwise, none for a bf16 model), so kva_select can
+ * (int8 when the trunk is fed int8 codes, E4M3 otherwise, none for a bf16 model), so ridgefill_select can
  * copy a projected row's codes over an exact row's and no linear re-quantises anything. */
-static int decl_projected(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
-    const KvaAdapter& a = k.ad;
+static int decl_projected(RadBuilder* b, const RadBuildCtx* ctx, RidgeFill& k) {
+    const RidgeFillAdapter& a = k.ad;
     const int64_t n = a.n_embd, wide = a.wide, max_tok = ctx->max_tok;
     /* h_S, the layer-S stream every projector reads on a masked pass (40 MiB at 2,048 rows, paid by every
      * request in resident experts): not with int8 maps and no MTP map, whose codes are made from b_h at
-     * layer S (kva_layer.h project_masked) */
+     * layer S (ridgefill_layer.h project_masked) */
     if (!k.int8 || k.want_final) {
-        k.b_hs = decl_b(b, k.nm.f("kva_h_stream"), a.act_dtype, {max_tok, wide});
+        k.b_hs = decl_b(b, k.nm.f("ridgefill_h_stream"), a.act_dtype, {max_tok, wide});
         if (!k.b_hs) return RAD_E_INVAL;
     }
-    k.xp.x = decl_b(b, k.nm.f("kva_x_proj"), a.act_dtype, {max_tok, n});
+    k.xp.x = decl_b(b, k.nm.f("ridgefill_x_proj"), a.act_dtype, {max_tok, n});
     if (!k.xp.x) return RAD_E_INVAL;
     if (a.declare_codes) RAD_ARCH_TRY(a.declare_codes(b, ctx, k));
     for (rad_buf h : { k.b_hs, k.xp.x, k.xp.cq(), k.xp.cs(), a.buf_route_ids })
@@ -44,9 +44,9 @@ static int decl_projected(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
     k.op_cast = RAD_OP(b, "cast", RAD_PARAMS(RAD_RANGE("M", 1, max_tok), RAD_INT("n", wide),
                                              RAD_STR("from", a.dtype), RAD_STR("to", a.dtype)),
                        RAD_NOWEIGHTS);
-    k.op_select = RAD_OP(b, "kva_select", RAD_PARAMS(RAD_RANGE("M", 1, max_tok)), RAD_NOWEIGHTS);
+    k.op_select = RAD_OP(b, "ridgefill_select", RAD_PARAMS(RAD_RANGE("M", 1, max_tok)), RAD_NOWEIGHTS);
     if (a.top_k > 0)
-        k.op_drop = RAD_OP(b, "kva_drop_rows",
+        k.op_drop = RAD_OP(b, "ridgefill_drop_rows",
                            RAD_PARAMS(RAD_RANGE("M", 1, max_tok), RAD_INT("top_k", a.top_k)),
                            RAD_NOWEIGHTS);
     return RAD_OK;
@@ -54,13 +54,13 @@ static int decl_projected(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
 
 /* THE MASKED PATH'S DECLARATIONS. Every mode but off: plumb runs the late layers exactly through
  * the same path (mask all 0, no projector), which is what makes it the oracle for the split scan
- * (R47) and the stager probes (R94). `kva_mask`'s mode is the mode's row rule: plumb keeps every
+ * (R47) and the stager probes (R94). `ridgefill_mask`'s mode is the mode's row rule: plumb keeps every
  * row exact, speed approximates the whole window, quality keeps its class (or random/all) rows. */
-static const char* decl_masked(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
+static const char* decl_masked(RadBuilder* b, const RadBuildCtx* ctx, RidgeFill& k) {
     const Config& c = k.cfg;
     const bool project = c.mode != MODE_PLUMB;
-    k.b_mask   = decl_b(b, k.nm.f("kva_mask"), RAD_I32, {ctx->max_tok});
-    k.b_bounds = decl_b(b, k.nm.f("kva_bounds"), RAD_I32, {4});
+    k.b_mask   = decl_b(b, k.nm.f("ridgefill_mask"), RAD_I32, {ctx->max_tok});
+    k.b_bounds = decl_b(b, k.nm.f("ridgefill_bounds"), RAD_I32, {4});
     if (!k.b_mask || !k.b_bounds) return "a buffer";
     for (rad_buf h : { k.b_mask, k.b_bounds })
         if (rad_buf_concurrent(b, h) < 0) return "a buffer";
@@ -70,13 +70,13 @@ static const char* decl_masked(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
                                                      : kRowselNames[c.rowsel];
     const bool scored = !std::strcmp(rule, "class") || !std::strcmp(rule, "random");
     k.mask_scored = scored;
-    k.op_mask = RAD_OP(b, "kva_mask",
+    k.op_mask = RAD_OP(b, "ridgefill_mask",
                        RAD_PARAMS(RAD_RANGE("M", 1, ctx->max_tok), RAD_F64("share", c.share),
                                   RAD_INT("seed", c.seed), RAD_STR("mode", rule)),
                        RAD_NOWEIGHTS);
-    if (!k.op_mask) return "kva_mask";
-    if (project && !k.op_select) return "kva_select";
-    if (project && k.ad.top_k > 0 && !k.op_drop) return "kva_drop_rows";
+    if (!k.op_mask) return "ridgefill_mask";
+    if (project && !k.op_select) return "ridgefill_select";
+    if (project && k.ad.top_k > 0 && !k.op_drop) return "ridgefill_drop_rows";
     if (project && !k.op_cast) return "cast";
     const bool straddle = c.tail_only && c.mode == MODE_SPEED;
     int64_t lacking = -1;
@@ -90,7 +90,7 @@ static const char* decl_masked(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
     k.straddle_layers = straddle && lacking < 0;
     /* Otherwise the downgrade shows only in each step log's path field: say it once, at startup. */
     if (straddle && lacking >= 0)
-        std::fprintf(stderr, "radiance: %s: KVA: late attention layer %lld lacks %s, so speed mode "
+        std::fprintf(stderr, "radiance: %s: RidgeFill: late attention layer %lld lacks %s, so speed mode "
                              "takes the masked path for straddle chunks: slower, same output class\n", g_log_name,
                      (long long)lacking, what);
     return decl_probes(b, k) < 0 ? "a buffer" : nullptr;
@@ -98,11 +98,11 @@ static const char* decl_masked(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
 
 /* The startup line every measurement quotes: the mode and every number the planner and the masked path
  * will read, so a log names the configuration that produced it (rad_note, once per declare). */
-static void note_config(RadBuilder* b, const Kva& k) {
+static void note_config(RadBuilder* b, const RidgeFill& k) {
     const Config& c = k.cfg;
     char rows[24] = "any";
     if (c.stage_rows != INT64_MAX) std::snprintf(rows, sizeof rows, "<= %lld", (long long)c.stage_rows);
-    rad_note(b, "KVA: mode %s from layer %lld, tail %lld, tile %lld; projector %s (%s, streamed from host), correction %s "
+    rad_note(b, "RidgeFill: mode %s from layer %lld, tail %lld, tile %lld; projector %s (%s, streamed from host), correction %s "
                 "(alpha %g), row table %s, rows %s share %g seed %lld; stage %s (exact rows %s), "
                 "approximates >= %lld bulk rows, checkpoint floor %lld, straddle %s%s%s",
              kModeNames[c.mode], (long long)k.split, (long long)c.tail, (long long)k.tile,
@@ -110,38 +110,38 @@ static void note_config(RadBuilder* b, const Kva& k) {
              c.alpha, k.have_rowsel ? kScoreNames[c.rowsel_table] : "absent",
              kRowselNames[c.rowsel], c.share, (long long)c.seed, kStageNames[c.stage],
              rows, (long long)c.min_bulk_rows, (long long)c.ckpt_floor, kStraddleNames[c.straddle],
-             k.out_rows_ok ? "" : "; KL mode serves stock (RADIANCE_KVA_SCORE_BULK unset)",
+             k.out_rows_ok ? "" : "; KL mode serves stock (RADIANCE_RIDGEFILL_SCORE_BULK unset)",
              c.force_split || c.shift_b || c.force_stream || c.mask_step ? "; DEBUG switches set" : "");
 }
 
 /* The gate-only switches, said loudly at declare so no measured run carries one unknowingly. A
  * forced split off the tile is accepted: it is R47's negative control (its bytes must move). */
-static void note_debug(const Kva& k) {
+static void note_debug(const RidgeFill& k) {
     const Config& c = k.cfg;
     if (c.force_split)
-        std::fprintf(stderr, "radiance: %s: DEBUG RADIANCE_KVA_FORCE_SPLIT=%lld: every "
+        std::fprintf(stderr, "radiance: %s: DEBUG RADIANCE_RIDGEFILL_FORCE_SPLIT=%lld: every "
                              "approximate chunk's bulk ends %lld rows before its end%s\n", g_log_name,
                      (long long)c.force_split, (long long)c.force_split,
                      c.force_split % k.tile ? " -- OFF the delta net's tile, a negative control" : "");
     if (c.shift_b)
-        std::fprintf(stderr, "radiance: %s: DEBUG RADIANCE_KVA_SHIFT_B=%lld\n", g_log_name,
+        std::fprintf(stderr, "radiance: %s: DEBUG RADIANCE_RIDGEFILL_SHIFT_B=%lld\n", g_log_name,
                      (long long)c.shift_b);
     if (c.force_stream)
-        std::fprintf(stderr, "radiance: %s: DEBUG RADIANCE_KVA_FORCE_STREAM=1\n", g_log_name);
+        std::fprintf(stderr, "radiance: %s: DEBUG RADIANCE_RIDGEFILL_FORCE_STREAM=1\n", g_log_name);
     if (c.mask_step)
-        std::fprintf(stderr, "radiance: %s: DEBUG RADIANCE_KVA_MASK=all: every row of a "
+        std::fprintf(stderr, "radiance: %s: DEBUG RADIANCE_RIDGEFILL_MASK=all: every row of a "
                              "masked pass before its bulk end is approximated, decoders included -- "
                              "a negative control, never a served configuration\n", g_log_name);
 }
 
-/* What the folder lets this mode run (kva_projector.h): false = serve stock, already said. Plumb
+/* What the folder lets this mode run (ridgefill_projector.h): false = serve stock, already said. Plumb
  * reads no fitted tensor (its mask keeps every row exact) and so holds none. */
-static bool take_folder(RadBuilder* b, const RadModelMeta* meta, Kva& k) {
+static bool take_folder(RadBuilder* b, const RadModelMeta* meta, RidgeFill& k) {
     const Loaded& l = load_folder(meta, b, k.ad);
     const Config& c = k.cfg;
     if (!l.usable) return false;
     if (c.mode == MODE_QUALITY && !tensor(l.folder, kScoreNames[c.rowsel_table])) {
-        std::fprintf(stderr, "radiance: %s: KVA: mode quality selects exact rows from the "
+        std::fprintf(stderr, "radiance: %s: RidgeFill: mode quality selects exact rows from the "
                              "table '%s', and the projector %s holds none; serving stock\n", g_log_name,
                      kScoreNames[c.rowsel_table], l.folder.place.dir.c_str());
         return false;
@@ -155,9 +155,9 @@ static bool take_folder(RadBuilder* b, const RadModelMeta* meta, Kva& k) {
 }
 
 /* This rank's copies (the real declare only) handed to the issue sites. */
-static int take_upload(const RadBuildCtx* ctx, Kva& k) {
+static int take_upload(const RadBuildCtx* ctx, RidgeFill& k) {
     if (!upload_rank(g_loaded, k.ad, k.cfg, ctx->rank, k.want_final)) return RAD_E_DEVICE;
-    const kva::Upload& u = g_upload[ctx->rank];
+    const ridgefill::Upload& u = g_upload[ctx->rank];
     if (k.cfg.mode == MODE_PLUMB) return RAD_OK;
     k.proj_w = u.proj_w;
     k.proj_b = u.proj_b;
@@ -171,13 +171,13 @@ static int take_upload(const RadBuildCtx* ctx, Kva& k) {
     return RAD_OK;
 }
 
-/* DD-A's branch-hazard instrument, the declare half (the issue half and the log: kva_hazard.h). */
+/* DD-A's branch-hazard instrument, the declare half (the issue half and the log: ridgefill_hazard.h). */
 /* One f32 counter a rank, host-mapped so the host reads what the device adds without a copy op.
  * Allocated at the first real declare and kept for the process (4 bytes). */
 static void* g_hazard_dev[MAX_RANKS];
 static float g_hazard_logged[MAX_RANKS];
 
-static int decl_hazard(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
+static int decl_hazard(RadBuilder* b, const RadBuildCtx* ctx, RidgeFill& k) {
     if (k.cfg.mode != MODE_SPEED && k.cfg.mode != MODE_QUALITY) return RAD_OK;
     for (int64_t l = k.split; l < k.ad.n_layer && k.meta_layer < 0; ++l)
         if (!k.ad.full[(size_t)l]) k.meta_layer = (int)l;
@@ -188,9 +188,9 @@ static int decl_hazard(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
     d.n_head_kv = 1;
     d.state_dim[0] = 1;
     d.state_dim[1] = 2;   /* {last approximated position + 1, positions counted below} */
-    k.kv_meta = rad_decl_kv_group(b, k.nm.f("kv_kva_meta"), &d);
+    k.kv_meta = rad_decl_kv_group(b, k.nm.f("kv_ridgefill_meta"), &d);
     if (!k.kv_meta || rad_bind_layer_kv(b, k.meta_layer, k.kv_meta) < 0) return RAD_E_INVAL;
-    k.op_hazard = RAD_OP(b, "kva_hazard", RAD_PARAMS(RAD_RANGE("M", 1, 1)), RAD_NOWEIGHTS);
+    k.op_hazard = RAD_OP(b, "ridgefill_hazard", RAD_PARAMS(RAD_RANGE("M", 1, 1)), RAD_NOWEIGHTS);
     if (!k.op_hazard) return ctx->shape_probe ? RAD_OK : RAD_E_UNSUPPORTED;
     if (!ctx->shape_probe && !g_hazard_dev[ctx->rank]) {
         g_hazard_dev[ctx->rank] = rad_dev_alloc(sizeof(float), RAD_MEM_HOST_MAPPED);
@@ -204,11 +204,11 @@ static int decl_hazard(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
 /* The selected set, its ops and its refusals. Under a sizing declare nothing is refused or copied:
  * the real declare already decided, and its handles are the ones issued. With no usable projector
  * nothing at all is declared: the engine serves the in-tree graph. */
-static int decl_selected(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* ctx, Kva& k) {
+static int decl_selected(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* ctx, RidgeFill& k) {
     const bool probe = ctx->shape_probe != 0;
     if (!take_folder(b, meta, k)) return RAD_OK;
-    /* THE MTP final map (kva_final.h): only when this deployment drafts, the mode projects, the folder holds
-     * it and RADIANCE_KVA_FINAL is on (default off). Decided from declare-time numbers only. */
+    /* THE MTP final map (ridgefill_final.h): only when this deployment drafts, the mode projects, the folder holds
+     * it and RADIANCE_RIDGEFILL_FINAL is on (default off). Decided from declare-time numbers only. */
     k.want_final = ctx->max_spec > 0 && (k.cfg.mode == MODE_SPEED || k.cfg.mode == MODE_QUALITY) &&
                    g_loaded.has_final && k.cfg.final_on;
     k.ring_end = k.ad.n_layer + (k.want_final ? k.ad.wide / k.ad.n_embd : 0);   /* + hc final blocks */
@@ -218,11 +218,11 @@ static int decl_selected(RadBuilder* b, const RadModelMeta* meta, const RadBuild
     if (k.cfg.mode != MODE_PLUMB) RAD_ARCH_TRY(decl_fill(b, ctx, k));
     const char* missing = decl_masked(b, ctx, k);
     if (!missing && k.ad.decl_state_ops) missing = k.ad.decl_state_ops(b, ctx, k);
-    if (!missing && decl_hazard(b, ctx, k) != RAD_OK) missing = "kva_hazard";
+    if (!missing && decl_hazard(b, ctx, k) != RAD_OK) missing = "ridgefill_hazard";
     if (!missing && k.want_final) missing = decl_final(b, ctx, k);
     if (missing && !probe) {
         std::fprintf(stderr, "radiance: %s: mode %s issues '%s' and no kernel library "
-                             "serves it -- kva.so is missing from $RADIANCE_HOME or declines this "
+                             "serves it -- ridgefill.so is missing from $RADIANCE_HOME or declines this "
                              "machine. Refusing rather than serving without it.\n", g_log_name,
                      kModeNames[k.cfg.mode], missing);
         return RAD_E_UNSUPPORTED;
@@ -233,17 +233,17 @@ static int decl_selected(RadBuilder* b, const RadModelMeta* meta, const RadBuild
 }
 
 /* WHERE THE LATE LAYERS START FOR A CAPTURE, which in `off` mode nothing else has asked: the
- * projector folder's split -- what every other mode calls S -- else RADIANCE_KVA_CAPTURE_SPLIT (a
- * capture fits a projector, so there may be no folder yet). Never the container: nothing kva.* is
+ * projector folder's split -- what every other mode calls S -- else RADIANCE_RIDGEFILL_CAPTURE_SPLIT (a
+ * capture fits a projector, so there may be no folder yet). Never the container: nothing ridgefill.* is
  * read from the model file. Declares nothing. */
-static int capture_split(RadBuilder* b, const RadModelMeta* meta, Kva& k) {
+static int capture_split(RadBuilder* b, const RadModelMeta* meta, RidgeFill& k) {
     const Loaded& l = load_folder(meta, b, k.ad);
     k.split = l.usable ? l.split : -1;
-    const char* v = env("RADIANCE_KVA_CAPTURE_SPLIT");
+    const char* v = env("RADIANCE_RIDGEFILL_CAPTURE_SPLIT");
     if (!l.usable && v && !parse_int(v, &k.split)) k.split = -1;
     if (k.split < k.ad.split_lo || k.split >= k.ad.n_layer) {
         std::fprintf(stderr, "radiance: %s: a capture needs the split layer S: there is no "
-                             "usable projector folder and RADIANCE_KVA_CAPTURE_SPLIT is %s\n", g_log_name,
+                             "usable projector folder and RADIANCE_RIDGEFILL_CAPTURE_SPLIT is %s\n", g_log_name,
                      v ? v : "unset");
         return RAD_E_UNSUPPORTED;
     }
@@ -251,26 +251,26 @@ static int capture_split(RadBuilder* b, const RadModelMeta* meta, Kva& k) {
 }
 
 /* THE STATE CAPTURE'S COPY. No ABI call returns a KV-pool pointer (RADIANCE-FACTS §5), so a late
- * layer's slot is copied by kva.so's kva_state_read into this rank's [1, heads, V, K] buffer and
- * read from there. Declared only when RADIANCE_KVA_CAPTURE_STATE is set. */
-static int decl_state_read(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
+ * layer's slot is copied by ridgefill.so's ridgefill_state_read into this rank's [1, heads, V, K] buffer and
+ * read from there. Declared only when RADIANCE_RIDGEFILL_CAPTURE_STATE is set. */
+static int decl_state_read(RadBuilder* b, const RadBuildCtx* ctx, RidgeFill& k) {
     const StateShape& g = k.ad.state;
-    k.b_state = decl_b(b, k.nm.f("kva_state_copy"), RAD_F32, {1, g.n_head, g.sd0, g.sd1});
+    k.b_state = decl_b(b, k.nm.f("ridgefill_state_copy"), RAD_F32, {1, g.n_head, g.sd0, g.sd1});
     if (!k.b_state) return RAD_E_INVAL;
     RAD_ARCH_TRY(rad_buf_concurrent(b, k.b_state));
-    k.op_state_read = rw(b, RAD_OP(b, "kva_state_read",
+    k.op_state_read = rw(b, RAD_OP(b, "ridgefill_state_read",
                                 RAD_PARAMS(RAD_RANGE("M", 1, 1), RAD_INT("n_head", g.n_head),
                                            RAD_INT("sd0", g.sd0), RAD_INT("sd1", g.sd1)),
                                 RAD_NOWEIGHTS), {}, {k.b_state});
     if (!k.op_state_read && !ctx->shape_probe) {
-        std::fprintf(stderr, "radiance: %s: RADIANCE_KVA_CAPTURE_STATE copies the delta-net "
-                             "state with kva_state_read, and no kernel library serves it -- kva.so is "
+        std::fprintf(stderr, "radiance: %s: RADIANCE_RIDGEFILL_CAPTURE_STATE copies the delta-net "
+                             "state with ridgefill_state_read, and no kernel library serves it -- ridgefill.so is "
                              "missing or too old\n", g_log_name);
         return RAD_E_UNSUPPORTED;
     }
     return RAD_OK;
 }
 
-}  /* namespace kva */
+}  /* namespace ridgefill */
 
-#endif /* KVA_DECLARE_MASKED_H */
+#endif /* RIDGEFILL_DECLARE_MASKED_H */

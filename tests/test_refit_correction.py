@@ -1,6 +1,6 @@
 """tools/refit/fit_correction.py on synthetic state captures in the plugin's layout (notes/arch.md "Capture"):
 C = mean(S_exact - S_pred) over matched approximate chunk ends, per rank, in st_hook's format with rank 0's heads
-first after tools/kva_sidecar.py; tail chunks unused; refusals for a missing exact record and for too few chunk ends."""
+first after tools/ridgefill_sidecar.py; tail chunks unused; refusals for a missing exact record and for too few chunk ends."""
 import json
 import sys
 from pathlib import Path
@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "refit"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "dev"))   # the append route (A')
 import fit_correction as FC  # noqa: E402
-import kva_sidecar as K  # noqa: E402
+import ridgefill_sidecar as K  # noqa: E402
 
 LAYERS, HEADS, D = [2, 3], 2, 3          # per rank: 2 heads of a 4-head model, 3 x 3 states
 
@@ -52,11 +52,11 @@ def test_constant_is_the_mean_error_in_st_hook_format(tmp_path):
     exact, pred = stores(tmp_path)
     out = tmp_path / "st"
     FC.main(["--exact", exact, "--pred", pred, "--out", str(out), "--min-count", "3", "--min-prompts", "2"])
-    r0 = torch.load(out / "kva-radiance-s2-st.rank0.pt", weights_only=True)
+    r0 = torch.load(out / "ridgefill-radiance-s2-st.rank0.pt", weights_only=True)
     assert r0["count"] == {2: 3, 3: 3} and torch.allclose(r0["sum"][3], torch.full((HEADS, D, D), 6.0))
-    st = K.correction_tensors(out / "kva-radiance-s2-st.rank0.pt", out / "kva-radiance-s2-st.rank1.pt", 2, "kva.str", None)
-    assert torch.allclose(st["kva.str.2"][:HEADS], torch.full((HEADS, D, D), 2.0))       # rank 0's heads first
-    assert torch.allclose(st["kva.str.2"][HEADS:], torch.full((HEADS, D, D), 20.0))
+    st = K.correction_tensors(out / "ridgefill-radiance-s2-st.rank0.pt", out / "ridgefill-radiance-s2-st.rank1.pt", 2, "ridgefill.str", None)
+    assert torch.allclose(st["ridgefill.str.2"][:HEADS], torch.full((HEADS, D, D), 2.0))       # rank 0's heads first
+    assert torch.allclose(st["ridgefill.str.2"][HEADS:], torch.full((HEADS, D, D), 20.0))
     report = json.loads((out / "report-radiance-st.json").read_text())
     assert report["ranks"]["0"]["chunk_ends"] == 3 and report["ranks"]["0"]["prompts"] == ["a", "b"]
     assert abs(report["ranks"]["0"]["layers"]["2"]["constant_share"] - 12 / 14) < 1e-4    # 3*2^2 / (1+4+9)

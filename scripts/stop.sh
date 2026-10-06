@@ -1,14 +1,14 @@
 #!/bin/sh
-# stop.sh -- stop every radiance-kva-* container and wait until the cards let go of their
+# stop.sh -- stop every radiance-ridgefill-* container and wait until the cards let go of their
 # VRAM, so the next measurement starts from a clean machine (preflight.sh (b) would
 # otherwise fail it, and a number taken next to a half-released card is not a number).
 #
-# USAGE: scripts/stop.sh     (no arguments; stops and removes EVERY radiance-kva-* container)
+# USAGE: scripts/stop.sh     (no arguments; stops and removes EVERY radiance-ridgefill-* container)
 #
 # Env vars:
 #   RK_STOP_TIMEOUT   default 300 s: how long to wait for VRAM to drop
 #   RK_STOP_VRAM_MIB  default 1024: the per-card ceiling, the same threshold preflight.sh
-#                     applies when no radiance-kva container runs
+#                     applies when no radiance-ridgefill container runs
 
 set -eu
 
@@ -16,11 +16,11 @@ set -eu
 : "${RK_STOP_TIMEOUT:=300}"
 : "${RK_STOP_VRAM_MIB:=1024}"
 
-if ! stopped=$(docker ps -aq --filter name=radiance-kva- --format '{{.Names}}' 2>/dev/null); then
+if ! stopped=$(docker ps -aq --filter name=radiance-ridgefill- --format '{{.Names}}' 2>/dev/null); then
     rk_die "docker ps failed: is the docker daemon running?"
 fi
 if [ -z "$stopped" ]; then
-    printf 'stop: no radiance-kva-* container to stop\n'
+    printf 'stop: no radiance-ridgefill-* container to stop\n'
 else
     for c in $stopped; do
         # SIGTERM first with a 60 s grace period (docs/DOCKER.md: the engine finishes its

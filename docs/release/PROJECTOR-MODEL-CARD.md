@@ -3,23 +3,23 @@ license: apache-2.0
 base_model: StillDeadcode/qwen3.8-next-flash-fp8-iq4r-moe
 tags:
   - radiance
-  - kva
+  - ridgefill
   - ridgefill
   - prefill-acceleration
   - qwen3.8-flash-next
 ---
 
-# KVA Projector for Qwen3.8-Flash-Next (INT8)
+# RidgeFill Projector for Qwen3.8-Flash-Next (INT8)
 
 Auxiliary projection maps, recurrent terminal-state corrections, and token
-frequency tables for the Radiance KVA plugin (`qwen4exp_kva`) on
+frequency tables for the Radiance RidgeFill plugin (`qwen4exp_ridgefill`) on
 `StillDeadcode/qwen3.8-next-flash-fp8-iq4r-moe`. The plugin is Apache-2.0; this
 projector package is Apache-2.0.
 
 ## What this folder is (and is not)
 
 - **INT8 only.** The maps are int8 codes plus bf16 scales. The bf16 projector
-  is only the int8 builder's input (`tools/kva_projector.py int8 --from
+  is only the int8 builder's input (`tools/ridgefill_projector.py int8 --from
   <bf16 folder> --out <dir>`); it is not shipped and no release test covers
   bf16 serving.
 - **Not a standalone model.** No language model weights, embeddings, or
@@ -30,30 +30,30 @@ projector package is Apache-2.0.
 ## Use
 
 Download this folder into a `projector/` folder beside the stock model file, and install the
-plugin from [Dyluhn/radiance-kva](https://huggingface.co/Dyluhn/radiance-kva):
+plugin from [Dyluhn/radiance-ridgefill](https://huggingface.co/Dyluhn/radiance-ridgefill):
 
 ```sh
-hf download Dyluhn/radiance-kva-projector-qwen3.8-flash-next-i8 --local-dir <model dir>/projector
+hf download Dyluhn/ridgefill-projector-qwen3.8-flash-next-i8 --local-dir <model dir>/projector
 ```
 
-The plugin finds the folder on its own, checks every file against `kva.json`, and logs
-`KVA: projector … matches …` at startup. Its README covers modes, costs and troubleshooting.
+The plugin finds the folder on its own, checks every file against `ridgefill.json`, and logs
+`RidgeFill: projector … matches …` at startup. Its README covers modes, costs and troubleshooting.
 
 ## Files
 
-`kva.json` (30,385 bytes) lists 27 files, 698,722,493 bytes, with their SHA256 hashes
-(`projector.dtype: "i8"`, layout `i8_row128`, encoding `i8*bf16[1x128]`). `kva.json` SHA256:
+`ridgefill.json` (30,385 bytes) lists 27 files, 698,722,493 bytes, with their SHA256 hashes
+(`projector.dtype: "i8"`, layout `i8_row128`, encoding `i8*bf16[1x128]`). `ridgefill.json` SHA256:
 `8b4fc11340aeeec8560f7973786b8f6c44f555f920f10c06299cb2512a2f6308`. Documentation is not listed,
 so this card can change without affecting the projector.
 
 | File(s) | Contents | Size |
 |---|---|---|
-| `kva.json` | Manifest (format 1): architecture fingerprints, fit metadata, and SHA256 of every file | 30,468 bytes |
+| `ridgefill.json` | Manifest (format 1): architecture fingerprints, fit metadata, and SHA256 of every file | 30,468 bytes |
 | `proj8.L24.safetensors` … `proj8.L47.safetensors` (24 files) | Late-layer maps for layers 24–47. Each: `proj.L.codes` int8 `[2560, 10240]`, `proj.L.scale` bf16 `[2560, 80]`, `proj.L.bias` bf16 `[2560]` | 26,629,416 bytes each |
 | `correction.safetensors` | Recurrent GDN terminal-state corrections `st.L` f32 `[48, 128, 128]` for 18 layers (24–26, 28–30, 32–34, 36–38, 40–42, 44–46) | 56,624,584 bytes |
 | `rowsel.safetensors` | Vocabulary frequency tables `score`, `score_none`, `score_all`, f32 `[248320]` | 2,980,120 bytes |
 | `chat_template.jinja` | Parked per-request marker template (not used by this release) | 11,805 bytes |
-| `README.md` | This model card (not listed in `kva.json`) | — |
+| `README.md` | This model card (not listed in `ridgefill.json`) | — |
 
 ## How the projector was fitted
 
@@ -72,7 +72,7 @@ prompts for the correction) raised held-out cosine by +0.0035 but did not
 change quality (paired NLL difference within noise), so the shipped fit is
 kept.
 
-The int8 conversion (`tools/kva_projector.py int8`): per-128 absmax int8 with
+The int8 conversion (`tools/ridgefill_projector.py int8`): per-128 absmax int8 with
 bf16 scale — each row is stored as int8 codes at absmax/127 per 128 columns
 with a bf16 scale, codes rounded half-to-even against the rounded scale.
 Worst |w − dequant| is 0.39% of a map's max |w| across the 24 maps.
@@ -110,7 +110,7 @@ through the ring. On the release build (radiance 1.0.13's flashnext profile, two
   quantization or anchor differences warn and run.
 - Prompts shorter than T + chunk run stock exact.
 - Logits on approximated bulk rows are not the model's; score only the exact
-  tail, or run with `RADIANCE_KVA_SCORE_BULK=1` for tail-only evaluation.
+  tail, or run with `RADIANCE_RIDGEFILL_SCORE_BULK=1` for tail-only evaluation.
 - Steps carrying image rows run stock exact; approximation resumes after.
 - The folder's `final` MTP map variant, if present, is used only when
-  `RADIANCE_KVA_FINAL` is not `off` and MTP drafting is on; default is off.
+  `RADIANCE_RIDGEFILL_FINAL` is not `off` and MTP drafting is on; default is off.

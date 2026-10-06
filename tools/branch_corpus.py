@@ -399,7 +399,7 @@ def main(argv=None):
     b.add_argument("--interval", type=int, default=2048,
                    help="the checkpoint interval: read it off the engine's startup line "
                         '"chunk geometry: ... checkpoint interval N ..."')
-    b.add_argument("--tail", type=int, default=2048, help="T, the exact tail (kva.tail)")
+    b.add_argument("--tail", type=int, default=2048, help="T, the exact tail (ridgefill.tail)")
     b.add_argument("--min-prompt", type=int, default=16384,
                    help="the producer A must render to at least this many tokens")
     b.add_argument("--server", required=True, help="server base URL, e.g. http://127.0.0.1:8100")

@@ -1,9 +1,9 @@
 # notes/refit.md — REFIT lane (Stage 6 fitting side: projector + correction refit on radiance)
 
 Provenance: radiance `140987f` (v1.0.8, read only); capture code = plugin commit `3af4eaa` (ARCH capture mode +
-KERNELS `kva_state_read`); refit code = commits in §9; container `~/models/rad/qwen3.8-next-flash-fp8-iq4r-moe.rad`
-(the Stage 2 append, 87 `kva.*`); research code `~/projects/research/kva` @ `cba2d91`, imported read-only through
-`KVA_RESEARCH_ROOT`; Python = its venv (torch 2.11.0+rocm, numpy 2.5.3, tokenizers 0.23.2). Date 2026-10-04.
+KERNELS `ridgefill_state_read`); refit code = commits in §9; container `~/models/rad/qwen3.8-next-flash-fp8-iq4r-moe.rad`
+(the Stage 2 append, 87 `ridgefill.*`); research code `~/projects/research/kva` @ `cba2d91`, imported read-only through
+`RIDGEFILL_RESEARCH_ROOT`; Python = its venv (torch 2.11.0+rocm, numpy 2.5.3, tokenizers 0.23.2). Date 2026-10-04.
 
 ## 0. Status
 
@@ -14,12 +14,12 @@ KERNELS `kva_state_read`); refit code = commits in §9; container `~/models/rad/
 | 3 capture driver | **ran**: 312 projector prompts (4,044,768 tokens) + 14 exact +st prompts, 48 min under the lock, every chunk captured (§6) |
 | 4 projector solve | **measured**: lambda 0.03, 248,892 raw + 249,312 chat rows; held-out bi refit 0.7536 vs shipped 0.7501 on the same radiance rows (§4) |
 | 5 correction fit | **measured**: 14 prompts, 55 chunk ends per layer per rank (R43 counts met); head order checked (§5) |
-| 7 append prep | append #1 (projr) **done by the orchestrator** 20:37; **append #2 (kva.str) prepared**: shard verify PASS, plan diff PASS (18 new, 0 dropped, 0 changed); command in §7 |
+| 7 append prep | append #1 (projr) **done by the orchestrator** 20:37; **append #2 (ridgefill.str) prepared**: shard verify PASS, plan diff PASS (18 new, 0 dropped, 0 changed); command in §7 |
 
 ## 1. Inputs (step 1) — `tools/refit/docs.py build` → `data/refit/prompts/` (git-ignored)
 
 ```
-$ KVA_RESEARCH_ROOT=~/projects/research/kva .venv/bin/python tools/refit/docs.py build \
+$ RIDGEFILL_RESEARCH_ROOT=~/projects/research/kva .venv/bin/python tools/refit/docs.py build \
     --plans ~/AI-Work/kva-flashnext-iterate/bigcap/plans --tokenizer data/stub/tokenizer.json \
     --overlap ~/projects/research/kva/docs/flash-next/run-20261004/bigcap/overlap.json --out data/refit/prompts
 train: 302 prompts, 3984554 tokens (raw 151, chat 151, cut 0) -> data/refit/prompts/train.jsonl
@@ -56,7 +56,7 @@ Tokenizer = `data/stub/tokenizer.json` sha256 `0997f410…` = the file the conta
 
 ## 2. Capture format → the research code (step 2) — `tools/refit/convert.py`
 
-The plugin writes notes/arch.md "Capture" (checked against `arch/kva_dump.h` @ 3af4eaa): per chunk
+The plugin writes notes/arch.md "Capture" (checked against `arch/ridgefill_dump.h` @ 3af4eaa): per chunk
 `chunk.p<P>.h<H16>.{boundary,bi.L,rows,ids,pos}.npy` + a `capture.jsonl` line. `convert.read_chunk` gives tcc's
 Capture record (`boundary_24` bf16 [R,10240], `block_input_L` bf16 [R,2560] L = 24..47, `positions` int64 [R],
 `input_ids` int32 [R], `stride` 8 — dtypes as in tcc's held capture files, checked on `capture/held/heldc0`).
@@ -134,12 +134,12 @@ Output `data/refit/proj/kva-radiance-s24.safetensors` sha256 `bedf9d77…f1b5` (
 
 Pairs speed-run records (`approximate: true`) with the exact-run record of the same chunk key, rank and last
 position; C_L,r = mean(S_exact − S_pred), f64 sums, written as `kva-radiance-s24-st.rank{0,1}.pt` in st_hook's
-`{"sum","count"}` format (rank r = heads [24r, 24r+24), checked per record) → `kva_sidecar.py build --names refit
+`{"sum","count"}` format (rank r = heads [24r, 24r+24), checked per record) → `ridgefill_sidecar.py build --names refit
 --st`. Refuses < 50 chunk ends or < 13 prompts (R43). Report: relative state error, share of the error energy the
 constant removes, cosine with the shipped C.
 
-`session.sh speed` (after append #1; lock 01:38:40Z → 01:40:36Z; kernel log clean; `RADIANCE_KVA=speed`,
-`RADIANCE_KVA_PROJ=refit`, `RADIANCE_KVA_ST=refit` with no `kva.str.*` held = no correction, `RADIANCE_KVA_TAIL=512`):
+`session.sh speed` (after append #1; lock 01:38:40Z → 01:40:36Z; kernel log clean; `RADIANCE_RIDGEFILL=speed`,
+`RADIANCE_RIDGEFILL_PROJ=refit`, `RADIANCE_RIDGEFILL_ST=refit` with no `ridgefill.str.*` held = no correction, `RADIANCE_RIDGEFILL_TAIL=512`):
 14 prompts in 1.2 min, every chunk captured; the engine logged **55 approximate steps = the planned 55 chunk ends at
 tail 512** (41 at tail 2048, so the env took effect); records: speed run 55 approximate + 15 tail per rank, exact
 run 70 `off` per rank.
@@ -159,7 +159,7 @@ R43's "passes R20/R22 with the new weights" is an engine check after append #2 (
 ## 6. GPU sessions — `tools/refit/session.sh exact|speed` (whole serve → capture → stop under `flock gpu.lock`)
 
 Frozen home `data/refit/home-3af4eaa` (git archive 3af4eaa, built in `radiance-build`; ctest 2/2 host tests pass):
-`qwen4exp_fp8.so` c408596e…9e35, `kva.so` 34062e78…000d. Serve = `scripts/serve.sh off|speed` (RK_FLAGS unchanged:
+`qwen4exp_fp8.so` c408596e…9e35, `ridgefill.so` 34062e78…000d. Serve = `scripts/serve.sh off|speed` (RK_FLAGS unchanged:
 `--gpu-headroom-mib 3072` etc.), capture dir mounted rw via `RK_DOCKER_EXTRA`, kernel log checked before, between and
 after (window from the lock). Recording off via `RADIANCE_DEBUG_ARGSHA=1` (§3).
 
@@ -182,18 +182,18 @@ sidecar-projr 1.2, sidecar-full 1.2, held captures 1.0, exact states 3.7, speed 
 
 `tools/refit/append_prep.sh projr` (no GPU, container mounted read-only; outputs in `data/refit/append-projr/`):
 ```
-verify .../sidecar-projr/kva-sidecar-refit.safetensors: PASS          (kva.src.projr.sha256 bedf9d77… OK)
+verify .../sidecar-projr/kva-sidecar-refit.safetensors: PASS          (ridgefill.src.projr.sha256 bedf9d77… OK)
 wrote data/refit/stub-projr: 131 header-only shards (335.3 GiB apparent), extra tensors
       {'kva-sidecar.safetensors': 87, 'kva-sidecar-refit.safetensors': 48}   (revision de4b8e4d…, as data/stub)
-I plugin .../qwen4exp_fp8.so is shadowed by /kva/data/refit/home-3af4eaa/architectures/qwen4exp_fp8.so
+I plugin .../qwen4exp_fp8.so is shadowed by /ridgefill/data/refit/home-3af4eaa/architectures/qwen4exp_fp8.so
 I plan     51624 weight(s): 50603 quantised by the recipe, 1021 kept as the checkpoint holds them
-D rad_convert.cpp:659    kva.projr.24.weight    bf16    50.00 MiB  as is
-new                  48  kva.projr.24.bias, kva.projr.24.weight, kva.projr.25.bias, ...
+D rad_convert.cpp:659    ridgefill.projr.24.weight    bf16    50.00 MiB  as is
+new                  48  ridgefill.projr.24.bias, ridgefill.projr.24.weight, ridgefill.projr.25.bias, ...
 dropped 0   changed 0   unexpected_new 0   expected_missing 0
 planned 51624, held 51576: PASS
 ```
 Refit shard `data/refit/sidecar-projr/kva-sidecar-refit.safetensors` sha256 `575149a9…5297` (48 tensors, 1.17 GiB);
-`set.txt` = the shipped set file ∪ the refit one (13 keys, `kva.format` shared, no conflicts).
+`set.txt` = the shipped set file ∪ the refit one (13 keys, `ridgefill.format` shared, no conflicts).
 
 ### 7.1 Append #1 — the projector
 
@@ -205,13 +205,13 @@ Refit shard `data/refit/sidecar-projr/kva-sidecar-refit.safetensors` sha256 `575
 ```
 cd ~/projects/inference/radiance-kva
 cp -p ~/models/rad/qwen3.8-next-flash-fp8-iq4r-moe.rad.pre-append evidence/stage6/pre-append.stage2   # 256 B
-docker run --rm --security-opt label=disable -e RADIANCE_KVA_DECLARE=all -e CALIB=calib/w4nl-calib \
-  -v "$(readlink -f ~/models/rad)":/models -v "$(pwd -P)":/kva:ro \
-  radiance-build /stage/opt/radiance/bin/rad-convert /kva/data/refit/stub-projr \
+docker run --rm --security-opt label=disable -e RADIANCE_RIDGEFILL_DECLARE=all -e CALIB=calib/w4nl-calib \
+  -v "$(readlink -f ~/models/rad)":/models -v "$(pwd -P)":/ridgefill:ro \
+  radiance-build /stage/opt/radiance/bin/rad-convert /ridgefill/data/refit/stub-projr \
     --reuse /models/qwen3.8-next-flash-fp8-iq4r-moe.rad --in-place \
     --recipe /models/qwen4exp-w4nl64-i8-hc8m.recipe \
-    --home /kva/data/refit/home-3af4eaa:/stage/opt/radiance/share/radiance \
-    $(sed 's/^/--set /' data/refit/append-projr/set.txt | tr '\n' ' ') --set kva.mode=quality --set kva.tail=2048 \
+    --home /ridgefill/data/refit/home-3af4eaa:/stage/opt/radiance/share/radiance \
+    $(sed 's/^/--set /' data/refit/append-projr/set.txt | tr '\n' ' ') --set ridgefill.mode=quality --set ridgefill.tail=2048 \
     -v > data/refit/append-projr/append.log 2>&1; echo "exit $?"
 ```
 (= the plan-only run minus `--plan-only`, `/models` writable.) Expect `--in-place: 51576 weight(s), …, kept where they
@@ -219,11 +219,11 @@ were …; 48 added past its end`. After, in `data/refit/append-projr/`:
 1. `rad-info -v` → `rad-info-v-after.txt`; `tools/plan_diff.py --plan plan-only.log --container rad-info-v-after.txt`
    (no `--expect-new`) must PASS (planned 51,624 = held 51,624).
 2. `rad-info --meta` → `rad-info-meta-after.txt`; `diff` with `rad-info-meta-before.txt` shows only
-   `kva.src.projr.sha256` added; `tools/kva_sidecar.py verify rad-info-meta-after.txt --names refit --proj
+   `ridgefill.src.projr.sha256` added; `tools/ridgefill_sidecar.py verify rad-info-meta-after.txt --names refit --proj
    data/refit/proj/kva-radiance-s24.safetensors` PASS (R13, refit) and the shipped verify (sidecar notes §7.6 2.) PASS.
 3. Restore to post-Stage-2: the new `.pre-append`; to pristine: `evidence/stage6/pre-append.stage2` (same procedure,
    notes/sidecar.md §7.7 — both stay valid: an append writes only past the old end, plus the header).
-**Done by the orchestrator 20:37** with one change: `--set kva.mode=off` (no surprise defaults: every serve passes
+**Done by the orchestrator 20:37** with one change: `--set ridgefill.mode=off` (no surprise defaults: every serve passes
 the mode, scripts/serve.sh does). Plan diff after PASS (51,624 = 51,624); shipped + refit verify PASS; Stage 2 restore
 record saved as `evidence/stage6/pre-append.stage2`.
 
@@ -233,38 +233,38 @@ record saved as `evidence/stage6/pre-append.stage2`.
 verify .../sidecar-full/kva-sidecar-refit.safetensors: PASS   (projr bedf9d77…, str0 c80d2b5b…, str1 6d776ca7… OK)
 wrote data/refit/stub-full: ... extra tensors {'kva-sidecar.safetensors': 87, 'kva-sidecar-refit.safetensors': 66}
 I plan     51642 weight(s): 50603 quantised by the recipe, 1039 kept as the checkpoint holds them
-D rad_convert.cpp:659    kva.str.24        f32       3.00 MiB  as is
-new                  18  kva.str.24, kva.str.25, kva.str.26, kva.str.28, kva.str.29, kva.str.30 ...
+D rad_convert.cpp:659    ridgefill.str.24        f32       3.00 MiB  as is
+new                  18  ridgefill.str.24, ridgefill.str.25, ridgefill.str.26, ridgefill.str.28, ridgefill.str.29, ridgefill.str.30 ...
 dropped 0   changed 0   unexpected_new 0   expected_missing 0
 planned 51642, held 51624: PASS
 ```
 Full refit shard `data/refit/sidecar-full/kva-sidecar-refit.safetensors` sha256 `cae9d399…78db` (66 tensors); its
-48 `kva.projr.*` are **byte-identical** to append #1's shard (checked tensor by tensor), so the in-place writer
-reuses them by name and only the 18 `kva.str.*` (54 MiB) are new. `append-full/set.txt` = 14 keys (the shipped set
-+ `kva.src.projr/str0/str1.sha256`); with `kva.mode` / `kva.tail` on the command line it re-passes every `kva.*`
-key the container holds (meta diff: only `kva.src.str0/str1.sha256` are added).
+48 `ridgefill.projr.*` are **byte-identical** to append #1's shard (checked tensor by tensor), so the in-place writer
+reuses them by name and only the 18 `ridgefill.str.*` (54 MiB) are new. `append-full/set.txt` = 14 keys (the shipped set
++ `ridgefill.src.projr/str0/str1.sha256`); with `ridgefill.mode` / `ridgefill.tail` on the command line it re-passes every `ridgefill.*`
+key the container holds (meta diff: only `ridgefill.src.str0/str1.sha256` are added).
 Preconditions: no engine container; container = 124,642,761,992 B (the post-append-#1 state the plan was made
 against; else rerun `append_prep.sh full`); model SSD ≥ 2 GB free; keep a copy of the current `.pre-append`
 (append #1's record, the way back to post-Stage-2) — the writer replaces it:
 ```
 cd ~/projects/inference/radiance-kva
 cp -p ~/models/rad/qwen3.8-next-flash-fp8-iq4r-moe.rad.pre-append evidence/stage6/pre-append.append1   # 256 B
-docker run --rm --security-opt label=disable -e RADIANCE_KVA_DECLARE=all -e CALIB=calib/w4nl-calib \
-  -v "$(readlink -f ~/models/rad)":/models -v "$(pwd -P)":/kva:ro \
-  radiance-build /stage/opt/radiance/bin/rad-convert /kva/data/refit/stub-full \
+docker run --rm --security-opt label=disable -e RADIANCE_RIDGEFILL_DECLARE=all -e CALIB=calib/w4nl-calib \
+  -v "$(readlink -f ~/models/rad)":/models -v "$(pwd -P)":/ridgefill:ro \
+  radiance-build /stage/opt/radiance/bin/rad-convert /ridgefill/data/refit/stub-full \
     --reuse /models/qwen3.8-next-flash-fp8-iq4r-moe.rad --in-place \
     --recipe /models/qwen4exp-w4nl64-i8-hc8m.recipe \
-    --home /kva/data/refit/home-3af4eaa:/stage/opt/radiance/share/radiance \
-    $(sed 's/^/--set /' data/refit/append-full/set.txt | tr '\n' ' ') --set kva.mode=off --set kva.tail=2048 \
+    --home /ridgefill/data/refit/home-3af4eaa:/stage/opt/radiance/share/radiance \
+    $(sed 's/^/--set /' data/refit/append-full/set.txt | tr '\n' ' ') --set ridgefill.mode=off --set ridgefill.tail=2048 \
     -v > data/refit/append-full/append.log 2>&1; echo "exit $?"
 ```
 Expect `--in-place: 51624 weight(s), …, kept where they were …; 18 added past its end`. After, in
 `data/refit/append-full/`: `rad-info -v` → `rad-info-v-after.txt` and `tools/plan_diff.py --plan plan-only.log
 --container rad-info-v-after.txt` PASS (51,642 = 51,642); `rad-info --meta` diff vs `rad-info-meta-before.txt` =
-only `kva.src.str0/str1.sha256` added; `tools/kva_sidecar.py verify rad-info-meta-after.txt --names refit --proj
+only `ridgefill.src.str0/str1.sha256` added; `tools/ridgefill_sidecar.py verify rad-info-meta-after.txt --names refit --proj
 data/refit/proj/kva-radiance-s24.safetensors --st data/refit/st/kva-radiance-s24-st.rank0.pt
 data/refit/st/kva-radiance-s24-st.rank1.pt` PASS (R13 refit) and the shipped verify PASS. Then serving the refit set =
-`RADIANCE_KVA_PROJ=refit RADIANCE_KVA_ST=refit` (R44 runs: shipped vs refit × speed/quality, same boot).
+`RADIANCE_RIDGEFILL_PROJ=refit RADIANCE_RIDGEFILL_ST=refit` (R44 runs: shipped vs refit × speed/quality, same boot).
 
 ## 8. Decisions and their cost
 
@@ -272,11 +272,11 @@ data/refit/st/kva-radiance-s24-st.rank1.pt` PASS (R13 refit) and the shipped ver
   shipped 3.4 M; buys an engine-only comparison. Chat share stays 0.5 by weighting.
 - **sterm4 excluded, two b2 docs added** (§1): R43's 50 chunk ends need ≥ 1 more prompt anyway on radiance's whole
   chunks; cost: the +st prompt set is not byte-identical to the shipped fit's.
-- **No `final` target**: saves 0.8 GiB of sums per format and a 10240×10241 map nobody reads (radiance's KVA path has
+- **No `final` target**: saves 0.8 GiB of sums per format and a 10240×10241 map nobody reads (radiance's RidgeFill path has
   no MTP); the file is not loadable by tcc's engine (its loader requires `final`).
 - **Sums fed in memory, held as .pt**: one conversion path (`read_chunk`), no duplicate disk writes for 4 M tokens.
-- **kva_sidecar.py `--names refit` takes `--st` optionally** (extended within its refit option, as the brief allows):
-  the correction fit needs `kva.projr` in the container and must run with NO `kva.str` (RADIANCE_KVA_ST=refit then
+- **ridgefill_sidecar.py `--names refit` takes `--st` optionally** (extended within its refit option, as the brief allows):
+  the correction fit needs `ridgefill.projr` in the container and must run with NO `ridgefill.str` (RADIANCE_RIDGEFILL_ST=refit then
   = no correction), and an in-place append cannot replace a weight, so append #1 = projector alone, append #2 = the
   full refit set (projector bytes identical, reused by name). Tested (`tests/test_refit_sidecar.py`).
 - **acc runs beside the capture** (CPU, 6 threads, ~12 GiB of fp64 sums + temporaries) so the GPU lock is released
@@ -285,9 +285,9 @@ data/refit/st/kva-radiance-s24-st.rank1.pt` PASS (R13 refit) and the shipped ver
 ## 9. Commits
 
 - `270b6ba` tools/refit (docs, convert, capture, fit_projector, fit_correction, session.sh), tests/test_refit_*,
-  kva_sidecar `--st` optional for refit.
+  ridgefill_sidecar `--st` optional for refit.
 - `60919e9` append_prep.sh + these notes; later commit: append_prep physical paths (a stub symlink computed between
-  /home and /var/home spellings pointed nowhere inside the /kva mount; fixed with `pwd -P` / `readlink -f`).
+  /home and /var/home spellings pointed nowhere inside the /ridgefill mount; fixed with `pwd -P` / `readlink -f`).
 
 ## Appendix — prompt list (text sha256, first 16 hex; tokens after any cut)
 

@@ -6,7 +6,7 @@
 #   scripts/once.sh <mode> [extra engine args...]
 #
 # Same env vars as serve.sh (common.sh): RK_MODEL, RK_IMAGE, RK_PLUGIN_HOME, RK_FLAGS, and every
-# RADIANCE_KVA* / RADIANCE_LOG_STEPS passed through.
+# RADIANCE_RIDGEFILL* / RADIANCE_LOG_STEPS passed through.
 set -eu
 . "$(dirname "$0")/common.sh"
 [ "$#" -ge 1 ] || rk_die "usage: scripts/once.sh <mode> [extra engine args...]"

@@ -17,8 +17,8 @@
 #                   run with different flags is not comparable with earlier evidence.
 #
 # The mode argument serve.sh/grade.sh take:
-#   exact   the stock engine, the image's own plugin home, no RADIANCE_KVA -- the baseline
-#   off     the plugin is mounted but KVA is disabled
+#   exact   the stock engine, the image's own plugin home, no RADIANCE_RIDGEFILL -- the baseline
+#   off     the plugin is mounted but RidgeFill is disabled
 #   plumb   the fill path is wired but the late layers still run exactly (plumbing control)
 #   speed   bulk chunks of layers 24-47 approximated (the speed mode)
 #   quality speed plus the rarest rows of the kept classes run exactly (the quality mode)
@@ -43,7 +43,7 @@ export RK_PORT RK_IMAGE RK_PLUGIN_HOME RK_EVIDENCE
 #   --kv-cache-dtype fp8          the production KV cache dtype (config.cpp:56)
 #   --tp-wire exact               exact cross-rank wire: wht6 is lossy and would put wire
 #                                 noise into every quality number (config.cpp:38)
-#   --max-num-batched-tokens 2048 the prefill chunk. KVA's bulk chunk is T = 2048, so the
+#   --max-num-batched-tokens 2048 the prefill chunk. RidgeFill's bulk chunk is T = 2048, so the
 #                                 chunk must stay 2048 (fnserve.sh: "THE CHUNK IS 2048";
 #                                 config.cpp:40)
 #   --no-prefix-cache             a cache hit would answer a speed rep for free and read
@@ -80,7 +80,7 @@ fi
 
 # rk_die -- print to stderr, naming the missing thing, and exit non-zero.
 rk_die() {
-    printf 'radiance-kva: %s\n' "$*" >&2
+    printf 'radiance-ridgefill: %s\n' "$*" >&2
     exit 1
 }
 
@@ -130,8 +130,8 @@ rk_require_model() {
 #   exact:  -e RADIANCE_HOME=/opt/radiance/share/radiance      (stock, no plugin mounted)
 #   other:  -v $RK_PLUGIN_HOME:/plugins:ro
 #           -e RADIANCE_HOME=/plugins:/opt/radiance/share/radiance   (plugin first)
-#           -e RADIANCE_KVA=<MODE>
-# Every RADIANCE_KVA* (except RADIANCE_KVA itself, which the mode argument sets),
+#           -e RADIANCE_RIDGEFILL=<MODE>
+# Every RADIANCE_RIDGEFILL* (except RADIANCE_RIDGEFILL itself, which the mode argument sets),
 # RADIANCE_LOG_STEPS, RADIANCE_PROFILE_EVERY and RADIANCE_DEBUG_ROUTING in the caller's
 # environment is passed through (-e NAME, the caller's value), then RK_DOCKER_EXTRA's words.
 rk_docker_prefix() {
@@ -153,15 +153,15 @@ rk_docker_prefix() {
         [ -d "$RK_PLUGIN_HOME" ] || rk_die "RK_PLUGIN_HOME is not a directory: $RK_PLUGIN_HOME"
         printf '%s\n' -v "$RK_PLUGIN_HOME":/plugins:ro
         printf '%s\n' -e RADIANCE_HOME=/plugins:/opt/radiance/share/radiance
-        printf '%s\n' -e RADIANCE_KVA="$1"
+        printf '%s\n' -e RADIANCE_RIDGEFILL="$1"
     fi
     for rk_name in $(env | cut -d= -f1 | LC_ALL=C sort -u |
-                     grep -E '^RADIANCE_KVA|^RADIANCE_LOG_STEPS$|^RADIANCE_PROFILE_EVERY$|^RADIANCE_DEBUG_ROUTING$' |
-                     grep -v '^RADIANCE_KVA$'); do
+                     grep -E '^RADIANCE_RIDGEFILL|^RADIANCE_LOG_STEPS$|^RADIANCE_PROFILE_EVERY$|^RADIANCE_DEBUG_ROUTING$' |
+                     grep -v '^RADIANCE_RIDGEFILL$'); do
         printf '%s\n' -e "$rk_name"
     done
     # RK_DOCKER_EXTRA: extra docker-run arguments, one per WORD (no spaces inside one), e.g.
-    # RK_DOCKER_EXTRA="-v /host/dump:/dump" for RADIANCE_KVA_DUMP=/dump, which needs a writable
+    # RK_DOCKER_EXTRA="-v /host/dump:/dump" for RADIANCE_RIDGEFILL_DUMP=/dump, which needs a writable
     # mount. Debug runs only; empty by default, so measured runs are unchanged.
     # shellcheck disable=SC2086  # one argument per word by construction
     [ -z "${RK_DOCKER_EXTRA:-}" ] || printf '%s\n' $RK_DOCKER_EXTRA

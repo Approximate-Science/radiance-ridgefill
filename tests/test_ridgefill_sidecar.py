@@ -1,5 +1,5 @@
-"""tools/kva_sidecar.py on small synthetic inputs (no model files, no GPU), plus a check of a real build when
-KVA_SIDECAR (+ KVA_TOKENIZER) point at one; that check is SKIPPED otherwise, never passed.
+"""tools/ridgefill_sidecar.py on small synthetic inputs (no model files, no GPU), plus a check of a real build when
+RIDGEFILL_SIDECAR (+ RIDGEFILL_TOKENIZER) point at one; that check is SKIPPED otherwise, never passed.
 Run: python -m pytest tests/
 """
 import json
@@ -15,8 +15,8 @@ from safetensors.torch import load_file, save_file
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "dev"))   # the append route (A')
-import kva_rules as R  # noqa: E402
-import kva_sidecar as K  # noqa: E402
+import ridgefill_rules as R  # noqa: E402
+import ridgefill_sidecar as K  # noqa: E402
 
 INF = float("-inf")
 # Byte-level BPE pieces: "Ġ" is the space byte, "Ċ" the newline byte.
@@ -70,17 +70,17 @@ def built(tmp_path_factory):
 
 def test_projector_weight_is_every_column_but_the_last(built):
     want = torch.arange(4 * 7, dtype=torch.float32).reshape(4, 7)[:, :6].bfloat16()
-    assert torch.equal(built["tensors"]["kva.proj.2.weight"], want)
+    assert torch.equal(built["tensors"]["ridgefill.proj.2.weight"], want)
 
 
 def test_projector_bias_is_the_last_column(built):
     want = torch.arange(4 * 7, dtype=torch.float32).reshape(4, 7)[:, 6].bfloat16()
-    assert torch.equal(built["tensors"]["kva.proj.2.bias"], want)
+    assert torch.equal(built["tensors"]["ridgefill.proj.2.bias"], want)
 
 
 def test_projector_dtypes_stay_bf16(built):
-    assert built["tensors"]["kva.proj.3.weight"].dtype == torch.bfloat16
-    assert built["tensors"]["kva.proj.3.bias"].dtype == torch.bfloat16
+    assert built["tensors"]["ridgefill.proj.3.weight"].dtype == torch.bfloat16
+    assert built["tensors"]["ridgefill.proj.3.bias"].dtype == torch.bfloat16
 
 
 def test_final_is_not_converted(built):
@@ -89,53 +89,53 @@ def test_final_is_not_converted(built):
 
 def test_correction_is_sum_over_count_rank0_heads_first(built):
     # layer 2: rank 0 = 8 / 4 = 2, rank 1 = 800 / 4 = 200; heads [0, 2) are rank 0's.
-    st = built["tensors"]["kva.st.2"]
+    st = built["tensors"]["ridgefill.st.2"]
     assert st.shape == (4, 3, 3) and st.dtype == torch.float32
     assert torch.equal(st[:2], torch.full((2, 3, 3), 2.0))
     assert torch.equal(st[2:], torch.full((2, 3, 3), 200.0))
 
 
 def test_swapped_control_puts_rank1_heads_first(built):
-    swap = built["tensors"]["kva.stswap.3"]
+    swap = built["tensors"]["ridgefill.stswap.3"]
     assert torch.equal(swap[:2], torch.full((2, 3, 3), 200.0))
     assert torch.equal(swap[2:], torch.full((2, 3, 3), 2.0))
 
 
 def test_score_is_rarity_for_kept_classes(built):
-    score = built["tensors"]["kva.rowsel.score"]
+    score = built["tensors"]["ridgefill.rowsel.score"]
     # " The" (id 0, cap): -logfreq = 1; "ing" (id 1, piece): 2; "x2" (id 6, mixed): 7
     assert [score[0].item(), score[1].item(), score[6].item()] == [1.0, 2.0, 7.0]
 
 
 def test_score_is_minus_inf_for_dropped_classes_specials_and_padding(built):
-    score = built["tensors"]["kva.rowsel.score"]
+    score = built["tensors"]["ridgefill.rowsel.score"]
     dropped = [2, 3, 4, 5, 7, 8, 9, 10, 11]   # " the", "3.14", " ", "\n", ",", <|im_end|>, 3 padding rows
     assert [score[i].item() for i in dropped] == [INF] * len(dropped)
 
 
 def test_score_tables_cover_the_model_vocab(built):
-    for name in ("kva.rowsel.score", "kva.rowsel.score_none", "kva.rowsel.score_all"):
+    for name in ("ridgefill.rowsel.score", "ridgefill.rowsel.score_none", "ridgefill.rowsel.score_all"):
         assert built["tensors"][name].shape == (VOCAB,) and built["tensors"][name].dtype == torch.float32
 
 
 def test_score_none_selects_nothing(built):
-    assert torch.equal(built["tensors"]["kva.rowsel.score_none"], torch.full((VOCAB,), INF))
+    assert torch.equal(built["tensors"]["ridgefill.rowsel.score_none"], torch.full((VOCAB,), INF))
 
 
 def test_score_all_keeps_every_id_at_one_score(built):
-    assert torch.equal(built["tensors"]["kva.rowsel.score_all"], torch.zeros(VOCAB))
+    assert torch.equal(built["tensors"]["ridgefill.rowsel.score_all"], torch.zeros(VOCAB))
 
 
 def test_metadata_names_split_share_and_classes(built):
     meta = built["meta"]
-    assert (meta["kva.split"], meta["kva.rowsel.share"], meta["kva.rowsel.classes"]) == ("2", "0.25", "cap,mixed,piece")
+    assert (meta["ridgefill.split"], meta["ridgefill.rowsel.share"], meta["ridgefill.rowsel.classes"]) == ("2", "0.25", "cap,mixed,piece")
 
 
 def test_metadata_hashes_are_the_source_files(built):
     root = built["root"]
-    assert built["meta"]["kva.src.proj.sha256"] == K.sha256_file(root / "proj.safetensors")
-    assert built["meta"]["kva.src.st1.sha256"] == K.sha256_file(root / "st.rank1.pt")
-    assert built["meta"]["kva.src.tokenizer_json.sha256"] == K.sha256_file(root / "tok" / "tokenizer.json")
+    assert built["meta"]["ridgefill.src.proj.sha256"] == K.sha256_file(root / "proj.safetensors")
+    assert built["meta"]["ridgefill.src.st1.sha256"] == K.sha256_file(root / "st.rank1.pt")
+    assert built["meta"]["ridgefill.src.tokenizer_json.sha256"] == K.sha256_file(root / "tok" / "tokenizer.json")
 
 
 def test_index_names_only_the_shard(built):
@@ -194,19 +194,19 @@ def test_build_refuses_a_missing_input_by_name(built, tmp_path):
         K.main(["build", *args, "--out", str(tmp_path / "out")])
 
 
-@pytest.mark.skipif(not (os.environ.get("KVA_SIDECAR") and os.environ.get("KVA_TOKENIZER")),
-                    reason="needs KVA_SIDECAR (a built kva-sidecar.safetensors) and KVA_TOKENIZER")
+@pytest.mark.skipif(not (os.environ.get("RIDGEFILL_SIDECAR") and os.environ.get("RIDGEFILL_TOKENIZER")),
+                    reason="needs RIDGEFILL_SIDECAR (a built ridgefill-sidecar.safetensors) and RIDGEFILL_TOKENIZER")
 def test_real_sidecar_layout_and_known_tokens():
-    tensors = load_file(os.environ["KVA_SIDECAR"])
-    vocab = R.model_vocab(os.environ["KVA_TOKENIZER"])
-    tok = R.load_tokenizer(os.environ["KVA_TOKENIZER"])
-    score = tensors["kva.rowsel.score"]
-    proj = sorted(int(k.split(".")[2]) for k in tensors if k.startswith("kva.proj.") and k.endswith(".weight"))
-    st = sorted(int(k.split(".")[2]) for k in tensors if k.startswith("kva.st."))
+    tensors = load_file(os.environ["RIDGEFILL_SIDECAR"])
+    vocab = R.model_vocab(os.environ["RIDGEFILL_TOKENIZER"])
+    tok = R.load_tokenizer(os.environ["RIDGEFILL_TOKENIZER"])
+    score = tensors["ridgefill.rowsel.score"]
+    proj = sorted(int(k.split(".")[2]) for k in tensors if k.startswith("ridgefill.proj.") and k.endswith(".weight"))
+    st = sorted(int(k.split(".")[2]) for k in tensors if k.startswith("ridgefill.st."))
     assert proj == list(range(proj[0], proj[-1] + 1)) and len(tensors) == 2 * len(proj) + 2 * len(st) + 3
-    w, b = tensors[f"kva.proj.{proj[0]}.weight"], tensors[f"kva.proj.{proj[0]}.bias"]
+    w, b = tensors[f"ridgefill.proj.{proj[0]}.weight"], tensors[f"ridgefill.proj.{proj[0]}.bias"]
     assert w.dtype == b.dtype == torch.bfloat16 and b.shape == (w.shape[0],)
-    assert tensors[f"kva.st.{st[0]}"].dtype == torch.float32 and score.shape == (vocab,)
+    assert tensors[f"ridgefill.st.{st[0]}"].dtype == torch.float32 and score.shape == (vocab,)
     ids = {text: tok.encode(text, add_special_tokens=False) for text in (" The", "ing", " the", "3.14")}
     assert len(ids[" The"]) == len(ids["ing"]) == len(ids[" the"]) == 1
     assert math.isfinite(score[ids[" The"][0]]) and math.isfinite(score[ids["ing"][0]])
@@ -227,19 +227,19 @@ def refit(built):
 
 
 def test_refit_names_are_projr_and_str_only(refit):
-    assert sorted(refit["tensors"]) == ["kva.projr.2.bias", "kva.projr.2.weight", "kva.projr.3.bias",
-                                        "kva.projr.3.weight", "kva.str.2", "kva.str.3"]
+    assert sorted(refit["tensors"]) == ["ridgefill.projr.2.bias", "ridgefill.projr.2.weight", "ridgefill.projr.3.bias",
+                                        "ridgefill.projr.3.weight", "ridgefill.str.2", "ridgefill.str.3"]
 
 
 def test_refit_tensors_equal_the_shipped_layout(built, refit):
-    assert torch.equal(refit["tensors"]["kva.projr.2.weight"], built["tensors"]["kva.proj.2.weight"])
-    assert torch.equal(refit["tensors"]["kva.str.3"], built["tensors"]["kva.st.3"])
+    assert torch.equal(refit["tensors"]["ridgefill.projr.2.weight"], built["tensors"]["ridgefill.proj.2.weight"])
+    assert torch.equal(refit["tensors"]["ridgefill.str.3"], built["tensors"]["ridgefill.st.3"])
 
 
 def test_refit_hash_keys_do_not_collide_with_the_shipped_ones(built, refit):
-    assert sorted(k for k in refit["meta"] if k.startswith("kva.src.")) == [
-        "kva.src.projr.sha256", "kva.src.str0.sha256", "kva.src.str1.sha256"]
-    assert refit["meta"]["kva.src.projr.sha256"] == built["meta"]["kva.src.proj.sha256"]
+    assert sorted(k for k in refit["meta"] if k.startswith("ridgefill.src.")) == [
+        "ridgefill.src.projr.sha256", "ridgefill.src.str0.sha256", "ridgefill.src.str1.sha256"]
+    assert refit["meta"]["ridgefill.src.projr.sha256"] == built["meta"]["ridgefill.src.proj.sha256"]
 
 
 def test_refit_verify_passes(refit):

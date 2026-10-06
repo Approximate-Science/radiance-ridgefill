@@ -1,4 +1,4 @@
-/* kva_match.h -- does the projector folder belong to the model being served (PACKAGING.md §3,
+/* ridgefill_match.h -- does the projector folder belong to the model being served (PACKAGING.md §3,
  * REFUTATION-3 §6, Dylan's DD-K split)? Model-agnostic: it reads the manifest's `model` block and
  * answers from RadModelMeta, the builder's encoding query and the container file itself.
  *
@@ -9,28 +9,28 @@
  *   FITTED ON ANOTHER VARIANT -- another quantisation or recipe of the trunk (the encodings of the
  *     named late-layer weights), other base weights (sha256 of a few small named tensors), another
  *     model name. One projector serves its model's quant variants, so this is a WARNING naming
- *     both sides, and KVA runs.
+ *     both sides, and RidgeFill runs.
  *
  * The container is read through the public format (abi/rad_format.h): the string blob, the
  * directory, the planes of a few KiB of named entries, and the vocab section. The canonical vocab
  * hash covers what the token ids mean -- each token's text and type in id order, then the merge
  * table -- and not the section's bytes, which hold string-blob offsets an in-place append moves.
- * tools/kva_projector.py computes the same three things the same way.
+ * tools/ridgefill_projector.py computes the same three things the same way.
  */
-#ifndef KVA_MATCH_H
-#define KVA_MATCH_H
+#ifndef RIDGEFILL_MATCH_H
+#define RIDGEFILL_MATCH_H
 
-#include "kva_folder.h"
+#include "ridgefill_folder.h"
 
 #include <rad_encoding.h>
 
-namespace kva {
+namespace ridgefill {
 
 using namespace rad::arch;
 
 static_assert(sizeof(RadFileHeader) == 248 && sizeof(RadFileEntry) == 136 &&
               sizeof(RadFilePlane) == 16 && sizeof(RadFileKV) == 24 && sizeof(RadVocabHeader) == 128,
-              "tools/kva_projector.py reads the container with these record sizes");
+              "tools/ridgefill_projector.py reads the container with these record sizes");
 
 /* The container file, mapped read-only (its bytes are touched only where a check reads). */
 struct Container {
@@ -100,7 +100,7 @@ inline std::string vocab_sha256(const Container& c) {
 
 struct Match {
     std::string refused;                  /* why the folder cannot run here; empty = it can */
-    std::vector<std::string> warnings;    /* fitted on another variant: named, and KVA runs */
+    std::vector<std::string> warnings;    /* fitted on another variant: named, and RidgeFill runs */
     std::string summary;                  /* the five checks' results, for the log */
 };
 
@@ -179,6 +179,6 @@ inline Match match_model(const Folder& f, const RadModelMeta* meta, RadBuilder* 
     return m;
 }
 
-}  /* namespace kva */
+}  /* namespace ridgefill */
 
-#endif /* KVA_MATCH_H */
+#endif /* RIDGEFILL_MATCH_H */

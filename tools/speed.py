@@ -143,7 +143,7 @@ def build_prompt(target_len, doc_ids, nonce_ids):
 def tail_note(length):
     """The exact-tail size the plugin is expected to leave at this length.
 
-    The chunk is 2048 (RK_FLAGS --max-num-batched-tokens) and KVA's T is 2048: a chunk
+    The chunk is 2048 (RK_FLAGS --max-num-batched-tokens) and RidgeFill's T is 2048: a chunk
     with fewer than T tokens after it runs exact. At a multiple of 2048 the tail is
     exactly T; at 9216 the chunk at 6144 sees n_ahead = 1024 < T and runs exact, so the
     tail is 3072, not 2048 (HANDOVER §5 Stage 0 step 5).

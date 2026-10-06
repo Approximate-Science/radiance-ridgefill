@@ -6,7 +6,7 @@ checkpoint holds them (`acc`, CPU, alongside or after `run`).
   capture.py run --what activations|state --prompts P.jsonl [...] --engine-dir DIR --store DIR [--port 8100]
   capture.py acc --store DIR --set train --sums DIR [--follow] [--every 40] [--threads 8]
 
-run: the server must have been started with RADIANCE_KVA_CAPTURE (activations, mode off) or RADIANCE_KVA_CAPTURE_STATE
+run: the server must have been started with RADIANCE_RIDGEFILL_CAPTURE (activations, mode off) or RADIANCE_RIDGEFILL_CAPTURE_STATE
   (state, any mode) pointing at a mount of --engine-dir. First the tokenizer probe (docs.py's manifest) goes through
   /tokenize and must give the same ids. Each prompt goes as token ids to /v1/completions (max_tokens 1, temperature 0;
   usage.prompt_tokens must equal the ids sent, no cached tokens). Its records are the new capture.jsonl / state.jsonl
@@ -37,7 +37,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import convert  # noqa: E402
-import kva_research  # noqa: E402
+import ridgefill_research  # noqa: E402
 
 JSONL = {"activations": "capture.jsonl", "state": "state.jsonl"}
 HTTP_TIMEOUT = 900
@@ -49,7 +49,7 @@ def log(msg):
 
 
 def fnv1a64(ids):
-    """The plugin's chunk hash (arch/kva_dump.h chunk_key): FNV-1a 64 over the ids' little-endian int32 bytes."""
+    """The plugin's chunk hash (arch/ridgefill_dump.h chunk_key): FNV-1a 64 over the ids' little-endian int32 bytes."""
     h = 1469598103934665603
     for byte in np.asarray(ids, dtype="<i4").tobytes():
         h = ((h ^ byte) * 1099511628211) & 0xFFFFFFFFFFFFFFFF
@@ -201,7 +201,7 @@ def ready(store, prompt_set):
 
 
 def cmd_acc(a):
-    kva_research.root()
+    ridgefill_research.root()
     import torch
     from qfn import bigcap, fit
     torch.set_num_threads(a.threads)

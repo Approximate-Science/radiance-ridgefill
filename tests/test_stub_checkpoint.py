@@ -47,19 +47,19 @@ def test_stub_refuses_a_size_that_disagrees_with_the_header(tmp_path, remote):
 
 
 def test_extra_shard_is_linked_relatively_and_indexed(tmp_path):
-    extra = tmp_path / "side" / "kva.safetensors"
+    extra = tmp_path / "side" / "ridgefill.safetensors"
     extra.parent.mkdir()
-    save_file({"kva.st.24": torch.zeros(2)}, str(extra))
+    save_file({"ridgefill.st.24": torch.zeros(2)}, str(extra))
     out = tmp_path / "stub"
     out.mkdir()
     index = {"weight_map": {"a.weight": "model-1.safetensors"}}
     assert S.add_extra(out, index, extra) == 1
-    assert index["weight_map"]["kva.st.24"] == "kva.safetensors"
-    assert os.readlink(out / "kva.safetensors") == os.path.join("..", "side", "kva.safetensors")
+    assert index["weight_map"]["ridgefill.st.24"] == "ridgefill.safetensors"
+    assert os.readlink(out / "ridgefill.safetensors") == os.path.join("..", "side", "ridgefill.safetensors")
 
 
 def test_extra_shard_name_clash_is_refused(tmp_path):
-    extra = tmp_path / "kva.safetensors"
+    extra = tmp_path / "ridgefill.safetensors"
     save_file({"a.weight": torch.zeros(2)}, str(extra))
     with pytest.raises(SystemExit, match="already in the checkpoint"):
         S.add_extra(tmp_path, {"weight_map": {"a.weight": "model-1.safetensors"}}, extra)

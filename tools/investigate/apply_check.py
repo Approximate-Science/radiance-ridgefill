@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""On-engine check of the +st apply, from RADIANCE_KVA_CAPTURE_STATE captures (labbook INV-apply, INV-apply-neg).
+"""On-engine check of the +st apply, from RADIANCE_RIDGEFILL_CAPTURE_STATE captures (labbook INV-apply, INV-apply-neg).
 
 Arms are speed runs of the same prompts that differ only in the correction (alpha / copy); `--base` is the alpha=0
 arm, `--exact` the exact run. Approximate records are taken after the scan and BEFORE the apply; exact-chunk (tail)

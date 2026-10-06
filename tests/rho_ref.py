@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""rho_ref.py -- a NumPy transcription of the reference +st rho (research repo kva/b0/st_hook.py:25-34
+"""rho_ref.py -- a NumPy transcription of the reference +st rho (research repo ridgefill/b0/st_hook.py:25-34
 and 229-276, StController._rho; log_gate from b0/worker_ext.py:71-74), written as the fixture
-tests/kernel_test.cpp holds kva_rho_update to (R34).
+tests/kernel_test.cpp holds ridgefill_rho_update to (R34).
 
-The reference computes each chunk in closed form (a cumulative sum of the log decays); kva_rho_update
+The reference computes each chunk in closed form (a cumulative sum of the log decays); ridgefill_rho_update
 runs the same recurrence one row at a time. The two are equal in exact arithmetic and differ only by
 rounding, which is what the test's tolerance is for.
 
@@ -45,7 +45,7 @@ def main():
     a_log[0] = -4.0                                # a slow-forgetting head: D grows with the prompt
     a_log[-1] = 4.0                                # a fast-forgetting head: rho follows the last rows
     dt_bias = rng.uniform(-3.0, 1.0, HEADS).astype(np.float32)
-    out = [f"kva-rho-fixture 1 heads {HEADS} chunks {len(CHUNKS)} seed {SEED}",
+    out = [f"ridgefill-rho-fixture 1 heads {HEADS} chunks {len(CHUNKS)} seed {SEED}",
            floats("A_log", a_log), floats("dt_bias", dt_bias)]
     n_mass = np.zeros(HEADS, np.float32)
     d_mass = np.zeros(HEADS, np.float32)

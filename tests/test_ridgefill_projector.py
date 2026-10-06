@@ -1,7 +1,7 @@
-"""tools/kva_projector.py on synthetic inputs and a synthetic container (no model files, no GPU).
+"""tools/ridgefill_projector.py on synthetic inputs and a synthetic container (no model files, no GPU).
 
 The tiny container's two hashes are the constants tests/arch_static_test.cpp expects of the same bytes, which is what
-ties the builder's canonical tokenizer / anchor forms to the plugin's (arch/kva_match.h).
+ties the builder's canonical tokenizer / anchor forms to the plugin's (arch/ridgefill_match.h).
 Run: python -m pytest tests/
 """
 import hashlib
@@ -16,9 +16,9 @@ from safetensors import safe_open
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import kva_projector as P  # noqa: E402
-import kva_rules as R  # noqa: E402
-from test_kva_sidecar import FakeTokenizer, write_inputs  # noqa: E402
+import ridgefill_projector as P  # noqa: E402
+import ridgefill_rules as R  # noqa: E402
+from test_ridgefill_sidecar import FakeTokenizer, write_inputs  # noqa: E402
 
 TINY_VOCAB = "3988fb447f719ad3fc2c75e5a0fa3daeb2b6a5e10e964744619d1dfbc6e95ff6"
 TINY_ANCHOR = "be45cb2605bf36bebde684841a28f0fd43c69850a3dce5fedba69928ee3a8991"
@@ -71,10 +71,10 @@ def test_the_tiny_containers_hashes_are_the_plugins(tmp_path):
 
 SPEC = {"length": 64,
         "pattern": {"offsets": [0, 59], "tokens": ["<|a|>", "<|b|>"], "rule": "alternate, starting with the first token"},
-        "dials": [{"offset": 60, "kwarg": "kva_share", "default": "0.25", "table": {"0.10": "<|c|>", "0.25": "<|d|>"}},
-                  {"offset": 61, "kwarg": "kva_alpha", "default": "1.0", "table": {"0": "<|c|>", "1.0": "<|d|>"}},
-                  {"offset": 62, "kwarg": "kva_tail", "default": "2048", "table": {"1024": "<|c|>", "2048": "<|d|>"}}],
-        "end": {"offset": 63, "token": "<|e|>"}, "switch": {"kwarg": "kva", "on_value": "on"},
+        "dials": [{"offset": 60, "kwarg": "ridgefill_share", "default": "0.25", "table": {"0.10": "<|c|>", "0.25": "<|d|>"}},
+                  {"offset": 61, "kwarg": "ridgefill_alpha", "default": "1.0", "table": {"0": "<|c|>", "1.0": "<|d|>"}},
+                  {"offset": 62, "kwarg": "ridgefill_tail", "default": "2048", "table": {"1024": "<|c|>", "2048": "<|d|>"}}],
+        "end": {"offset": 63, "token": "<|e|>"}, "switch": {"kwarg": "ridgefill", "on_value": "on"},
         "token_ids": {"<|a|>": 1, "<|b|>": 2, "<|c|>": 3, "<|d|>": 4, "<|e|>": 5}}
 META = {"model_type": "qwen4_exp", "n_layers": "4", "n_embd": "4", "n_vocab": "12", "n_expert": "8", "hc_count": "1",
         "layer_types": "linear_attention linear_attention linear_attention full_attention",
@@ -109,8 +109,8 @@ def built(tmp_path_factory):
 def test_the_folder_holds_the_layout_and_the_tensors(built):
     out, _ = built
     names = sorted(p.name for p in out.iterdir())
-    assert names == ["README.md", "chat_template.jinja", "correction.safetensors", "kva.json", "proj.L2.safetensors",
-                     "proj.L3.safetensors", "rowsel.safetensors"]
+    assert names == ["README.md", "chat_template.jinja", "correction.safetensors", "proj.L2.safetensors",
+                     "proj.L3.safetensors", "ridgefill.json", "rowsel.safetensors"]
     with safe_open(str(out / "proj.L2.safetensors"), "pt") as f:
         assert sorted(f.keys()) == ["proj.2.bias", "proj.2.weight"]
         w = f.get_tensor("proj.2.weight")
@@ -126,7 +126,7 @@ def test_the_folder_holds_the_layout_and_the_tensors(built):
 
 def test_the_manifest_carries_the_fingerprint_and_every_files_hash(built):
     out, rad = built
-    m = json.loads((out / "kva.json").read_text())
+    m = json.loads((out / "ridgefill.json").read_text())
     assert m["format"] == 1 and m["adapter"] == "qwen4exp" and m["split"] == 2
     assert m["layers"] == {"2": "recurrent", "3": "full_attn"}
     assert m["stream_width"] == 6 and m["block_in_width"] == 4
@@ -139,7 +139,7 @@ def test_the_manifest_carries_the_fingerprint_and_every_files_hash(built):
     assert m["model"]["anchors"]["blk.1.ffn_hc_norm.weight"] == r.entry_sha256("blk.1.ffn_hc_norm.weight")
     assert m["model"]["anchors"]["blk.1.attn_hc_norm.weight"] != m["model"]["anchors"]["blk.1.ffn_hc_norm.weight"]
     assert m["tail"]["table"] == [1024, 2048] and m["rowsel"]["share_table"] == [0.1, 0.25]
-    assert set(m["files"]) == {p.name for p in out.iterdir()} - {"kva.json", "README.md"}   # documentation unlisted
+    assert set(m["files"]) == {p.name for p in out.iterdir()} - {"ridgefill.json", "README.md"}   # documentation unlisted
     for name, digest in m["files"].items():
         assert hashlib.sha256((out / name).read_bytes()).hexdigest() == digest
     assert m["marker"]["template_source_sha256"] == hashlib.sha256(b"{{ messages }}").hexdigest()
@@ -148,7 +148,7 @@ def test_the_manifest_carries_the_fingerprint_and_every_files_hash(built):
 def test_the_template_is_the_models_own_with_the_marker_in_front(built):
     out, _ = built
     merged = (out / "chat_template.jinja").read_text()
-    assert merged.endswith("{{ messages }}") and merged.startswith("{#- kva-marker v1")
+    assert merged.endswith("{{ messages }}") and merged.startswith("{#- ridgefill-marker v1")
 
 
 def test_two_builds_are_byte_identical(built, tmp_path):
@@ -164,7 +164,7 @@ def test_two_builds_are_byte_identical(built, tmp_path):
         P.main(["build", *src, "--container", str(rad), "--rad-info-v", str(info), "--spec", str(spec), "--out", str(again)])
     finally:
         R.load_tokenizer = original
-    a, b = json.loads((out / "kva.json").read_text()), json.loads((again / "kva.json").read_text())
+    a, b = json.loads((out / "ridgefill.json").read_text()), json.loads((again / "ridgefill.json").read_text())
     assert a["files"] == b["files"]     # the source paths differ (fit hashes do not)
 
 
@@ -213,12 +213,12 @@ def test_int8_folder_keeps_every_other_file_and_names_its_source(tmp_path):
     manifest = {"format": 1, "split": 4, "projector": {"dtype": "bf16", "layout": "plain_nk",
                                                        "files": {"4": "proj.L4.safetensors", "5": "proj.L5.safetensors"}},
                 "files": {n: P.S.sha256_file(src / n) for n in files}}
-    (src / "kva.json").write_text(json.dumps(manifest))
+    (src / "ridgefill.json").write_text(json.dumps(manifest))
     assert P.main(["int8", "--from", str(src), "--out", str(out)]) == 0
-    m = json.loads((out / "kva.json").read_text())
+    m = json.loads((out / "ridgefill.json").read_text())
     assert m["projector"]["dtype"] == "i8" and m["projector"]["encoding"] == "i8*bf16[1x128]"
     assert m["projector"]["files"] == {"4": "proj8.L4.safetensors", "5": "proj8.L5.safetensors"}
-    assert m["projector"]["source"]["kva_json_sha256"] == P.S.sha256_file(src / "kva.json")
+    assert m["projector"]["source"]["ridgefill_json_sha256"] == P.S.sha256_file(src / "ridgefill.json")
     assert sorted(m["files"]) == ["proj8.L4.safetensors", "proj8.L5.safetensors"]   # README copied, never listed
     assert all(m["files"][n] == P.S.sha256_file(out / n) for n in m["files"])
     assert (out / "README.md").read_text() == "hello"
@@ -243,9 +243,9 @@ def test_final_adds_the_mtp_map_from_the_fitted_source_only(tmp_path):
     save_file({"layer.4": torch.randn(8, 33).to(torch.bfloat16), "final": fmap}, str(proj))
     manifest = {"format": 1, "stream_width": 32, "fit": {"proj_sha256": P.S.sha256_file(proj)},
                 "files": {"README.md": P.S.sha256_file(src / "README.md")}}
-    (src / "kva.json").write_text(json.dumps(manifest))
+    (src / "ridgefill.json").write_text(json.dumps(manifest))
     assert P.main(["final", "--from", str(src), "--proj", str(proj), "--out", str(out)]) == 0
-    m = json.loads((out / "kva.json").read_text())
+    m = json.loads((out / "ridgefill.json").read_text())
     assert m["final"] == {"file": "final.safetensors", "dtype": "bf16", "source_sha256": P.S.sha256_file(proj)}
     assert m["files"]["final.safetensors"] == P.S.sha256_file(out / "final.safetensors")
     assert (out / "README.md").read_text() == "hello"
@@ -259,13 +259,13 @@ def test_final_adds_the_mtp_map_from_the_fitted_source_only(tmp_path):
     nofinal = tmp_path / "nofinal.safetensors"
     save_file({"layer.4": torch.randn(8, 33).to(torch.bfloat16)}, str(nofinal))
     manifest["fit"]["proj_sha256"] = P.S.sha256_file(nofinal)
-    (src / "kva.json").write_text(json.dumps(manifest))
+    (src / "ridgefill.json").write_text(json.dumps(manifest))
     with pytest.raises(SystemExit):   # no final map in it
         P.main(["final", "--from", str(src), "--proj", str(nofinal), "--out", str(tmp_path / "y")])
 
 
 def test_reseal_unlists_documentation_and_touches_no_file(tmp_path):
-    """reseal: an existing folder whose kva.json lists README.md is rewritten to list everything but documentation;
+    """reseal: an existing folder whose ridgefill.json lists README.md is rewritten to list everything but documentation;
     every other file is byte-identical and the rest of the manifest is unchanged. A changed weight is refused."""
     folder = tmp_path / "p"
     folder.mkdir()
@@ -274,10 +274,10 @@ def test_reseal_unlists_documentation_and_touches_no_file(tmp_path):
     (folder / "notes.md").write_text("x")
     manifest = {"format": 1, "model": {"anchors": {"a": "00"}}, "files": {n: P.S.sha256_file(folder / n) for n in
                                                                            ("README.md", "notes.md", "proj8.L4.safetensors")}}
-    (folder / "kva.json").write_text(json.dumps(manifest))
+    (folder / "ridgefill.json").write_text(json.dumps(manifest))
     before = {n: P.S.sha256_file(folder / n) for n in ("README.md", "notes.md", "proj8.L4.safetensors")}
     assert P.main(["reseal", "--folder", str(folder)]) == 0
-    m = json.loads((folder / "kva.json").read_text())
+    m = json.loads((folder / "ridgefill.json").read_text())
     assert m["files"] == {"proj8.L4.safetensors": before["proj8.L4.safetensors"]}
     assert {k: v for k, v in m.items() if k != "files"} == {k: v for k, v in manifest.items() if k != "files"}
     assert before == {n: P.S.sha256_file(folder / n) for n in before}

@@ -16,7 +16,7 @@
 #                                  of every mode puts the same decoder token beside the same prefill
 #                                  chunk; each decoder's text (temperature 0), its sha256, the draft
 #                                  counters (R60), and each decoder alone. R54: a mode's decoder texts
-#                                  equal off's byte for byte; RADIANCE_KVA_MASK=all must change them.
+#                                  equal off's byte for byte; RADIANCE_RIDGEFILL_MASK=all must change them.
 #   scripts/conc.sh accept <label> R60's acceptance half: the long prompt, then RK_TEXT_D decoders 0.5 s
 #                                  later as SEPARATE requests, each reporting its own draft_n /
 #                                  draft_n_accepted (a batched request's counts sum all its choices,
@@ -24,7 +24,7 @@
 #
 # Env (defaults in tools/conc.py / scripts/common.sh): RK_DOCS (required: JSONL of {"prompt"}, the long
 # prompt's text), RK_PORT, RK_EVIDENCE, RK_STAGE (output dir under RK_EVIDENCE), RK_CONTAINER (default
-# radiance-kva-<mode of the running container>), RK_LENGTHS "16384 32768", RK_CONC "0 1 4 8", RK_REPS
+# radiance-ridgefill-<mode of the running container>), RK_LENGTHS "16384 32768", RK_CONC "0 1 4 8", RK_REPS
 # (7 ttft / 3 text), RK_TEXT_D "1 4", RK_TEXT_TOKENS 256, RK_TEXT_LENGTH 32768.
 # Output: $RK_EVIDENCE/$RK_STAGE/conc-<label>.json (+ conc-<label>.logs/, text-<label>-*.log).
 set -eu
@@ -34,8 +34,8 @@ set -eu
 [ "$#" -eq 2 ] || rk_die "usage: RK_DOCS=<ppl.jsonl> scripts/conc.sh ttft|text|accept <label>"
 [ -n "${RK_DOCS:-}" ] && [ -r "$RK_DOCS" ] || rk_die "RK_DOCS is not a readable file: ${RK_DOCS:-unset}"
 if [ -z "${RK_CONTAINER:-}" ]; then
-    RK_CONTAINER=$(docker ps --filter name=radiance-kva- --format '{{.Names}}' | head -1)
-    [ -n "$RK_CONTAINER" ] || rk_die "no radiance-kva container is running (scripts/serve.sh first)"
+    RK_CONTAINER=$(docker ps --filter name=radiance-ridgefill- --format '{{.Names}}' | head -1)
+    [ -n "$RK_CONTAINER" ] || rk_die "no radiance-ridgefill container is running (scripts/serve.sh first)"
 fi
 export RK_CONTAINER RK_DOCS
 exec python3 "$RK_TOOLS/conc.py" "$1" "$2"

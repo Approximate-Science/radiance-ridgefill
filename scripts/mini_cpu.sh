@@ -10,11 +10,11 @@
 # qwen4exp architecture declares ops only libr4d (the DEVICE library) has rows for, so the host
 # backend cannot get past declare -- not rad-convert, not serving, stock home or plugin home
 # alike. The script stops AT that wall and prints the exact op list; the container, the projector
-# and the RADIANCE_KVA speed/quality runs behind it are unreachable until those ops grow host
+# and the RADIANCE_RIDGEFILL speed/quality runs behind it are unreachable until those ops grow host
 # rows. Everything up to the wall is green and stays green.
 #
 # Usage: scripts/mini_cpu.sh [job-dir]     default job-dir: <repo>/../mini-run
-# Needs: cmake >= 3.21, g++ (C++20), and the research venv's python (KVA_PYTHON, below) with
+# Needs: cmake >= 3.21, g++ (C++20), and the research venv's python (RIDGEFILL_PYTHON, below) with
 #        numpy/safetensors for mini_model.py and pytest for the Python tier.
 
 set -u
@@ -22,7 +22,7 @@ set -u
 repo=$(cd "$(dirname "$0")/.." && pwd)
 job=${1:-$repo/../mini-run}
 RADIANCE_SRC=${RADIANCE_SRC:-/var/home/dylan/projects/inference/radiance}
-KVA_PYTHON=${KVA_PYTHON:-/var/home/dylan/projects/research/kva/.venv/bin/python}
+RIDGEFILL_PYTHON=${RIDGEFILL_PYTHON:-/var/home/dylan/projects/research/kva/.venv/bin/python}
 mkdir -p "$job"
 pass=0; fail=0
 
@@ -51,8 +51,8 @@ if [ ! -d "$job/build-host/radiance_home" ]; then
     cmake --build "$job/build-host" -j || { no "plugin host-only build"; exit 1; }
 fi
 plug="$job/build-host/radiance_home"
-[ -f "$plug/architectures/qwen4exp_fp8.so" ] && [ -f "$plug/kernels/kva.so" ] &&
-    ok "plugin home: $plug (architectures/qwen4exp_fp8.so shadows the install's, kernels/kva.so)" ||
+[ -f "$plug/architectures/qwen4exp_fp8.so" ] && [ -f "$plug/kernels/ridgefill.so" ] &&
+    ok "plugin home: $plug (architectures/qwen4exp_fp8.so shadows the install's, kernels/ridgefill.so)" ||
     no "plugin home incomplete under $plug"
 
 # ------------------------------------------------------- step 1b: the no-GPU test gates
@@ -62,7 +62,7 @@ if (cd "$job/build-host" && ctest -LE gpu --output-on-failure >/tmp/mini-ctest.l
 else
     no "plugin ctest -LE gpu"; sed -n '1,40p' /tmp/mini-ctest.log
 fi
-if (cd "$repo" && "$KVA_PYTHON" -m pytest tests -q >/tmp/mini-pytest.log 2>&1); then
+if (cd "$repo" && "$RIDGEFILL_PYTHON" -m pytest tests -q >/tmp/mini-pytest.log 2>&1); then
     ok "python tier: $(tail -1 /tmp/mini-pytest.log)"
 else
     no "python tier"; tail -5 /tmp/mini-pytest.log
@@ -72,7 +72,7 @@ fi
 
 if [ ! -f "$job/mini/ckpt/model.safetensors" ]; then
     say "== generating the mini checkpoint (tools/mini_model.py)"
-    "$KVA_PYTHON" "$repo/tools/mini_model.py" --out "$job/mini/ckpt" || { no "mini_model.py"; exit 1; }
+    "$RIDGEFILL_PYTHON" "$repo/tools/mini_model.py" --out "$job/mini/ckpt" || { no "mini_model.py"; exit 1; }
 fi
 sz=$(stat -c %s "$job/mini/ckpt/model.safetensors")
 ok "mini checkpoint: $job/mini/ckpt ($(echo "$sz/1073741824" | bc -l | cut -c1-5) GiB, $(ls "$job/mini/ckpt" | wc -l) files)"
@@ -99,14 +99,14 @@ fi
 # --------------------------------------------- step 3: serve it on the CPU backend
 # This is where the wall is (notes/mini-model.md §4): the stock arch declares device-only ops,
 # so the host backend cannot get past declare. Both homes are tried: the plugin home with
-# RADIANCE_KVA=off must fail on exactly the same ops as the stock home -- mode off runs the
+# RADIANCE_RIDGEFILL=off must fail on exactly the same ops as the stock home -- mode off runs the
 # in-tree declare unchanged, and identical failure is the only comparison the CPU can still make.
 
 stock_ops=""
 for home_kind in stock plugin; do
     [ "$home_kind" = stock ] && HOME3="$RAD/share/radiance" || HOME3="$plug:$RAD/share/radiance"
     log=/tmp/mini-serve-$home_kind.log
-    RADIANCE_HOME="$HOME3" RADIANCE_KVA=off timeout 300 "$RAD/bin/radiance" \
+    RADIANCE_HOME="$HOME3" RADIANCE_RIDGEFILL=off timeout 300 "$RAD/bin/radiance" \
         --model "$job/mini/ckpt" --debug-accept-reference-kernels --tp 1 \
         --max-num-batched-tokens 512 --max-model-len 8192 --port 18123 >"$log" 2>&1
     rc=$?
@@ -121,8 +121,8 @@ for home_kind in stock plugin; do
             stock_ops=$ops
             no "stock home: serve --debug-accept-reference-kernels --tp 1 (the stock qwen4exp declare needs device-only ops)"
         elif [ "$ops" = "$stock_ops" ]; then
-            say "NOTE: plugin home, RADIANCE_KVA=off: fails on exactly the stock home's op list -- mode off runs the in-tree declare unchanged"
-            no "plugin home RADIANCE_KVA=off: byte-identical output to stock cannot be shown (neither home gets past declare)"
+            say "NOTE: plugin home, RADIANCE_RIDGEFILL=off: fails on exactly the stock home's op list -- mode off runs the in-tree declare unchanged"
+            no "plugin home RADIANCE_RIDGEFILL=off: byte-identical output to stock cannot be shown (neither home gets past declare)"
         else
             no "plugin home: failed on a different op list than stock: $ops"
         fi
@@ -133,7 +133,7 @@ done
 
 say ""
 say "== $pass PASS, $fail FAIL. The container/projector steps behind the wall (mini container via"
-say "   rad-convert, tools/dev/mini_projector.py, RADIANCE_KVA=speed/quality runs) are unreachable"
+say "   rad-convert, tools/dev/mini_projector.py, RADIANCE_RIDGEFILL=speed/quality runs) are unreachable"
 say "   until the ops above grow host rows in radiance; see notes/mini-model.md §4-§5."
 [ "$fail" -eq 0 ] || exit 1
 exit 0

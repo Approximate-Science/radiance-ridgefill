@@ -3,11 +3,11 @@
 # lock (WORKER-RULES: the lock file is the caller's RK_GPU_LOCK; flock blocks until the holder releases it).
 #
 # USAGE: tools/refit/session.sh exact|speed
-#   exact  (1) `off` + RADIANCE_KVA_CAPTURE: the projector's held-out then training documents (activations);
-#          (2) `off` + RADIANCE_KVA_CAPTURE_STATE: the +st prompts' exact late delta-net states.
-#   speed  `speed` with the refit projector, no correction (RADIANCE_KVA_PROJ=refit, RADIANCE_KVA_ST=refit while
-#          the container holds no kva.str.*), tail 512 (tcc's FIT_TAIL) + RADIANCE_KVA_CAPTURE_STATE: the +st
-#          prompts' predicted states. Needs kva.projr.* appended to the container first.
+#   exact  (1) `off` + RADIANCE_RIDGEFILL_CAPTURE: the projector's held-out then training documents (activations);
+#          (2) `off` + RADIANCE_RIDGEFILL_CAPTURE_STATE: the +st prompts' exact late delta-net states.
+#   speed  `speed` with the refit projector, no correction (RADIANCE_RIDGEFILL_PROJ=refit, RADIANCE_RIDGEFILL_ST=refit while
+#          the container holds no ridgefill.str.*), tail 512 (tcc's FIT_TAIL) + RADIANCE_RIDGEFILL_CAPTURE_STATE: the +st
+#          prompts' predicted states. Needs ridgefill.projr.* appended to the container first.
 #
 # Recording is turned off with RADIANCE_DEBUG_ARGSHA=1 (radiance core/runtime/ctx.cpp:120 disables pass recording
 # under it; its digest code runs only on draft pass 1, which these runs never have), because a replayed pass never
@@ -17,7 +17,7 @@
 #
 # Env: RK_MODEL (required), RK_PLUGIN_HOME (required: the frozen home built from the capture commit),
 #      RK_GPU_LOCK (required), RK_REFIT_DATA (default <repo>/data/refit), RK_PORT (8100), plus scripts/common.sh's.
-# These set RADIANCE_KVA_PROJ/_ST/_DECLARE, which the current plugin refuses: run them only against the frozen
+# These set RADIANCE_RIDGEFILL_PROJ/_ST/_DECLARE, which the current plugin refuses: run them only against the frozen
 # home they were written for (see tools/dev/README.md).
 set -eu
 
@@ -47,14 +47,14 @@ serve_capture() {
     shift 4
     mkdir -p "$engine" "$store" || return 1
     if ! RK_DOCKER_EXTRA="-v $engine:/cap -e RADIANCE_DEBUG_ARGSHA=1" "$repo/scripts/serve.sh" "$mode"; then
-        docker logs radiance-kva-"$mode" > "$store/engine-$mode.log" 2>&1 || true
+        docker logs radiance-ridgefill-"$mode" > "$store/engine-$mode.log" 2>&1 || true
         "$repo/scripts/stop.sh"
         return 1
     fi
     status=0
     "$RK_PYTHON" "$here/capture.py" run --what "$what" --prompts "$@" --engine-dir "$engine" --store "$store" \
         --sums "$RK_REFIT_DATA/sums" --port "$RK_PORT" || status=$?
-    docker logs radiance-kva-"$mode" > "$store/engine-$mode.log" 2>&1 || true
+    docker logs radiance-ridgefill-"$mode" > "$store/engine-$mode.log" 2>&1 || true
     "$repo/scripts/stop.sh" || status=1
     return $status
 }
@@ -63,18 +63,18 @@ session() {
     kernel_clean before || return 1
     case $phase in
     exact)
-        RADIANCE_KVA_CAPTURE=/cap; export RADIANCE_KVA_CAPTURE
+        RADIANCE_RIDGEFILL_CAPTURE=/cap; export RADIANCE_RIDGEFILL_CAPTURE
         serve_capture off "$RK_REFIT_DATA/engine-act" activations "$RK_REFIT_DATA/store" \
             "$prompts/held.jsonl" "$prompts/train.jsonl" || return 1
-        unset RADIANCE_KVA_CAPTURE
+        unset RADIANCE_RIDGEFILL_CAPTURE
         kernel_clean between || return 1
-        RADIANCE_KVA_CAPTURE_STATE=/cap; export RADIANCE_KVA_CAPTURE_STATE
+        RADIANCE_RIDGEFILL_CAPTURE_STATE=/cap; export RADIANCE_RIDGEFILL_CAPTURE_STATE
         serve_capture off "$RK_REFIT_DATA/engine-state-exact" state "$RK_REFIT_DATA/state-exact" \
             "$prompts/sterm.jsonl" || return 1
         ;;
     speed)
-        RADIANCE_KVA_CAPTURE_STATE=/cap RADIANCE_KVA_PROJ=refit RADIANCE_KVA_ST=refit RADIANCE_KVA_TAIL=512
-        export RADIANCE_KVA_CAPTURE_STATE RADIANCE_KVA_PROJ RADIANCE_KVA_ST RADIANCE_KVA_TAIL
+        RADIANCE_RIDGEFILL_CAPTURE_STATE=/cap RADIANCE_RIDGEFILL_PROJ=refit RADIANCE_RIDGEFILL_ST=refit RADIANCE_RIDGEFILL_TAIL=512
+        export RADIANCE_RIDGEFILL_CAPTURE_STATE RADIANCE_RIDGEFILL_PROJ RADIANCE_RIDGEFILL_ST RADIANCE_RIDGEFILL_TAIL
         serve_capture speed "$RK_REFIT_DATA/engine-state-speed" state "$RK_REFIT_DATA/state-speed" \
             "$prompts/sterm.jsonl" || return 1
         ;;

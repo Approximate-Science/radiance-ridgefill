@@ -4,8 +4,8 @@
  * and the tests' own rather than core/build's: a plugin that only works against one builder has an
  * undeclared dependency. Include once per test binary, before the plugin source.
  */
-#ifndef KVA_TEST_RAD_FAKE_H
-#define KVA_TEST_RAD_FAKE_H
+#ifndef RIDGEFILL_TEST_RAD_FAKE_H
+#define RIDGEFILL_TEST_RAD_FAKE_H
 
 #include "rad_builder.h"
 #include "rad_device.h"
@@ -44,9 +44,9 @@ struct RadBuilder {
     std::set<std::string>                              refuse;   /* ops no kernel serves */
     std::set<rad_buf>                                  concurrent;
     std::vector<std::pair<int, rad_kvgroup>>           binds;
-    /* What rad_weight_encoding answers: for a kva.* key, the source named by it or by it plus a
-     * '.'-suffix ("kva.proj.4" holds kva.proj.4.weight and .bias, "kva.rowsel.score" does not hold
-     * kva.rowsel.score_none); for any other key, the first source CONTAINING it, as radiance's own
+    /* What rad_weight_encoding answers: for a ridgefill.* key, the source named by it or by it plus a
+     * '.'-suffix ("ridgefill.proj.4" holds ridgefill.proj.4.weight and .bias, "ridgefill.rowsel.score" does not hold
+     * ridgefill.rowsel.score_none); for any other key, the first source CONTAINING it, as radiance's own
      * arch_test matches ("ffn_gate_up_exps"). */
     std::vector<std::pair<std::string, RadEncoding>>   encs;
 };
@@ -73,7 +73,7 @@ int rad_weight_encoding(RadBuilder* b, const char* source, RadEncoding* out, int
     for (const auto& [key, e] : b->encs) {
         const size_t n = key.size();
         const bool hit = !source ? false
-                       : key.rfind("kva.", 0) == 0
+                       : key.rfind("ridgefill.", 0) == 0
                            ? !std::strncmp(source, key.c_str(), n) && (!source[n] || source[n] == '.')
                            : std::strstr(source, key.c_str()) != nullptr;
         if (hit) { *out = e; return RAD_OK; }
@@ -151,7 +151,7 @@ int rad_route_report(RadCtx*, int, const RadRouting*) { return RAD_OK; }
 int32_t* rad_route_counts(RadCtx*, int, int64_t) { return nullptr; }
 void* rad_buf_ptr(RadCtx*, rad_buf b) { return (void*)(uintptr_t)(b * 64 + 16); }
 
-/* THE PROJECTOR'S DEVICE MEMORY (kva_projector.h). VRAM is a fake address range nothing reads: a
+/* THE PROJECTOR'S DEVICE MEMORY (ridgefill_projector.h). VRAM is a fake address range nothing reads: a
  * copy into it is recorded, not made. Host-mapped memory is real (the plugin writes it on the
  * host), and its device view is a different fake address, as a real device view is. Declare runs
  * with no RadCtx, so only a step's device calls are counted against the step. */
@@ -237,4 +237,4 @@ bool has(const std::string& s, const char* what) { return s.find(what) != std::s
 
 }  /* namespace */
 
-#endif /* KVA_TEST_RAD_FAKE_H */
+#endif /* RIDGEFILL_TEST_RAD_FAKE_H */

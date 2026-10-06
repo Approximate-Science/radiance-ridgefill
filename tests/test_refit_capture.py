@@ -1,6 +1,6 @@
 """tools/refit/convert.py + capture.py on synthetic captures written in the plugin's layout (notes/arch.md
 "Capture"): the record the research code reads, the chunk keys, the replay refusal, filing and the running sums.
-Needs KVA_RESEARCH_ROOT (the research code is imported read-only); without it every test here is SKIPPED."""
+Needs RIDGEFILL_RESEARCH_ROOT (the research code is imported read-only); without it every test here is SKIPPED."""
 import argparse
 import json
 import os
@@ -12,7 +12,7 @@ import pytest
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools" / "refit"))
-pytestmark = pytest.mark.skipif(not os.environ.get("KVA_RESEARCH_ROOT"), reason="KVA_RESEARCH_ROOT not set")
+pytestmark = pytest.mark.skipif(not os.environ.get("RIDGEFILL_RESEARCH_ROOT"), reason="RIDGEFILL_RESEARCH_ROOT not set")
 
 SPLIT, LAYERS, HIDDEN, HC, CHUNK, STRIDE = 2, [2, 3], 4, 4, 16, 8
 
@@ -22,7 +22,7 @@ def bf16_bits(t):
 
 
 def write_chunk(d, ids, start, rng, bi_of=None):
-    """One chunk's files + capture.jsonl line, as arch/kva_dump.h writes them; bi_of(layer, boundary) gives the
+    """One chunk's files + capture.jsonl line, as arch/ridgefill_dump.h writes them; bi_of(layer, boundary) gives the
     block inputs (random when absent)."""
     import capture
     n = len(ids)
@@ -54,8 +54,8 @@ def write_prompt(d, ids, seed=0, bi_of=None):
 def mods():
     import capture
     import convert
-    import kva_research
-    kva_research.root()
+    import ridgefill_research
+    ridgefill_research.root()
     return capture, convert
 
 

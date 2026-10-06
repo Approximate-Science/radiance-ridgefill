@@ -13,7 +13,7 @@ import plan_diff as D  # noqa: E402
 PLAN = """info   plan     3 weight(s): 1 quantised by the recipe, 2 kept as the checkpoint holds them
 debug rad_convert.cpp:652    blk.0.attn_k.weight          i8*bf16[1x128]      1.2 MiB  rtn clamp=sym,codes=i8
 debug rad_convert.cpp:652    output_norm.weight           bf16                5.0 KiB  as is
-debug rad_convert.cpp:652    kva.st.24                    f32                 3.0 MiB  as is
+debug rad_convert.cpp:652    ridgefill.st.24                    f32                 3.0 MiB  as is
 info   --plan-only: about 4.2 MiB would be written; nothing was written to m.rad.
 """
 HELD = """weight directory (2 entries, grouped by layer and movement unit)
@@ -28,7 +28,7 @@ HELD = """weight directory (2 entries, grouped by layer and movement unit)
 def write(tmp_path, plan=PLAN, held=HELD):
     (tmp_path / "plan.log").write_text(plan)
     (tmp_path / "held.txt").write_text(held)
-    save_file({"kva.st.24": torch.zeros(1)}, str(tmp_path / "s.safetensors"))
+    save_file({"ridgefill.st.24": torch.zeros(1)}, str(tmp_path / "s.safetensors"))
     return ["--plan", str(tmp_path / "plan.log"), "--container", str(tmp_path / "held.txt"),
             "--expect-new", str(tmp_path / "s.safetensors")]
 
@@ -58,7 +58,7 @@ def test_a_changed_encoding_fails(tmp_path):
 
 
 def test_an_expected_weight_absent_from_the_plan_fails(tmp_path):
-    plan = "\n".join(line for line in PLAN.splitlines() if "kva.st.24" not in line)
+    plan = "\n".join(line for line in PLAN.splitlines() if "ridgefill.st.24" not in line)
     assert D.main(write(tmp_path, plan=plan)) == 1
 
 
@@ -68,7 +68,7 @@ def test_unparseable_input_is_refused(tmp_path):
 
 
 def test_after_the_append_the_container_holds_exactly_the_plan(tmp_path):
-    held = HELD + "      kva.st.24             f32              1           3.0 MiB  @9999999   checkpoint\n"
+    held = HELD + "      ridgefill.st.24             f32              1           3.0 MiB  @9999999   checkpoint\n"
     args = write(tmp_path, held=held)
     assert D.main(args[:4]) == 0          # no --expect-new: nothing may be new
 

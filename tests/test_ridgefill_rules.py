@@ -1,7 +1,7 @@
-"""The transcribed class56 rule (tools/kva_rules.py). Run: python -m pytest tests/
+"""The transcribed class56 rule (tools/ridgefill_rules.py). Run: python -m pytest tests/
 
-The cross-check against the original (fnlev/rules.py) runs only with KVA_RESEARCH_ROOT (a checkout of the
-research repo) and KVA_TOKENIZER (the checkpoint directory); otherwise it is SKIPPED, never passed.
+The cross-check against the original (fnlev/rules.py) runs only with RIDGEFILL_RESEARCH_ROOT (a checkout of the
+research repo) and RIDGEFILL_TOKENIZER (the checkpoint directory); otherwise it is SKIPPED, never passed.
 """
 import math
 import os
@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-import kva_rules as R  # noqa: E402
+import ridgefill_rules as R  # noqa: E402
 
 INF = float("-inf")
 
@@ -90,12 +90,12 @@ def test_score_table_marks_padding_and_specials_minus_inf():
     assert [math.isinf(score[1]), math.isinf(score[2]), math.isinf(score[3])] == [True, True, True]
 
 
-@pytest.mark.skipif(not (os.environ.get("KVA_RESEARCH_ROOT") and os.environ.get("KVA_TOKENIZER")),
-                    reason="needs KVA_RESEARCH_ROOT (research repo) and KVA_TOKENIZER (checkpoint dir)")
+@pytest.mark.skipif(not (os.environ.get("RIDGEFILL_RESEARCH_ROOT") and os.environ.get("RIDGEFILL_TOKENIZER")),
+                    reason="needs RIDGEFILL_RESEARCH_ROOT (research repo) and RIDGEFILL_TOKENIZER (checkpoint dir)")
 def test_transcription_equals_fnlev_rules_over_the_whole_vocab():
-    sys.path.insert(0, os.environ["KVA_RESEARCH_ROOT"])
+    sys.path.insert(0, os.environ["RIDGEFILL_RESEARCH_ROOT"])
     from fnlev import rules as original
-    tok = R.load_tokenizer(os.environ["KVA_TOKENIZER"])
+    tok = R.load_tokenizer(os.environ["RIDGEFILL_TOKENIZER"])
     ours = [None if t is None else R.coarse(R.token_class(t)) for t in R.token_texts(tok)]
-    theirs = original.Rules(model_dir=os.environ["KVA_TOKENIZER"], freq=None, tok=tok).cls
+    theirs = original.Rules(model_dir=os.environ["RIDGEFILL_TOKENIZER"], freq=None, tok=tok).cls
     assert ours == theirs

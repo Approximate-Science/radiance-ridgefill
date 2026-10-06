@@ -3,7 +3,7 @@
  * A toy adapter, whole in this file: four dense attention layers, a plain 64-wide residual (wide =
  * n_embd), no recurrent state, no MoE, tile 1, every block taking a pre-normed input. Its "model" is
  * three buffers and no ops; every step hook only counts its calls. The file includes the core
- * (arch/kva_core.h) and the shared fakes, and NOTHING of qwen4exp or of radiance's arch sources: its
+ * (arch/ridgefill_core.h) and the shared fakes, and NOTHING of qwen4exp or of radiance's arch sources: its
  * target has no ${RADIANCE_SRC}/arch on the include path, so the build itself is the proof that no
  * core header reaches for the in-tree architecture (tests/core_purity.cmake is the grep half).
  *
@@ -20,8 +20,8 @@
 #include "rad_test.h"
 #include "rad_fake.h"
 
-#define KVA_RADIANCE_VERSION "0.0.0-test"
-#include "kva_core.h"
+#define RIDGEFILL_RADIANCE_VERSION "0.0.0-test"
+#include "ridgefill_core.h"
 #include "folder_fixture.h"
 
 #include <algorithm>
@@ -29,7 +29,7 @@
 #include <string>
 #include <vector>
 
-using namespace kva;
+using namespace ridgefill;
 
 /* ==================================================================== the toy adapter */
 namespace {
@@ -52,13 +52,13 @@ int toy_model_declare(RadBuilder* b, const RadBuildCtx* ctx) {
 }
 
 void toy_conn(RadCtx*, int64_t, bool, bool, int64_t, int64_t, int64_t) { ++g_calls["conn"]; }
-void toy_late_block(RadCtx*, const Kva&, int64_t, const RadBatch*, const Pass&, StateDump*, Path path,
+void toy_late_block(RadCtx*, const RidgeFill&, int64_t, const RadBatch*, const Pass&, StateDump*, Path path,
                     int64_t, int64_t) { ++g_calls[std::string("late_block.") + kPathNames[path]]; }
-void toy_ffn(RadCtx*, const Kva&, int64_t, const RadBatch*, int64_t, int64_t, rad_op drop, rad_buf) {
+void toy_ffn(RadCtx*, const RidgeFill&, int64_t, const RadBatch*, int64_t, int64_t, rad_op drop, rad_buf) {
     ++g_calls[drop ? "ffn.drop" : "ffn"];
 }
 void toy_prologue(RadCtx*, const RadBatch*) { ++g_calls["prologue"]; }
-void toy_stock_layer(RadCtx*, const Kva&, int64_t, const RadBatch*, bool probes) {
+void toy_stock_layer(RadCtx*, const RidgeFill&, int64_t, const RadBatch*, bool probes) {
     ++g_calls[probes ? "stock_layer.probes" : "stock_layer"];
 }
 void toy_epilogue(RadCtx*, const RadBatch*) { ++g_calls["epilogue"]; }
@@ -66,10 +66,10 @@ void toy_stock_step(RadCtx*, const RadBatch*) { ++g_calls["stock_step"]; }
 
 const std::vector<const char*> kNoStraddle(kLayers, "the toy's attention has no per-row sparse form");
 
-KvaAdapter toy_adapter(int rank) {
+RidgeFillAdapter toy_adapter(int rank) {
     const ToyModel& m = g_toy[rank];
-    KvaAdapter a;
-    a.log_name = "toy_kva";
+    RidgeFillAdapter a;
+    a.log_name = "toy_ridgefill";
     a.match_name = "toy";
     a.shadow_so = "toy.so";
     a.n_layer = kLayers;
@@ -104,8 +104,8 @@ KvaAdapter toy_adapter(int rank) {
 /* The toy plugin's declare: its own graph, then the core over its facts. */
 int toy_declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* ctx) {
     RAD_ARCH_TRY(toy_model_declare(b, ctx));
-    Kva& k = g_kva[ctx->rank];
-    k = Kva{};
+    RidgeFill& k = g_ridgefill[ctx->rank];
+    k = RidgeFill{};
     k.ad = toy_adapter(ctx->rank);
     return core_declare(b, meta, ctx, k);
 }
@@ -155,7 +155,7 @@ struct Declared { RadBuilder b; int st = RAD_OK; std::string log; };
 
 Declared declare_toy(const char* mode) {
     Declared d;
-    Env env({{"RADIANCE_KVA", mode}});
+    Env env({{"RADIANCE_RIDGEFILL", mode}});
     const RadModelMeta meta = toy_meta();
     const RadBuildCtx ctx = toy_ctx();
     d.log = stderr_of([&] { d.st = toy_declare(&d.b, &meta, &ctx); });
@@ -196,7 +196,7 @@ std::vector<std::string> ops_named(const RadBuilder& b) {
 }
 
 /* The planner's minimum bulk rows is a host-placement cost gate; these cases are about capabilities. */
-[[maybe_unused]] const int g_min_bulk_off = setenv("RADIANCE_KVA_MIN_BULK_ROWS", "0", 1);
+[[maybe_unused]] const int g_min_bulk_off = setenv("RADIANCE_RIDGEFILL_MIN_BULK_ROWS", "0", 1);
 
 }  /* namespace */
 
@@ -220,7 +220,7 @@ TEST(the_planner_serves_a_dense_toy) {
         hold_toy();
         const Declared d = declare_toy(w.mode);
         REQUIRE_EQ(d.st, RAD_OK);
-        const Kva& k = g_kva[0];
+        const RidgeFill& k = g_ridgefill[0];
         CHECK(k.have_proj);
         CHECK(!can_stream(k));
         CHECK(!k.straddle_layers);
@@ -239,9 +239,9 @@ TEST(the_toy_projector_folder_is_matched_and_refused) {
     hold_toy();
     Declared ok = declare_toy("speed");
     REQUIRE_EQ(ok.st, RAD_OK);
-    CHECK(g_kva[0].have_proj);
-    CHECK_EQ(g_kva[0].split, kToySplit);
-    CHECK(has(ok.log, "radiance: toy_kva: KVA: projector /test/toy-projector"));
+    CHECK(g_ridgefill[0].have_proj);
+    CHECK_EQ(g_ridgefill[0].split, kToySplit);
+    CHECK(has(ok.log, "radiance: toy_ridgefill: RidgeFill: projector /test/toy-projector"));
 
     struct Bad { const char* why; std::function<void()> hold; const char* says; };
     const Bad bad[] = {
@@ -257,7 +257,7 @@ TEST(the_toy_projector_folder_is_matched_and_refused) {
         x.hold();
         const Declared d = declare_toy("speed");
         CHECK_EQ(d.st, RAD_OK);   /* refused = served stock, not a failed start */
-        CHECK(!g_kva[0].have_proj);
+        CHECK(!g_ridgefill[0].have_proj);
         CHECK(has(d.log, "REFUSED"));
         if (!has(d.log, x.says)) std::fprintf(stderr, "  [%s] log was: %s\n", x.why, d.log.c_str());
         CHECK(has(d.log, x.says));
@@ -271,20 +271,20 @@ TEST(the_toy_config_takes_its_tail_from_the_adapter) {
     hold_toy();
     Declared d = declare_toy("speed");
     REQUIRE_EQ(d.st, RAD_OK);
-    CHECK_EQ(g_kva[0].cfg.tail, 1024);
+    CHECK_EQ(g_ridgefill[0].cfg.tail, 1024);
     {
-        Env tail({{"RADIANCE_KVA_TAIL", "384"}});
+        Env tail({{"RADIANCE_RIDGEFILL_TAIL", "384"}});
         hold_toy();
         d = declare_toy("speed");
         CHECK_EQ(d.st, RAD_OK);
-        CHECK_EQ(g_kva[0].cfg.tail, 384);
+        CHECK_EQ(g_ridgefill[0].cfg.tail, 384);
     }
     {
-        Env tail({{"RADIANCE_KVA_TAIL", "128"}});
+        Env tail({{"RADIANCE_RIDGEFILL_TAIL", "128"}});
         hold_toy();
         d = declare_toy("speed");
         CHECK_EQ(d.st, RAD_E_INVAL);
-        CHECK(has(d.log, "radiance: toy_kva: kva.tail is 128 tokens; the shortest exact tail this "
+        CHECK(has(d.log, "radiance: toy_ridgefill: ridgefill.tail is 128 tokens; the shortest exact tail this "
                          "method was measured at is 256"));
     }
 }
@@ -298,13 +298,13 @@ TEST(the_toy_declare_adds_only_generic_ops) {
     hold_toy();
     Declared d = declare_toy("speed");
     REQUIRE_EQ(d.st, RAD_OK);
-    const Kva& k = g_kva[0];
-    const std::vector<std::string> want = {"kva_gemm_nt_bias", "kva_gemm_nt_bias", "cast", "cast",
-                                           "kva_select", "kva_mask"};
+    const RidgeFill& k = g_ridgefill[0];
+    const std::vector<std::string> want = {"ridgefill_gemm_nt_bias", "ridgefill_gemm_nt_bias", "cast", "cast",
+                                           "ridgefill_select", "ridgefill_mask"};
     CHECK(ops_named(d.b) == want);
     for (int64_t l = kToySplit; l < kLayers; ++l) {
         const RecOp& g = d.b.ops[(size_t)k.op_proj[(size_t)l] - 1];
-        CHECK_EQ(g.op, std::string("kva_gemm_nt_bias"));
+        CHECK_EQ(g.op, std::string("ridgefill_gemm_nt_bias"));
         for (const RecParam& p : g.p) {
             if (p.key == "N") CHECK_EQ(p.ival, kEmbd);
             if (p.key == "K") CHECK_EQ(p.ival, kEmbd);
@@ -356,7 +356,7 @@ TEST(the_toy_declare_adds_only_generic_ops) {
     g_mem.copies.clear();
     d = declare_toy("plumb");
     REQUIRE_EQ(d.st, RAD_OK);
-    CHECK(ops_named(d.b) == std::vector<std::string>{"kva_mask"});
+    CHECK(ops_named(d.b) == std::vector<std::string>{"ridgefill_mask"});
     CHECK(g_mem.copies.empty());
     CHECK(has(d.log, "rank 0 holds nothing"));
 }
@@ -377,7 +377,7 @@ TEST(no_core_header_names_the_in_tree_architecture) {
     CHECK_EQ(g_calls["late_block.masked"], (int)(kLayers - kToySplit));
     CHECK_EQ(g_calls["ffn"], (int)(kLayers - kToySplit));
     CHECK_EQ(g_calls["ffn.drop"], 0);
-    CHECK_EQ(std::string(g_kva[0].ad.log_name), std::string("toy_kva"));
+    CHECK_EQ(std::string(g_ridgefill[0].ad.log_name), std::string("toy_ridgefill"));
 }
 
 RAD_TEST_MAIN()

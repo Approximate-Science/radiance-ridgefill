@@ -2,21 +2,21 @@
  *
  * WHY A COPY. MoeFP8::pass (radiance 1.0.13 d0f639b, arch/common/rad_block_moe_fp8.h:1408-1584) has no hook
  * for the two things an approximate pass needs: the routing slots of bulk rows dropped
- * (`kva_drop_rows`, ids := -1) between the top-k and the scatter, and the stager probes issued
+ * (`ridgefill_drop_rows`, ids := -1) between the top-k and the scatter, and the stager probes issued
  * right after one layer's gate-up GEMM (notes/impl.md §2). Everything else below is that function
  * verbatim, with the same handles and operands; tests/arch_static_test.cpp holds it to the in-tree
  * pass issue for issue (R53'). Dropped slots cost nothing downstream: moe_scatter ignores an id
  * outside the rank's experts, the grouped GEMMs bound their work by the live count, and the gather
  * gives an unclaimed slot zero weight (libr4d/r4d_moe.hip:477-479, 909-916, 1580-1586).
  *
- * Omitted, and refused at declare instead (kva_declare.h check_fill): the calibration tap.
+ * Omitted, and refused at declare instead (ridgefill_declare.h check_fill): the calibration tap.
  */
 #ifndef QWEN4EXP_MOE_H
 #define QWEN4EXP_MOE_H
 
 #include <functional>
 
-namespace qwen4exp_kva {
+namespace qwen4exp_ridgefill {
 
 using namespace rad::arch;
 
@@ -191,6 +191,6 @@ inline void moe_layer(RadCtx* c, const MoeFP8& e, const MoeArm& arm, const RadBa
     rad_route_report(c, e.layer, &r);
 }
 
-}  /* namespace qwen4exp_kva */
+}  /* namespace qwen4exp_ridgefill */
 
 #endif /* QWEN4EXP_MOE_H */

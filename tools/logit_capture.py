@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""logit_capture.py -- requests for gate 1 against a server started with RADIANCE_KVA_DUMP_LOGITS=<dir>
+"""logit_capture.py -- requests for gate 1 against a server started with RADIANCE_RIDGEFILL_DUMP_LOGITS=<dir>
 (mounted from the host at <host dir>) and --profile-ops (no replayed passes, so every step dumps).
 
 Sends conc.py text's arrangement once -- ONE request whose prompt is [decoder_1 .. decoder_D, the long

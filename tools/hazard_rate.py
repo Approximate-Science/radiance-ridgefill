@@ -27,12 +27,12 @@ SUPERSET of the true hazard (positions the producer approximated): an append-onl
 overlap the cache in its tail yet be exact, which is why C of the branch corpus is built with
 a computed prompt >= T and must NOT be flagged, while a branch (N2 - T < P) always is.
 
-`--plugin-log` parses the log line the KVA plugin prints once per request that resumed from a
+`--plugin-log` parses the log line the RidgeFill plugin prints once per request that resumed from a
 cached checkpoint, reporting its device hazard counter (PLAN-FIX §5.4):
 
   HAZARD_LOG_RE below is the contract.  It accepts
-      kva: hazard <positions> positions
-      kva: hazard request <id> <positions> positions
+      ridgefill: hazard <positions> positions
+      ridgefill: hazard request <id> <positions> positions
   (extra text around the marker is ignored; a `request <id>` names the request so the two
   counts can be cross-checked per request, not just in total).  On the branch corpus the
   plugin counter must equal the records-side overlap (R65: the counter equals
@@ -51,15 +51,15 @@ from pathlib import Path
 # The plugin's hazard log line -- the contract with the engine-side instrument
 # (PLAN-FIX §5.4).  One line per request that resumed from a cached checkpoint:
 #
-#     kva: hazard 1395 positions
-#     kva: hazard request branch/000/B 1395 positions
+#     ridgefill: hazard 1395 positions
+#     ridgefill: hazard request branch/000/B 1395 positions
 #
 # `positions` is the device hazard counter for that request (named group "positions"; the
 # optional `request <id>` names it, named group "request").  A line that matches nothing is
 # counted as unparsed and reported, never silently dropped.
 # ---------------------------------------------------------------------------
 HAZARD_LOG_RE = re.compile(
-    r"\bkva:\s+hazard\b(?:\s+request\s+(?P<request>\S+))?\s+(?P<positions>\d+)\s+positions\b")
+    r"\bridgefill:\s+hazard\b(?:\s+request\s+(?P<request>\S+))?\s+(?P<positions>\d+)\s+positions\b")
 
 
 def die(msg):
@@ -141,7 +141,7 @@ def parse_plugin_log(path):
         die(f"--plugin-log unreadable: {e}")
     out = {"lines": 0, "positions_total": 0, "by_request": {}, "unnamed": [], "unparsed": []}
     for lineno, line in enumerate(text.splitlines(), 1):
-        if "kva" not in line:          # fast reject; the regex is the authority
+        if "ridgefill" not in line:          # fast reject; the regex is the authority
             continue
         m = HAZARD_LOG_RE.search(line)
         if not m:
@@ -260,10 +260,10 @@ def main(argv=None):
     ap.add_argument("--records", nargs="+", required=True,
                     help="JSONL of response records (see the module docstring for the shapes)")
     ap.add_argument("--plugin-log", default=None,
-                    help="server log to parse the plugin's `kva: hazard ... positions` lines "
+                    help="server log to parse the plugin's `ridgefill: hazard ... positions` lines "
                          f"(contract: {HAZARD_LOG_RE.pattern})")
     ap.add_argument("--tail", type=int, default=2048,
-                    help="T, the exact tail (kva.tail; default 2048)")
+                    help="T, the exact tail (ridgefill.tail; default 2048)")
     ap.add_argument("--out", default=None, help="write the machine-readable summary here")
     ap.add_argument("--require-match", action="store_true",
                     help="exit 1 when the records and the plugin log disagree (needs "

@@ -1,8 +1,8 @@
-/* arch_static_test.cpp -- the KVA arch plugin's declared graph and issued sequence, asserted with no
+/* arch_static_test.cpp -- the RidgeFill arch plugin's declared graph and issued sequence, asserted with no
  * GPU, no model file and no core (R11, arch half). Modelled on radiance's tests/arch_test.cpp: a
  * recording fake builder and a recording fake RadCtx, both included plugins called directly.
  *
- * THE ORACLE IS THE IN-TREE PLUGIN. `off`, and any container without kva.* weights, must declare
+ * THE ORACLE IS THE IN-TREE PLUGIN. `off`, and any container without ridgefill.* weights, must declare
  * exactly what qwen4exp_fp8 declares and issue exactly what it issues (R6, R7 at the graph level);
  * the comparisons below are element by element against qwen4exp_fp8::declare / ::step run on a
  * second builder, never against numbers typed here.
@@ -26,8 +26,8 @@
 
 /* ==================================================================== the plugin under test */
 /* The release the guard compares against; the build sets it for the plugin (arch/CMakeLists.txt). */
-#define KVA_RADIANCE_VERSION "0.0.0-test"
-#include "qwen4exp_kva.cpp"
+#define RIDGEFILL_RADIANCE_VERSION "0.0.0-test"
+#include "qwen4exp_ridgefill.cpp"
 #include "folder_fixture.h"   /* the tiny container, the test folder and its tensors */
 
 using rad::arch::bcol;
@@ -93,50 +93,50 @@ RadBuildCtx served_ctx(int rank = 0, int world = 1) {
 
 /* The manifest the test folder carries: this test model's name, a few of its metadata keys, the
  * tiny container's tokenizer hash; `model` may add members to the model block. */
-qwen4exp_kva::Json test_manifest(const std::string& model = "") {
+qwen4exp_ridgefill::Json test_manifest(const std::string& model = "") {
     const std::string text = std::string(R"({"format": 1, "adapter": "qwen4exp", "split": 4,
         "model": {"arch_id": "qwen4exp", "name": "test-q38-flashnext",
                   "meta": {"hc_count": "4", "linear_num_value_heads": "48"},
                   "vocab_sha256": ")") + kTinyVocab + "\"" + model + R"(},
         "files": {"proj.L4.safetensors": "unused by the test folder"}})";
-    qwen4exp_kva::Json j;
-    qwen4exp_kva::json_parse(text.data(), text.size(), &j);
+    qwen4exp_ridgefill::Json j;
+    qwen4exp_ridgefill::json_parse(text.data(), text.size(), &j);
     return j;
 }
 
-/* A fresh projector folder holding, for layers kSplit..7, what `bases` name: "kva.proj" the maps
- * and biases, "kva.st" the delta-net layers' corrections (layers 4, 5, 6). The builder argument is
+/* A fresh projector folder holding, for layers kSplit..7, what `bases` name: "ridgefill.proj" the maps
+ * and biases, "ridgefill.st" the delta-net layers' corrections (layers 4, 5, 6). The builder argument is
  * the old container-weight call's and is not read: nothing comes from the container now. */
-void hold_kva(RadBuilder&, std::initializer_list<const char*> bases, const std::string& model = "") {
+void hold_ridgefill(RadBuilder&, std::initializer_list<const char*> bases, const std::string& model = "") {
     reset_projector();
-    g_test_folder = qwen4exp_kva::Folder{};
+    g_test_folder = qwen4exp_ridgefill::Folder{};
     g_test_folder.place = { "/test/projector", "the test", tiny_container() };
     g_test_folder.manifest = test_manifest(model);
     for (const char* base : bases)
         for (int l = kSplit; l < 8; ++l) {
             const std::string L = std::to_string(l);
-            if (!std::strcmp(base, "kva.proj")) {
+            if (!std::strcmp(base, "ridgefill.proj")) {
                 add_tensor("proj." + L + ".weight", RAD_BF16, {2560, 4 * 2560});
                 add_tensor("proj." + L + ".bias", RAD_BF16, {2560});
             } else if (l != 7) {
                 add_tensor("st." + L, RAD_F32, {48, 128, 128});
             }
         }
-    qwen4exp_kva::g_folder_for_test = &g_test_folder;
+    qwen4exp_ridgefill::g_folder_for_test = &g_test_folder;
 }
 
 /* What an appended container still holds (the retired route): the plugin declares none of it. */
 void hold_appended_weights(RadBuilder& b) {
-    for (const char* base : {"kva.proj", "kva.st"})
+    for (const char* base : {"ridgefill.proj", "ridgefill.st"})
         for (int l = kSplit; l < 8; ++l)
             b.encs.push_back({std::string(base) + "." + std::to_string(l),
                               rad_enc_plain(std::strstr(base, ".st") ? RAD_F32 : RAD_BF16)});
-    b.encs.push_back({"kva.rowsel.score", rad_enc_plain(RAD_F32)});
+    b.encs.push_back({"ridgefill.rowsel.score", rad_enc_plain(RAD_F32)});
 }
 
-/* Adds a row table to the folder hold_kva made: "kva.rowsel.score[_none|_all]" -> score[...]. */
+/* Adds a row table to the folder hold_ridgefill made: "ridgefill.rowsel.score[_none|_all]" -> score[...]. */
 void hold_score(RadBuilder&, const char* name) {
-    add_tensor(std::string(name).substr(std::strlen("kva.rowsel.")), RAD_F32, {248320});
+    add_tensor(std::string(name).substr(std::strlen("ridgefill.rowsel.")), RAD_F32, {248320});
 }
 
 /* The SERVED container's formats (data/recipes/qwen4exp-w4nl64-i8-hc8m.recipe): four-bit rotated
@@ -160,10 +160,10 @@ void served(RadBuilder& b) {
 }
 
 
-/* The static cases run chunks of 64 to 2,048 rows; the planner's default gate (RADIANCE_KVA_MIN_BULK_ROWS,
+/* The static cases run chunks of 64 to 2,048 rows; the planner's default gate (RADIANCE_RIDGEFILL_MIN_BULK_ROWS,
  * 1,024 bulk rows: a host-streamed projector's fixed cost) would send the small ones to the stock step. The
  * suite runs with it off, as it did before the gate; the gate and its default are their own case. */
-[[maybe_unused]] const int g_min_bulk_off = setenv("RADIANCE_KVA_MIN_BULK_ROWS", "0", 1);
+[[maybe_unused]] const int g_min_bulk_off = setenv("RADIANCE_RIDGEFILL_MIN_BULK_ROWS", "0", 1);
 
 
 const RadWeightDecl* weight(const RadBuilder& b, const std::string& name) {
@@ -199,7 +199,7 @@ void check_same_graph(const RadBuilder& a, const RadBuilder& b) {
 
 /* ==================================================================== off is the in-tree plugin */
 
-/* No kva.* weights, no switch: the KVA declare is the in-tree declare, op for op, on both ranks of a
+/* No ridgefill.* weights, no switch: the RidgeFill declare is the in-tree declare, op for op, on both ranks of a
  * TP2 deployment, with the MTP head declared, for a bf16 container and for the served formats. */
 TEST(off_declares_exactly_the_in_tree_graph) {
     RadModelMeta meta = flash_next_meta();
@@ -209,12 +209,12 @@ TEST(off_declares_exactly_the_in_tree_graph) {
                 for (bool fmt : {false, true}) {
                 RadBuildCtx c = served_ctx(rank, world);
                 c.max_spec = spec;
-                RadBuilder stock, kva;
-                if (fmt) { served(stock); served(kva); }
+                RadBuilder stock, ridgefill;
+                if (fmt) { served(stock); served(ridgefill); }
                 REQUIRE_EQ(qwen4exp_fp8::declare(&stock, &meta, &c), RAD_OK);
-                REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
+                REQUIRE_EQ(qwen4exp_ridgefill::declare(&ridgefill, &meta, &c), RAD_OK);
                 CHECK(stock.ops.size() > 100);
-                check_same_graph(stock, kva);
+                check_same_graph(stock, ridgefill);
             }
 }
 
@@ -223,20 +223,20 @@ TEST(off_declares_exactly_the_in_tree_graph) {
 TEST(off_with_a_projector_folder_still_declares_the_in_tree_graph) {
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
-    Env env({{"RADIANCE_KVA", "off"}});
-    RadBuilder stock, kva;
-    hold_kva(kva, {"kva.proj", "kva.st"});
-    hold_score(kva, "kva.rowsel.score");
+    Env env({{"RADIANCE_RIDGEFILL", "off"}});
+    RadBuilder stock, ridgefill;
+    hold_ridgefill(ridgefill, {"ridgefill.proj", "ridgefill.st"});
+    hold_score(ridgefill, "ridgefill.rowsel.score");
     REQUIRE_EQ(qwen4exp_fp8::declare(&stock, &meta, &c), RAD_OK);
-    REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
-    check_same_graph(stock, kva);
-    CHECK(!qwen4exp_kva::g_loaded.tried);
+    REQUIRE_EQ(qwen4exp_ridgefill::declare(&ridgefill, &meta, &c), RAD_OK);
+    check_same_graph(stock, ridgefill);
+    CHECK(!qwen4exp_ridgefill::g_loaded.tried);
     CHECK_EQ(g_mem.copies.size(), (size_t)0);
 }
 
 /* A mode is asked and the folder is missing, or not this model's, or misshapen: the folder is
  * refused by name and the declare is the in-tree graph exactly (DD-K: refuse only what cannot run,
- * and serve stock). Also when the container still holds appended kva.* weights: none is declared. */
+ * and serve stock). Also when the container still holds appended ridgefill.* weights: none is declared. */
 TEST(a_mode_without_a_usable_projector_serves_the_in_tree_graph) {
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
@@ -244,38 +244,38 @@ TEST(a_mode_without_a_usable_projector_serves_the_in_tree_graph) {
     const Case cases[] = {
         { "no folder", [](RadBuilder&) { reset_projector(); }, "no projector folder" },
         { "another arch", [](RadBuilder& b) {
-              hold_kva(b, {"kva.proj", "kva.st"});
+              hold_ridgefill(b, {"ridgefill.proj", "ridgefill.st"});
               g_test_folder.manifest.obj[1].second.str = "llama"; }, "is for adapter 'llama'" },
         { "other dims", [](RadBuilder& b) {
-              hold_kva(b, {"kva.proj", "kva.st"}, R"(, "meta": {"hc_count": "8"})"); }, "metadata 'hc_count' is '4'" },
+              hold_ridgefill(b, {"ridgefill.proj", "ridgefill.st"}, R"(, "meta": {"hc_count": "8"})"); }, "metadata 'hc_count' is '4'" },
         { "another tokenizer", [](RadBuilder& b) {
-              hold_kva(b, {"kva.proj", "kva.st"}, R"(, "vocab_sha256": "00")"); }, "the tokenizer differs" },
+              hold_ridgefill(b, {"ridgefill.proj", "ridgefill.st"}, R"(, "vocab_sha256": "00")"); }, "the tokenizer differs" },
         { "a misshapen map", [](RadBuilder& b) {
-              hold_kva(b, {"kva.proj", "kva.st"});
+              hold_ridgefill(b, {"ridgefill.proj", "ridgefill.st"});
               add_tensor("proj.6.weight", RAD_BF16, {2560, 2560}); }, "proj.6.weight" },
         { "a hole in the maps", [](RadBuilder& b) {
-              hold_kva(b, {"kva.proj", "kva.st"});
+              hold_ridgefill(b, {"ridgefill.proj", "ridgefill.st"});
               g_test_folder.tensors.erase("proj.6.weight"); }, "proj.6.weight" },
         { "a split at the n-gram layer", [](RadBuilder& b) {
-              hold_kva(b, {"kva.proj", "kva.st"});
+              hold_ridgefill(b, {"ridgefill.proj", "ridgefill.st"});
               g_test_folder.manifest.obj[2].second.num = 1; }, "its split 1 is not a late layer" },
         { "half a correction", [](RadBuilder& b) {
-              hold_kva(b, {"kva.proj", "kva.st"});
+              hold_ridgefill(b, {"ridgefill.proj", "ridgefill.st"});
               g_test_folder.tensors.erase("st.5"); }, "covers 2 of the 3" },
-        { "quality without a row table", [](RadBuilder& b) { hold_kva(b, {"kva.proj", "kva.st"}); },
+        { "quality without a row table", [](RadBuilder& b) { hold_ridgefill(b, {"ridgefill.proj", "ridgefill.st"}); },
           "holds none; serving stock" },
     };
     for (const Case& k : cases) {
-        RadBuilder stock, kva;
-        served(stock); served(kva);
-        k.setup(kva);
-        hold_appended_weights(kva);
+        RadBuilder stock, ridgefill;
+        served(stock); served(ridgefill);
+        k.setup(ridgefill);
+        hold_appended_weights(ridgefill);
         REQUIRE_EQ(qwen4exp_fp8::declare(&stock, &meta, &c), RAD_OK);
-        Env env({{"RADIANCE_KVA", "quality"}});
+        Env env({{"RADIANCE_RIDGEFILL", "quality"}});
         int st = -1;
-        const std::string log = stderr_of([&] { st = qwen4exp_kva::declare(&kva, &meta, &c); });
+        const std::string log = stderr_of([&] { st = qwen4exp_ridgefill::declare(&ridgefill, &meta, &c); });
         CHECK_EQ(st, RAD_OK);
-        check_same_graph(stock, kva);
+        check_same_graph(stock, ridgefill);
         CHECK(has(log, k.said));
         CHECK(has(log, "serving stock"));
         CHECK_EQ(g_mem.copies.size(), (size_t)0);
@@ -284,20 +284,20 @@ TEST(a_mode_without_a_usable_projector_serves_the_in_tree_graph) {
 }
 
 /* The same model fitted on another variant -- another trunk encoding, other base weights, another
- * name: a WARNING naming both sides, and KVA runs (DD-K). */
+ * name: a WARNING naming both sides, and RidgeFill runs (DD-K). */
 TEST(a_projector_fitted_on_another_variant_warns_and_runs) {
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
-    RadBuilder kva;
-    served(kva);
-    hold_kva(kva, {"kva.proj", "kva.st"}, R"(, "encodings": {"blk.5.ssm_inz.weight": "bf16",
+    RadBuilder ridgefill;
+    served(ridgefill);
+    hold_ridgefill(ridgefill, {"ridgefill.proj", "ridgefill.st"}, R"(, "encodings": {"blk.5.ssm_inz.weight": "bf16",
              "blk.5.attn_hc_down.weight": "fp8_e4m3*f32[1x128]"}, "anchors": {"anchor.weight": "11"})");
     g_test_folder.manifest.obj[3].second.obj[1].second.str = "another-quant";
-    Env env({{"RADIANCE_KVA", "speed"}});
+    Env env({{"RADIANCE_RIDGEFILL", "speed"}});
     int st = -1;
-    const std::string log = stderr_of([&] { st = qwen4exp_kva::declare(&kva, &meta, &c); });
+    const std::string log = stderr_of([&] { st = qwen4exp_ridgefill::declare(&ridgefill, &meta, &c); });
     CHECK_EQ(st, RAD_OK);
-    CHECK(qwen4exp_kva::g_kva[0].have_proj);
+    CHECK(qwen4exp_ridgefill::g_ridgefill[0].have_proj);
     CHECK(has(log, "WARNING: projector /test/projector: weight blk.5.ssm_inz.weight is i8*bf16[1x128] "
                    "here; the projector was fitted on bf16"));
     CHECK(has(log, "blk.5.attn_hc_down.weight is fp8_e4m3*f32[1x128]") == false);
@@ -379,17 +379,17 @@ TEST(off_step_issues_the_in_tree_sequence) {
     RadBuildCtx c = served_ctx();
     for (bool fmt : {false, true})
         for (bool prefill : {true, false}) {
-            RadBuilder stock, kva;
-            if (fmt) { served(stock); served(kva); }
+            RadBuilder stock, ridgefill;
+            if (fmt) { served(stock); served(ridgefill); }
             REQUIRE_EQ(qwen4exp_fp8::declare(&stock, &meta, &c), RAD_OK);
             Batch bs = make_batch(stock, prefill);
-            int dev_stock = 0, dev_kva = 0;
+            int dev_stock = 0, dev_ridgefill = 0;
             const std::vector<RecIssue> want = issues_of(qwen4exp_fp8::step, bs.b, &dev_stock);
-            REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
-            Batch bk = make_batch(kva, prefill);
-            const std::vector<RecIssue> got = issues_of(qwen4exp_kva::step, bk.b, &dev_kva);
+            REQUIRE_EQ(qwen4exp_ridgefill::declare(&ridgefill, &meta, &c), RAD_OK);
+            Batch bk = make_batch(ridgefill, prefill);
+            const std::vector<RecIssue> got = issues_of(qwen4exp_ridgefill::step, bk.b, &dev_ridgefill);
             CHECK(want.size() > 100);
-            CHECK_EQ(dev_kva, 0);
+            CHECK_EQ(dev_ridgefill, 0);
             CHECK_EQ(dev_stock, 0);
             CHECK_EQ(differ(got, want), 0);
         }
@@ -402,24 +402,24 @@ TEST(off_step_issues_the_in_tree_sequence) {
 TEST(the_container_routes_switches_are_refused_by_name) {
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
-    for (const char* name : {"RADIANCE_KVA_DECLARE", "RADIANCE_KVA_PROJ", "RADIANCE_KVA_ST"}) {
-        RadBuilder kva;
-        hold_kva(kva, {"kva.proj", "kva.st"});
-        Env env({{"RADIANCE_KVA", "speed"}, {name, "all"}});
+    for (const char* name : {"RADIANCE_RIDGEFILL_DECLARE", "RADIANCE_RIDGEFILL_PROJ", "RADIANCE_RIDGEFILL_ST"}) {
+        RadBuilder ridgefill;
+        hold_ridgefill(ridgefill, {"ridgefill.proj", "ridgefill.st"});
+        Env env({{"RADIANCE_RIDGEFILL", "speed"}, {name, "all"}});
         int st = RAD_OK;
-        const std::string log = stderr_of([&] { st = qwen4exp_kva::declare(&kva, &meta, &c); });
+        const std::string log = stderr_of([&] { st = qwen4exp_ridgefill::declare(&ridgefill, &meta, &c); });
         CHECK_EQ(st, RAD_E_INVAL);
         CHECK(has(log, (std::string(name) + "=all is retired with the container append").c_str()));
     }
     /* Retired with the vram placement (Dylan, Stage E): any value, the documented ones included. */
-    for (auto [name, value] : {std::pair<const char*, const char*>{"RADIANCE_KVA_PROJ_PLACE", "vram"},
-                               {"RADIANCE_KVA_PROJ_PLACE", "host"}, {"RADIANCE_KVA_PROJ_RING", "1"},
-                               {"RADIANCE_KVA_PROJ_RING", "0"}}) {
-        RadBuilder kva;
-        hold_kva(kva, {"kva.proj", "kva.st"});
-        Env env({{"RADIANCE_KVA", "quality"}, {name, value}});
+    for (auto [name, value] : {std::pair<const char*, const char*>{"RADIANCE_RIDGEFILL_PROJ_PLACE", "vram"},
+                               {"RADIANCE_RIDGEFILL_PROJ_PLACE", "host"}, {"RADIANCE_RIDGEFILL_PROJ_RING", "1"},
+                               {"RADIANCE_RIDGEFILL_PROJ_RING", "0"}}) {
+        RadBuilder ridgefill;
+        hold_ridgefill(ridgefill, {"ridgefill.proj", "ridgefill.st"});
+        Env env({{"RADIANCE_RIDGEFILL", "quality"}, {name, value}});
         int st = RAD_OK;
-        const std::string log = stderr_of([&] { st = qwen4exp_kva::declare(&kva, &meta, &c); });
+        const std::string log = stderr_of([&] { st = qwen4exp_ridgefill::declare(&ridgefill, &meta, &c); });
         CHECK_EQ(st, RAD_E_INVAL);
         CHECK(has(log, (std::string(name) + "=" + value + " is retired: the projector is always streamed "
                         "from host memory through the staging ring").c_str()));
@@ -433,23 +433,23 @@ TEST(the_container_routes_switches_are_refused_by_name) {
 TEST(speed_takes_the_folder_and_declares_its_kernel_ops) {
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
-    Env env({{"RADIANCE_KVA", "speed"}});
-    RadBuilder stock, kva;
-    hold_kva(kva, {"kva.proj", "kva.st"});
-    hold_score(kva, "kva.rowsel.score");
-    hold_appended_weights(kva);
+    Env env({{"RADIANCE_RIDGEFILL", "speed"}});
+    RadBuilder stock, ridgefill;
+    hold_ridgefill(ridgefill, {"ridgefill.proj", "ridgefill.st"});
+    hold_score(ridgefill, "ridgefill.rowsel.score");
+    hold_appended_weights(ridgefill);
     REQUIRE_EQ(qwen4exp_fp8::declare(&stock, &meta, &c), RAD_OK);
-    const std::string log = stderr_of([&] { CHECK_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK); });
-    CHECK_EQ(kva.weights.size(), stock.weights.size());
-    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+    const std::string log = stderr_of([&] { CHECK_EQ(qwen4exp_ridgefill::declare(&ridgefill, &meta, &c), RAD_OK); });
+    CHECK_EQ(ridgefill.weights.size(), stock.weights.size());
+    const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[0];
     CHECK_EQ(k.split, (int64_t)kSplit);
     CHECK(k.have_proj && k.have_st && !k.have_rowsel);
     CHECK(has(log, "matches test-q38-flashnext: arch ok, metadata 2/2, tokenizer ok, encodings 0/0, anchors 0/0"));
     int undo = 0, apply = 0, gemm = 0;
-    for (const RecOp& o : kva.ops) {
-        if (o.op == "kva_gemm_nt_bias" || o.op == "kva_state_correct" || o.op == "kva_mask") CHECK(o.w.empty());
-        gemm += o.op == "kva_gemm_nt_bias";
-        if (o.op != "kva_state_correct") continue;
+    for (const RecOp& o : ridgefill.ops) {
+        if (o.op == "ridgefill_gemm_nt_bias" || o.op == "ridgefill_state_correct" || o.op == "ridgefill_mask") CHECK(o.w.empty());
+        gemm += o.op == "ridgefill_gemm_nt_bias";
+        if (o.op != "ridgefill_state_correct") continue;
         for (const RecParam& q : o.p)
             if (q.key == "mode") { undo += q.sval == "undo"; apply += q.sval == "apply"; }
     }
@@ -467,7 +467,7 @@ TEST(speed_takes_the_folder_and_declares_its_kernel_ops) {
     /* A second declare of the same configuration copies nothing again. */
     RadBuilder again;
     hold_appended_weights(again);
-    CHECK_EQ(qwen4exp_kva::declare(&again, &meta, &c), RAD_OK);
+    CHECK_EQ(qwen4exp_ridgefill::declare(&again, &meta, &c), RAD_OK);
     CHECK_EQ(g_mem.copies.size(), (size_t)0);
 }
 
@@ -480,25 +480,25 @@ TEST(the_raw_operands_point_at_their_tensors_copies) {
     for (int world : {1, 2, 4})   /* TP4 (R87): each rank 12 of the 48 value heads */
         for (int rank = 0; rank < world; ++rank) {
             RadBuildCtx c = served_ctx(rank, world);
-            Env env({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_ROWSEL_TABLE", "all"}});
-            RadBuilder kva;
-            served(kva);
-            hold_kva(kva, {"kva.proj", "kva.st"});
-            for (const char* t : {"kva.rowsel.score", "kva.rowsel.score_none", "kva.rowsel.score_all"})
-                hold_score(kva, t);
+            Env env({{"RADIANCE_RIDGEFILL", "quality"}, {"RADIANCE_RIDGEFILL_ROWSEL_TABLE", "all"}});
+            RadBuilder ridgefill;
+            served(ridgefill);
+            hold_ridgefill(ridgefill, {"ridgefill.proj", "ridgefill.st"});
+            for (const char* t : {"ridgefill.rowsel.score", "ridgefill.rowsel.score_none", "ridgefill.rowsel.score_all"})
+                hold_score(ridgefill, t);
             /* distinct source bytes per tensor, so a copy can be traced to its tensor */
             int64_t at = 0;
             for (auto& [name, t] : g_test_folder.tensors) { t.data = tensor_bytes() + at; at += 256; }
-            REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
+            REQUIRE_EQ(qwen4exp_ridgefill::declare(&ridgefill, &meta, &c), RAD_OK);
             const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
-            const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+            const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[rank];
             const int64_t heads = m.gcfg.n_head_v * m.gcfg.head_v * m.gcfg.head_k;
             auto copy_of = [&](const RadOperand& o) -> const Upload* {
                 for (const Upload& u : g_mem.copies) if (u.dst == o.raw) return &u;
                 return nullptr;
             };
             auto src = [&](const std::string& n) { return g_test_folder.tensors[n].data; };
-            const qwen4exp_kva::Upload& up = qwen4exp_kva::g_upload[rank];
+            const qwen4exp_ridgefill::Upload& up = qwen4exp_ridgefill::g_upload[rank];
             const int64_t row = 10240 * 2;
             for (int l = kSplit; l < 8; ++l) {
                 const std::string L = std::to_string(l);
@@ -533,17 +533,17 @@ TEST(the_raw_operands_point_at_their_tensors_copies) {
 TEST(the_maps_live_in_host_mapped_memory) {
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
-    Env env({{"RADIANCE_KVA", "quality"}});
-    RadBuilder kva;
-    served(kva);
-    hold_kva(kva, {"kva.proj", "kva.st"});
-    hold_score(kva, "kva.rowsel.score");
+    Env env({{"RADIANCE_RIDGEFILL", "quality"}});
+    RadBuilder ridgefill;
+    served(ridgefill);
+    hold_ridgefill(ridgefill, {"ridgefill.proj", "ridgefill.st"});
+    hold_score(ridgefill, "ridgefill.rowsel.score");
     const int hosts = g_mem.host;
-    const std::string log = stderr_of([&] { CHECK_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK); });
+    const std::string log = stderr_of([&] { CHECK_EQ(qwen4exp_ridgefill::declare(&ridgefill, &meta, &c), RAD_OK); });
     CHECK_EQ(g_mem.host, hosts + 1);
     CHECK(g_mem.copies.empty());   /* the corrections and the row table are host-block pieces too */
-    const qwen4exp_kva::Upload& u = qwen4exp_kva::g_upload[0];
-    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+    const qwen4exp_ridgefill::Upload& u = qwen4exp_ridgefill::g_upload[0];
+    const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[0];
     for (int l = kSplit; l < 8; ++l) {
         const uintptr_t w = (uintptr_t)k.ring_src[(size_t)l].raw;
         CHECK(w >= (uintptr_t)u.host + kDeviceView && w < (uintptr_t)u.host + kDeviceView + (uintptr_t)u.host_bytes);
@@ -556,12 +556,12 @@ TEST(the_maps_live_in_host_mapped_memory) {
 
 /* ==================================================================== the masked path: declare */
 
-/* Declares stock and KVA side by side on the served formats with every kva.* tensor held. */
+/* Declares stock and RidgeFill side by side on the served formats with every ridgefill.* tensor held. */
 struct Pair {
-    RadBuilder stock, kva;
+    RadBuilder stock, ridgefill;
     int        st = RAD_OK;
 };
-/* The builder whose op table names the handles a failing comparison prints (the last declare_pair's KVA
+/* The builder whose op table names the handles a failing comparison prints (the last declare_pair's RidgeFill
  * builder; the in-tree ops share its numbering): "op 134 (gdn_ab)" says which in-tree issue moved, which
  * is what scripts/update_radiance.sh's report needs to point a reader at a block. */
 const RadBuilder* g_op_names = nullptr;
@@ -577,28 +577,28 @@ void declare_pair(Pair& p, const char* mode, int rank = 0, int world = 1, int64_
     c.max_out_rows = max_out_rows;
     c.max_spec = max_spec;
     served(p.stock);
-    served(p.kva);
-    hold_kva(p.kva, {"kva.proj", "kva.st"});
-    hold_score(p.kva, "kva.rowsel.score");
+    served(p.ridgefill);
+    hold_ridgefill(p.ridgefill, {"ridgefill.proj", "ridgefill.st"});
+    hold_score(p.ridgefill, "ridgefill.rowsel.score");
     REQUIRE_EQ(qwen4exp_fp8::declare(&p.stock, &meta, &c), RAD_OK);
-    Env env({{"RADIANCE_KVA", mode}});
-    p.st = qwen4exp_kva::declare(&p.kva, &meta, &c);
-    g_op_names = &p.kva;
+    Env env({{"RADIANCE_RIDGEFILL", mode}});
+    p.st = qwen4exp_ridgefill::declare(&p.ridgefill, &meta, &c);
+    g_op_names = &p.ridgefill;
 }
 
 /* R93 -- THE LEVER'S PREMISE: in every routed layer the FIRST op naming one of the layer's EXPERT
  * weights (the stager's unit, RadWeightGroup.expert >= 0) is its gate-up GEMM -- the handle a probe
  * issues -- and the LAST is its routed down GEMM: the protected experts are layer weights and the
- * calibration tap names none. Nothing KVA declares names an expert weight. */
+ * calibration tap names none. Nothing RidgeFill declares names an expert weight. */
 TEST(each_routed_layers_expert_span_is_gate_up_to_down) {
     Pair p;
     declare_pair(p, "quality");
     REQUIRE_EQ(p.st, RAD_OK);
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
     std::vector<size_t> first(8, 0), last(8, 0);
-    for (size_t i = 0; i < p.kva.ops.size(); ++i)
-        for (rad_weight w : p.kva.ops[i].w) {
-            const RadWeightDecl& d = p.kva.weights[w - 1].second;
+    for (size_t i = 0; i < p.ridgefill.ops.size(); ++i)
+        for (rad_weight w : p.ridgefill.ops[i].w) {
+            const RadWeightDecl& d = p.ridgefill.weights[w - 1].second;
             if (d.group.expert < 0 || d.group.layer < 0 || d.group.layer >= 8) continue;
             CHECK(i < p.stock.ops.size());
             size_t& f = first[(size_t)d.group.layer];
@@ -620,15 +620,15 @@ TEST(the_masked_paths_buffers_take_the_whole_program) {
         declare_pair(p, mode);
         REQUIRE_EQ(p.st, RAD_OK);
         const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
-        const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+        const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[0];
         const bool project = std::strcmp(mode, "plumb") != 0;
-        CHECK(p.kva.concurrent.count(k.b_mask) && p.kva.concurrent.count(k.b_bounds));
+        CHECK(p.ridgefill.concurrent.count(k.b_mask) && p.ridgefill.concurrent.count(k.b_bounds));
         CHECK_EQ(k.b_hs != 0, project);
         CHECK_EQ(k.op_select != 0 && k.op_drop != 0 && k.op_cast != 0, project);
         for (rad_buf h : {k.b_hs, k.xp.x, k.xp.q8, k.xp.s8, m.b_eids, m.b_h, m.a_x.x})
-            if (project) CHECK(p.kva.concurrent.count(h) == 1);
+            if (project) CHECK(p.ridgefill.concurrent.count(h) == 1);
         CHECK_EQ(k.xp.q8_fed, project && m.a_x.q8_fed);
-        CHECK(p.kva.concurrent.count(k.b_zeros) && p.kva.concurrent.count(k.b_probe));
+        CHECK(p.ridgefill.concurrent.count(k.b_zeros) && p.ridgefill.concurrent.count(k.b_probe));
         CHECK_EQ(k.n_zeros, m.layers[0].mlp.c.n_expert + 1);
     }
 }
@@ -692,11 +692,11 @@ struct Row {
 };
 
 TEST(the_approximate_decision_truth_table) {
-    using qwen4exp_kva::PATH_STOCK;
-    using qwen4exp_kva::PATH_LEAN;
-    using qwen4exp_kva::PATH_MASKED;
-    using qwen4exp_kva::PATH_STRADDLE;
-    using qwen4exp_kva::PATH_DECODERS;
+    using qwen4exp_ridgefill::PATH_STOCK;
+    using qwen4exp_ridgefill::PATH_LEAN;
+    using qwen4exp_ridgefill::PATH_MASKED;
+    using qwen4exp_ridgefill::PATH_STRADDLE;
+    using qwen4exp_ridgefill::PATH_DECODERS;
     const auto none = [](RadBatch&) {};
     const std::vector<Row> rows = {
         {"whole bulk chunk, speed", "speed", {{2048}, 0, 2048}, none, PATH_LEAN, 2048, 0, false},
@@ -730,14 +730,14 @@ TEST(the_approximate_decision_truth_table) {
         {"three prefills and a decoder: 961 exact rows", "quality", {{1, 1024, 512, 448}, 1, 2048}, none, PATH_STOCK, 0, 0, false},
         {"pure decode", "speed", {{1, 1}, 2, 0}, none, PATH_STOCK, 0, 0, false},
     };
-    Env guard({{"RADIANCE_KVA_STAGE_ROWS", "64"}});   /* the threshold's rows; the default is the next case */
+    Env guard({{"RADIANCE_RIDGEFILL_STAGE_ROWS", "64"}});   /* the threshold's rows; the default is the next case */
     for (const Row& r : rows) {
         Pair p;
         declare_pair(p, r.mode);
         REQUIRE_EQ(p.st, RAD_OK);
-        Batch x = make_step(p.kva, r.shape);
+        Batch x = make_step(p.ridgefill, r.shape);
         r.edit(x.b);
-        const qwen4exp_kva::Pass got = qwen4exp_kva::derive(qwen4exp_kva::g_kva[0], &x.b);
+        const qwen4exp_ridgefill::Pass got = qwen4exp_ridgefill::derive(qwen4exp_ridgefill::g_ridgefill[0], &x.b);
         if (got.path != r.path || got.b != r.b || got.s_lb != r.s_lb || got.stream != r.stream)
             std::fprintf(stderr, "    row '%s': path %d b %lld s_lb %lld stream %d\n", r.why, got.path,
                          (long long)got.b, (long long)got.s_lb, (int)got.stream);
@@ -748,11 +748,11 @@ TEST(the_approximate_decision_truth_table) {
     }
 }
 
-/* A.1 -- THE PLANNER'S OWN CONTRACT, with no adapter in front of it (kva_plan.h is model-agnostic): the
+/* A.1 -- THE PLANNER'S OWN CONTRACT, with no adapter in front of it (ridgefill_plan.h is model-agnostic): the
  * tail-only straddle is a speed path. Quality and plumb on a straddling chunk whose adapter could
  * straddle still take the masked path or the exact step, never the straddle. */
 TEST(the_planner_straddles_only_in_speed) {
-    using namespace qwen4exp_kva;
+    using namespace qwen4exp_ridgefill;
     PlanIn in;
     in.eligible = in.stream_ok = in.straddle_ok = true;
     in.n_tok = 2048; in.n_seq = 1; in.q_prefill = 2048; in.n_ahead = 1024;
@@ -779,7 +779,7 @@ TEST(the_planner_straddles_only_in_speed) {
  * the bound is inclusive and is the bulk superset b - s_lb, a keyed number. Plumb (the oracle) is
  * never held back. Default 1,024 (the projector is always in host memory); the switch overrides it. */
 TEST(a_host_placed_projector_approximates_only_passes_with_enough_bulk_rows) {
-    using namespace qwen4exp_kva;
+    using namespace qwen4exp_ridgefill;
     PlanIn in;
     in.eligible = in.stream_ok = true;
     in.n_seq = 2; in.n_seq_decode = 1; in.n_tok_decode = 1; in.n_ahead = 2048;
@@ -794,13 +794,13 @@ TEST(a_host_placed_projector_approximates_only_passes_with_enough_bulk_rows) {
         CHECK_EQ(plan_pass(in, pc).path, c.path);
     }
     {
-        Env e({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_MIN_BULK_ROWS", nullptr}});
+        Env e({{"RADIANCE_RIDGEFILL", "quality"}, {"RADIANCE_RIDGEFILL_MIN_BULK_ROWS", nullptr}});
         Config cfg;
         RadModelMeta meta = flash_next_meta();
         REQUIRE_EQ(read_config(&meta, &cfg), RAD_OK);
         CHECK_EQ(cfg.min_bulk_rows, 1024);
     }
-    Env e({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_MIN_BULK_ROWS", "0"}});
+    Env e({{"RADIANCE_RIDGEFILL", "quality"}, {"RADIANCE_RIDGEFILL_MIN_BULK_ROWS", "0"}});
     Config cfg;
     RadModelMeta meta = flash_next_meta();
     REQUIRE_EQ(read_config(&meta, &cfg), RAD_OK);
@@ -811,7 +811,7 @@ TEST(a_host_placed_projector_approximates_only_passes_with_enough_bulk_rows) {
  * (rounded up to the tile); a chunk that writes none is untouched; 0 is off; it composes with a
  * capped n_ahead (the smaller bulk end wins). The switch is read at declare. */
 TEST(a_checkpoint_writing_chunk_keeps_its_last_t_ck_rows_exact) {
-    using namespace qwen4exp_kva;
+    using namespace qwen4exp_ridgefill;
     PlanIn in;
     in.mode = PLAN_QUALITY; in.eligible = in.stream_ok = true;
     in.n_tok = 2048; in.n_seq = 1; in.q_prefill = 2048;
@@ -823,7 +823,7 @@ TEST(a_checkpoint_writing_chunk_keeps_its_last_t_ck_rows_exact) {
         pc.ckpt_floor = c.floor; in.n_checkpoints = c.ckpts; in.n_ahead = c.ahead;
         CHECK_EQ(plan_pass(in, pc).b, c.b);
     }
-    Env e({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_CKPT_FLOOR", "512"}});
+    Env e({{"RADIANCE_RIDGEFILL", "quality"}, {"RADIANCE_RIDGEFILL_CKPT_FLOOR", "512"}});
     Config cfg;
     RadModelMeta meta = flash_next_meta();
     REQUIRE_EQ(read_config(&meta, &cfg), RAD_OK);
@@ -831,32 +831,32 @@ TEST(a_checkpoint_writing_chunk_keeps_its_last_t_ck_rows_exact) {
     Pair p;
     declare_pair(p, "quality");
     REQUIRE_EQ(p.st, RAD_OK);
-    Batch x = make_step(p.kva, {{128}, 0, 2048});
+    Batch x = make_step(p.ridgefill, {{128}, 0, 2048});
     x.b.n_checkpoints = 1;
-    CHECK_EQ(qwen4exp_kva::derive(qwen4exp_kva::g_kva[0], &x.b).path, (int)PATH_STOCK);   /* 128 rows: all floor */
+    CHECK_EQ(qwen4exp_ridgefill::derive(qwen4exp_ridgefill::g_ridgefill[0], &x.b).path, (int)PATH_STOCK);   /* 128 rows: all floor */
 }
 
 /* R73 -- KL MODE IS EXACT UNLESS THE SWITCH IS SET: a declare that sizes logits for every prompt
  * row (max_out_rows > 0) serves every pass stock, because bulk rows' logits are not the model's;
- * RADIANCE_KVA_SCORE_BULK=1 says the caller scores the exact tail only, and the pass approximates. */
+ * RADIANCE_RIDGEFILL_SCORE_BULK=1 says the caller scores the exact tail only, and the pass approximates. */
 TEST(kl_mode_serves_stock_unless_score_bulk) {
     for (bool bulk : {false, true}) {
-        Env e(bulk ? std::initializer_list<std::pair<const char*, const char*>>{{"RADIANCE_KVA_SCORE_BULK", "1"}}
+        Env e(bulk ? std::initializer_list<std::pair<const char*, const char*>>{{"RADIANCE_RIDGEFILL_SCORE_BULK", "1"}}
                    : std::initializer_list<std::pair<const char*, const char*>>{});
         Pair p;
         declare_pair(p, "quality", 0, 1, 4096);
         REQUIRE_EQ(p.st, RAD_OK);
-        Batch x = make_step(p.kva, {{128}, 0, 2048});
-        const qwen4exp_kva::Pass got = qwen4exp_kva::derive(qwen4exp_kva::g_kva[0], &x.b);
-        CHECK_EQ(got.path, bulk ? qwen4exp_kva::PATH_MASKED : qwen4exp_kva::PATH_STOCK);
-        CHECK_EQ(qwen4exp_kva::g_kva[0].out_rows_ok, bulk);
+        Batch x = make_step(p.ridgefill, {{128}, 0, 2048});
+        const qwen4exp_ridgefill::Pass got = qwen4exp_ridgefill::derive(qwen4exp_ridgefill::g_ridgefill[0], &x.b);
+        CHECK_EQ(got.path, bulk ? qwen4exp_ridgefill::PATH_MASKED : qwen4exp_ridgefill::PATH_STOCK);
+        CHECK_EQ(qwen4exp_ridgefill::g_ridgefill[0].out_rows_ok, bulk);
     }
 }
 
 /* THE DEFAULT STREAMS EVERY MASKED PASS (Stage A.1's R96 and guard trade, notes/impl.md): the rows the
  * truth table above sends to the stock step under a 64-row threshold take the masked path, streaming. */
 TEST(the_default_streams_every_masked_pass) {
-    using qwen4exp_kva::PATH_MASKED;
+    using qwen4exp_ridgefill::PATH_MASKED;
     const auto none = [](RadBatch&) {};
     const std::vector<Row> rows = {
         {"half ahead, quality: 1024 exact rows stream", "quality", {{2048}, 0, 1024}, none, PATH_MASKED, 1024, 0, true},
@@ -869,9 +869,9 @@ TEST(the_default_streams_every_masked_pass) {
         Pair p;
         declare_pair(p, r.mode);
         REQUIRE_EQ(p.st, RAD_OK);
-        CHECK_EQ(qwen4exp_kva::g_kva[0].cfg.stage_rows, INT64_MAX);
-        Batch x = make_step(p.kva, r.shape);
-        const qwen4exp_kva::Pass got = qwen4exp_kva::derive(qwen4exp_kva::g_kva[0], &x.b);
+        CHECK_EQ(qwen4exp_ridgefill::g_ridgefill[0].cfg.stage_rows, INT64_MAX);
+        Batch x = make_step(p.ridgefill, r.shape);
+        const qwen4exp_ridgefill::Pass got = qwen4exp_ridgefill::derive(qwen4exp_ridgefill::g_ridgefill[0], &x.b);
         if (got.path != r.path || got.b != r.b || got.s_lb != r.s_lb || got.stream != r.stream)
             std::fprintf(stderr, "    row '%s': path %d b %lld s_lb %lld stream %d\n", r.why, got.path,
                          (long long)got.b, (long long)got.s_lb, (int)got.stream);
@@ -890,20 +890,20 @@ TEST(the_stage_switch_and_threshold_gate_the_lever) {
                           Case{"auto", "64", {{2048}, 0, 2047}, true},
                           Case{"auto", "8", {{1, 1, 1, 1, 1, 1, 1, 1, 1984}, 8, 2048}, true},
                           Case{"auto", "", {{2048}, 0, 1024}, true}}) {   /* default: 1024 exact rows stream */
-        Env e(c.rows ? std::initializer_list<std::pair<const char*, const char*>>{{"RADIANCE_KVA_STAGE", c.stage}, {"RADIANCE_KVA_STAGE_ROWS", c.rows}}
-                     : std::initializer_list<std::pair<const char*, const char*>>{{"RADIANCE_KVA_STAGE", c.stage}});
+        Env e(c.rows ? std::initializer_list<std::pair<const char*, const char*>>{{"RADIANCE_RIDGEFILL_STAGE", c.stage}, {"RADIANCE_RIDGEFILL_STAGE_ROWS", c.rows}}
+                     : std::initializer_list<std::pair<const char*, const char*>>{{"RADIANCE_RIDGEFILL_STAGE", c.stage}});
         Pair p;
         declare_pair(p, "quality");
         REQUIRE_EQ(p.st, RAD_OK);
-        Batch x = make_step(p.kva, c.s);
-        CHECK_EQ(qwen4exp_kva::derive(qwen4exp_kva::g_kva[0], &x.b).stream, c.stream);
+        Batch x = make_step(p.ridgefill, c.s);
+        CHECK_EQ(qwen4exp_ridgefill::derive(qwen4exp_ridgefill::g_ridgefill[0], &x.b).stream, c.stream);
     }
 }
 
 /* ==================================================================== issue sequences */
 
 struct Run {
-    std::vector<RecIssue> issues;   /* the KVA step's without the staging ring's lanes and copies */
+    std::vector<RecIssue> issues;   /* the RidgeFill step's without the staging ring's lanes and copies */
     std::vector<RecIssue> all;      /* every issue, the ring's included */
     std::string           log;
     int                   device_calls = 0;
@@ -920,10 +920,10 @@ Run run_step(void (*step)(RadCtx*, const RadBatch*), const RadBatch& b, int rank
     g_ctx = nullptr;
     r.all = c.issues;
     /* THE RING IS ALWAYS ON (the projector streams from host memory), and the in-tree oracle has no
-     * ring: the KVA step's lane switches, joins and copies are set aside here and checked on their
+     * ring: the RidgeFill step's lane switches, joins and copies are set aside here and checked on their
      * own (the_staging_ring_copies_each_map_a_layer_ahead_on_lane_1). Its op is declared after the
      * whole in-tree graph, so no in-tree handle can share its number. */
-    const rad_op ring = step == qwen4exp_kva::step ? qwen4exp_kva::g_kva[rank].op_ring : 0;
+    const rad_op ring = step == qwen4exp_ridgefill::step ? qwen4exp_ridgefill::g_ridgefill[rank].op_ring : 0;
     for (const RecIssue& i : c.issues)
         if (i.op != kLane && i.op != kJoin && (!ring || i.op != ring)) r.issues.push_back(i);
     r.device_calls = c.device_calls;
@@ -971,25 +971,25 @@ RadOperand last_row(const Batch& x, rad_kvgroup g) {
 
 std::vector<RadOperand> correction_operands(const Batch& x, int l, int rank = 0) {
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
-    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[rank];
     const RadOperand heads = k.st[(size_t)l];   /* the_raw_operands_point_at_their_tensors_copies */
     return {kv_cache(m.kv_state, l), last_row(x, m.kv_state), kv_cache(k.kv_applied, l),
             last_row(x, k.kv_applied), heads, k.kv_rho ? kv_cache(k.kv_rho, l) : RAD_NONE,
             k.kv_rho ? last_row(x, k.kv_rho) : RAD_NONE, brows(k.b_bounds, 2)};
 }
 
-/* DD-A's hazard op as an approximate pass ends it (kva_hazard.h): the last sequence's cu pair, the
+/* DD-A's hazard op as an approximate pass ends it (ridgefill_hazard.h): the last sequence's cu pair, the
  * positions, the bulk bounds (the cu pair itself on the lean path), the span T - n_ahead as an
  * extent when positive, the meta slot of the last sequence, this rank's counter. None in plumb. */
 void push_hazard(std::vector<RecIssue>& out, const Batch& x, bool lean, int rank = 0) {
-    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[rank];
     if (!k.op_hazard) return;
     const RadBatch& b = x.b;
     const int64_t span = k.cfg.tail - b.n_ahead;
     const RadOperand cu = praw(b.cu_seqlens + b.n_seq - 1, RAD_I32, 2);
     out.push_back({k.op_hazard, {cu, praw(b.positions, RAD_I32, b.n_tok), lean ? cu : brows(k.b_bounds, 2),
                    span > 0 ? praw(b.positions, RAD_I32, span) : RAD_NONE, kv_cache(k.kv_meta, k.meta_layer),
-                   last_row(x, k.kv_meta), praw(qwen4exp_kva::g_hazard_dev[rank], RAD_F32, 1)}, 1});
+                   last_row(x, k.kv_meta), praw(qwen4exp_ridgefill::g_hazard_dev[rank], RAD_F32, 1)}, 1});
 }
 
 /* The in-tree scan, as the masked layer issues it for the last sequence (and, before it, the
@@ -997,7 +997,7 @@ void push_hazard(std::vector<RecIssue>& out, const Batch& x, bool lean, int rank
 void push_scans(std::vector<RecIssue>& out, const RecIssue& scan, const Batch& x, int l, const Want& w,
                 int rank) {
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
-    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[rank];
     const qwen4exp_fp8::Layer& lay = m.layers[(size_t)l];
     const RadBatch& b = x.b;
     const int32_t* st = b.kv[m.kv_state - 1].state_index;
@@ -1025,7 +1025,7 @@ void push_scans(std::vector<RecIssue>& out, const RecIssue& scan, const Batch& x
 /* The projected block input, its codes and the select, right after the connection read. */
 void push_projection(std::vector<RecIssue>& out, const Batch& x, int l, const Want& w, int rank) {
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
-    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[rank];
     const int64_t T = x.b.n_tok, rows = w.b - w.s_lb, n = m.g.n_embd, wide = m.hccfg.hc * n;
     out.push_back({k.op_proj[(size_t)l], {brow_slice(k.b_hs, w.s_lb, rows, wide), k.proj_w[(size_t)l],
                    k.proj_b[(size_t)l], RAD_NONE, brow_slice(k.xp.x, w.s_lb, rows, n)}, rows});
@@ -1039,7 +1039,7 @@ void push_projection(std::vector<RecIssue>& out, const Batch& x, int l, const Wa
  * drop between (the fused form has no point between the two). */
 void push_route(std::vector<RecIssue>& out, const RecIssue& r, const qwen4exp_fp8::Layer& lay,
                 const Batch& x, int rank) {
-    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[rank];
     const MoeFP8& e = lay.mlp;
     const int64_t T = x.b.n_tok, kk = e.c.top_k;
     const RecIssue drop{k.op_drop, {brows(k.b_mask, T), brow_slice(e.w.ids, 0, T, kk)}, T};
@@ -1052,7 +1052,7 @@ void push_route(std::vector<RecIssue>& out, const RecIssue& r, const qwen4exp_fp
 void push_layer(std::vector<RecIssue>& out, const std::vector<RecIssue>& seg, const Batch& x, int l,
                 const Want& w, int rank) {
     const qwen4exp_fp8::Layer& lay = qwen4exp_fp8::g_model[rank].layers[(size_t)l];
-    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[rank];
     for (RecIssue r : seg) {
         if (r.op == lay.hc_mix.op_read) {
             out.push_back(r);
@@ -1076,7 +1076,7 @@ void push_layer(std::vector<RecIssue>& out, const std::vector<RecIssue>& seg, co
  * (moe_gemm_q_mod4, TP4 since radiance 1.0.10); the routing is operands 4 and 5 in both. */
 RecIssue probe_of(const std::vector<RecIssue>& stock, int x, int rank) {
     const MoeFP8& e = qwen4exp_fp8::g_model[rank].layers[(size_t)x].mlp;
-    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[rank];
     RecIssue r;
     for (const RecIssue& i : stock) if (i.op == e.op_gu) { r = i; break; }
     r.n = 1;
@@ -1096,7 +1096,7 @@ RecIssue probe_of(const std::vector<RecIssue>& stock, int x, int rank) {
  * from the plugin. */
 std::vector<RecIssue> masked_expected(const Batch& x, const Want& w, int rank = 0) {
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
-    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[rank];
     const RadBatch& b = x.b;
     const int64_t T = b.n_tok;
     const std::vector<RecIssue> stock = run_step(qwen4exp_fp8::step, b, rank).issues;
@@ -1138,7 +1138,7 @@ int differ_at(const std::vector<RecIssue>& got, const std::vector<RecIssue>& wan
 }
 
 /* PLUMB IS THE STOCK STEP THROUGH THE MASKED PATH: with the stager lever off (stage stock) it is the
- * in-tree step plus the one kva_mask issue (mode all: every row exact, no projection, no correction,
+ * in-tree step plus the one ridgefill_mask issue (mode all: every row exact, no projection, no correction,
  * no drop); with the lever on, the probes ride behind layer S-3's gate-up GEMM (R94's static half);
  * with a forced split, each late delta-net layer's scan is two scans over the bounds pairs (R47's
  * static half). A 64-row chunk keeps the fused top-k (no drop). */
@@ -1146,19 +1146,19 @@ TEST(plumb_is_the_stock_step_through_the_masked_path) {
     struct Case { const char* stage; const char* force; int64_t T; bool stream, split; };
     for (const Case& c : {Case{"stock", nullptr, 128, false, false}, Case{"auto", nullptr, 128, true, false},
                           Case{"auto", "64", 128, true, true}, Case{"stock", nullptr, 64, false, false}}) {
-        Env e(c.force ? std::initializer_list<std::pair<const char*, const char*>>{{"RADIANCE_KVA_STAGE", c.stage}, {"RADIANCE_KVA_FORCE_SPLIT", c.force}}
-                      : std::initializer_list<std::pair<const char*, const char*>>{{"RADIANCE_KVA_STAGE", c.stage}});
+        Env e(c.force ? std::initializer_list<std::pair<const char*, const char*>>{{"RADIANCE_RIDGEFILL_STAGE", c.stage}, {"RADIANCE_RIDGEFILL_FORCE_SPLIT", c.force}}
+                      : std::initializer_list<std::pair<const char*, const char*>>{{"RADIANCE_RIDGEFILL_STAGE", c.stage}});
         Pair p;
         declare_pair(p, "plumb");
         REQUIRE_EQ(p.st, RAD_OK);
-        Batch x = make_step(p.kva, {{(int32_t)c.T}, 0, 2048});
+        Batch x = make_step(p.ridgefill, {{(int32_t)c.T}, 0, 2048});
         Want w;
         w.b = c.split ? c.T - 64 : c.T;
         w.stream = c.stream;
         w.split = c.split;
-        const Run got = run_step(qwen4exp_kva::step, x.b);
+        const Run got = run_step(qwen4exp_ridgefill::step, x.b);
         CHECK_EQ(differ_at(got.issues, masked_expected(x, w)), 0);
-        CHECK_EQ(count(got.log, "kva: approximate step"), 1);
+        CHECK_EQ(count(got.log, "ridgefill: approximate step"), 1);
         CHECK_EQ(got.device_calls, 0);
     }
 }
@@ -1171,13 +1171,13 @@ TEST(quality_masks_rows_in_place_through_the_in_tree_layer) {
         Pair p;
         declare_pair(p, "quality", 0, world);
         REQUIRE_EQ(p.st, RAD_OK);
-        Batch x = make_step(p.kva, {{T}, 0, 2048});
+        Batch x = make_step(p.ridgefill, {{T}, 0, 2048});
         Want w;
         w.b = T; w.rho_rows = T;
         w.stream = w.project = w.correct = w.rho = w.scored = true;
-        const Run got = run_step(qwen4exp_kva::step, x.b);
+        const Run got = run_step(qwen4exp_ridgefill::step, x.b);
         CHECK_EQ(differ_at(got.issues, masked_expected(x, w)), 0);
-        CHECK_EQ(count(got.log, "kva: approximate step"), 1);
+        CHECK_EQ(count(got.log, "ridgefill: approximate step"), 1);
         CHECK_EQ(got.device_calls, 0);
     }
 }
@@ -1195,19 +1195,19 @@ TEST(at_tp4_the_masked_path_issues_the_four_class_moe_with_its_drop) {
             declare_pair(p, mode, rank, 4);
             REQUIRE_EQ(p.st, RAD_OK);
             const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
-            const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+            const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[rank];
             for (int l = 0; l < 8; ++l) {
                 const MoeFP8& e = m.layers[(size_t)l].mlp;
                 CHECK_EQ(e.ncls, 4);
-                CHECK_EQ(p.kva.ops[e.op_gu - 1].op, std::string("moe_gemm_q_mod4"));
-                CHECK_EQ(p.kva.ops[e.op_dn - 1].op, std::string("moe_gemm_q_mod4"));
+                CHECK_EQ(p.ridgefill.ops[e.op_gu - 1].op, std::string("moe_gemm_q_mod4"));
+                CHECK_EQ(p.ridgefill.ops[e.op_dn - 1].op, std::string("moe_gemm_q_mod4"));
             }
             const bool quality = !std::strcmp(mode, "quality");
-            Batch x = make_step(p.kva, {{128}, 0, 2048});
+            Batch x = make_step(p.ridgefill, {{128}, 0, 2048});
             Want w;
             w.b = 128; w.rho_rows = 128; w.stream = true;
             w.project = w.correct = w.rho = w.scored = quality;
-            const Run got = run_step(qwen4exp_kva::step, x.b, rank);
+            const Run got = run_step(qwen4exp_ridgefill::step, x.b, rank);
             CHECK_EQ(differ_at(got.issues, masked_expected(x, w, rank)), 0);
             int drops = 0, probes = 0;
             for (const RecIssue& i : got.issues) {
@@ -1229,29 +1229,29 @@ TEST(at_tp4_a_layer_with_plain_experts_takes_unequal_class_tables) {
     for (int rank : {0, 3}) {
         RadBuildCtx c = served_ctx(rank, 4);
         Pair p;
-        for (RadBuilder* b : {&p.stock, &p.kva}) {
+        for (RadBuilder* b : {&p.stock, &p.ridgefill}) {
             /* first match wins in the fake's encoding lookup: these two experts are plain bf16 */
             for (const char* e : {"_exps.3.weight", "_exps.9.weight"})
                 for (const char* proj : {"ffn_gate_up", "ffn_down"})
                     b->encs.push_back({std::string(proj) + e, rad_enc_plain(RAD_BF16)});
             served(*b);
         }
-        hold_kva(p.kva, {"kva.proj", "kva.st"});
-        hold_score(p.kva, "kva.rowsel.score");
+        hold_ridgefill(p.ridgefill, {"ridgefill.proj", "ridgefill.st"});
+        hold_score(p.ridgefill, "ridgefill.rowsel.score");
         REQUIRE_EQ(qwen4exp_fp8::declare(&p.stock, &meta, &c), RAD_OK);
-        Env env({{"RADIANCE_KVA", "quality"}});
-        REQUIRE_EQ(qwen4exp_kva::declare(&p.kva, &meta, &c), RAD_OK);
-        g_op_names = &p.kva;
+        Env env({{"RADIANCE_RIDGEFILL", "quality"}});
+        REQUIRE_EQ(qwen4exp_ridgefill::declare(&p.ridgefill, &meta, &c), RAD_OK);
+        g_op_names = &p.ridgefill;
         const MoeFP8& e = qwen4exp_fp8::g_model[rank].layers[(size_t)kSplit].mlp;
         CHECK_EQ(e.ncls, 4);
         CHECK_EQ(e.n_reg, (int64_t)510);
         CHECK_EQ(e.prot.size(), (size_t)2);
         CHECK(e.op_pgu != 0);
-        Batch x = make_step(p.kva, {{128}, 0, 2048});
+        Batch x = make_step(p.ridgefill, {{128}, 0, 2048});
         Want w;
         w.b = 128; w.rho_rows = 128;
         w.stream = w.project = w.correct = w.rho = w.scored = true;
-        const Run got = run_step(qwen4exp_kva::step, x.b, rank);
+        const Run got = run_step(qwen4exp_ridgefill::step, x.b, rank);
         CHECK_EQ(differ_at(got.issues, masked_expected(x, w, rank)), 0);
         for (const RecIssue& i : got.issues)
             if (i.op == e.op_gu && i.n > 1) {
@@ -1275,15 +1275,15 @@ TEST(an_mtp_history_pass_is_the_in_tree_head_whether_or_not_it_drafts) {
             REQUIRE_EQ(p.st, RAD_OK);
             const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
             REQUIRE(m.have_mtp);
-            Batch x = make_step(p.kva, {{128}, 0, 2048});
+            Batch x = make_step(p.ridgefill, {{128}, 0, 2048});
             x.b.draft_pass = -1;
             x.b.n_draft_out = drafts;
             x.b.draft_out_ids = drafts ? draft_ids : nullptr;
             const Run want = run_step(qwen4exp_fp8::step, x.b);
-            const Run got = run_step(qwen4exp_kva::step, x.b);
+            const Run got = run_step(qwen4exp_ridgefill::step, x.b);
             CHECK(want.issues.size() > 5);
             CHECK_EQ(differ_at(got.issues, want.issues), 0);
-            CHECK_EQ(count(got.log, "kva: approximate step"), 0);
+            CHECK_EQ(count(got.log, "ridgefill: approximate step"), 0);
             int lm_head = 0, experts = 0;
             for (const RecIssue& i : got.issues) {
                 lm_head += i.op == m.mtp.op_logits;
@@ -1301,21 +1301,21 @@ TEST(an_mtp_history_pass_is_the_in_tree_head_whether_or_not_it_drafts) {
  * masked too and applies without decay sums. */
 TEST(a_straddling_chunk_splits_the_last_scan_at_the_bulk_end) {
     struct Case { const char* mode; const char* straddle; bool split, rho; int64_t rho_rows; };
-    Env tail_only_off({{"RADIANCE_KVA_TAIL_ONLY", "0"}});
+    Env tail_only_off({{"RADIANCE_RIDGEFILL_TAIL_ONLY", "0"}});
     for (const Case& c : {Case{"quality", "split", true, true, 64}, Case{"quality", "end", false, true, 128},
                           Case{"speed", "split", true, false, 0}}) {
-        Env e({{"RADIANCE_KVA_STRADDLE", c.straddle}});
+        Env e({{"RADIANCE_RIDGEFILL_STRADDLE", c.straddle}});
         Pair p;
         declare_pair(p, c.mode);
         REQUIRE_EQ(p.st, RAD_OK);
-        Batch x = make_step(p.kva, {{128}, 0, 1984});
+        Batch x = make_step(p.ridgefill, {{128}, 0, 1984});
         Want w;
         w.b = 64; w.rho_rows = c.rho_rows;
         w.stream = w.project = w.correct = true;
         w.rho = c.rho;
         w.split = c.split;
         w.scored = !std::strcmp(c.mode, "quality");
-        const Run got = run_step(qwen4exp_kva::step, x.b);
+        const Run got = run_step(qwen4exp_ridgefill::step, x.b);
         CHECK_EQ(differ_at(got.issues, masked_expected(x, w)), 0);
         CHECK(has(got.log, c.split ? ", split)" : ", end)"));
     }
@@ -1350,7 +1350,7 @@ void append(std::vector<RecIssue>& out, const std::vector<RecIssue>& more) {
 std::vector<RecIssue> straddle_expected(const std::vector<RecIssue>& seg, const Batch& x, int l, int64_t b,
                                         int rank) {
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
-    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[rank];
     const qwen4exp_fp8::Layer& lay = m.layers[(size_t)l];
     const RadBatch& bt = x.b;
     const int64_t T = bt.n_tok, rows = T - b, n = m.g.n_embd;
@@ -1413,7 +1413,7 @@ std::vector<RecIssue> straddle_expected(const std::vector<RecIssue>& seg, const 
  * over [0, DT); the bulk rows' projection from the layer-S stream into `x` and its codes. */
 std::vector<RecIssue> decoders_layer_expected(const std::vector<RecIssue>& seg, const Batch& x, int l, int rank) {
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
-    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[rank];
     const qwen4exp_fp8::Layer& lay = m.layers[(size_t)l];
     const RadBatch& bt = x.b;
     const int64_t T = bt.n_tok, DT = bt.n_tok_decode, n = m.g.n_embd, wide = m.hccfg.hc * n, bulk = T - DT;
@@ -1473,7 +1473,7 @@ std::vector<RecIssue> decoders_layer_expected(const std::vector<RecIssue>& seg, 
  * (the decoders' late experts stream), then decoders_layer_expected per late layer, the epilogue stock. */
 std::vector<RecIssue> decoders_expected(const Batch& x, int rank = 0) {
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
-    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+    const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[rank];
     const RadBatch& b = x.b;
     const std::vector<RecIssue> stock = run_step(qwen4exp_fp8::step, b, rank).issues;
     std::vector<rad_op> reads;
@@ -1499,7 +1499,7 @@ std::vector<RecIssue> decoders_expected(const Batch& x, int rank = 0) {
 /* R55 -- SPEED BESIDE DECODERS keeps the lean fill for its bulk rows and runs the full late blocks
  * over the decoder rows only, at TP1 and on rank 0 of TP2 (where the connection writes carry the
  * all-reduce), one decoder and four verifying 1 + 3 rows; the log names the path; nothing reaches
- * the device. RADIANCE_KVA_MASK=all and TAIL_ONLY=0 keep the masked path (the controls/oracle). */
+ * the device. RADIANCE_RIDGEFILL_MASK=all and TAIL_ONLY=0 keep the masked path (the controls/oracle). */
 TEST(speed_beside_decoders_runs_full_late_blocks_over_the_decoder_rows_only) {
     struct Case { int world; Shape s; };
     for (const Case& c : {Case{1, {{1, 128}, 1, 2048}}, Case{2, {{1, 128}, 1, 2048}},
@@ -1507,19 +1507,19 @@ TEST(speed_beside_decoders_runs_full_late_blocks_over_the_decoder_rows_only) {
         Pair p;
         declare_pair(p, "speed", 0, c.world, 0, c.s.n_spec);
         REQUIRE_EQ(p.st, RAD_OK);
-        Batch x = make_step(p.kva, c.s);
-        const Run got = run_step(qwen4exp_kva::step, x.b);
+        Batch x = make_step(p.ridgefill, c.s);
+        const Run got = run_step(qwen4exp_ridgefill::step, x.b);
         CHECK_EQ(differ_at(got.issues, decoders_expected(x)), 0);
         CHECK(has(got.log, "decoders, stage stream"));
         CHECK_EQ(got.device_calls, 0);
     }
-    for (auto [name, value] : {std::pair<const char*, const char*>{"RADIANCE_KVA_MASK", "all"}, {"RADIANCE_KVA_TAIL_ONLY", "0"}}) {
+    for (auto [name, value] : {std::pair<const char*, const char*>{"RADIANCE_RIDGEFILL_MASK", "all"}, {"RADIANCE_RIDGEFILL_TAIL_ONLY", "0"}}) {
         Env e({{name, value}});
         Pair p;
         declare_pair(p, "speed");
         REQUIRE_EQ(p.st, RAD_OK);
-        Batch x = make_step(p.kva, {{1, 128}, 1, 2048});
-        CHECK_EQ(qwen4exp_kva::derive(qwen4exp_kva::g_kva[0], &x.b).path, qwen4exp_kva::PATH_MASKED);
+        Batch x = make_step(p.ridgefill, {{1, 128}, 1, 2048});
+        CHECK_EQ(qwen4exp_ridgefill::derive(qwen4exp_ridgefill::g_ridgefill[0], &x.b).path, qwen4exp_ridgefill::PATH_MASKED);
     }
 }
 
@@ -1534,11 +1534,11 @@ TEST(a_speed_straddle_runs_its_late_blocks_over_the_tail_rows_only) {
         declare_pair(p, "speed", 0, world);
         REQUIRE_EQ(p.st, RAD_OK);
         const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
-        const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+        const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[0];
         REQUIRE(k.straddle_layers);
-        Batch x = make_step(p.kva, {{128}, 0, 1984});
-        const qwen4exp_kva::Pass pass = qwen4exp_kva::derive(k, &x.b);
-        REQUIRE_EQ(pass.path, qwen4exp_kva::PATH_STRADDLE);
+        Batch x = make_step(p.ridgefill, {{128}, 0, 1984});
+        const qwen4exp_ridgefill::Pass pass = qwen4exp_ridgefill::derive(k, &x.b);
+        REQUIRE_EQ(pass.path, qwen4exp_ridgefill::PATH_STRADDLE);
         CHECK_EQ(pass.b, 64);
         CHECK(!pass.stream);
         const std::vector<RecIssue> stock = run_step(qwen4exp_fp8::step, x.b).issues;
@@ -1558,7 +1558,7 @@ TEST(a_speed_straddle_runs_its_late_blocks_over_the_tail_rows_only) {
                                            x, l, 64, 0));
         for (size_t i = at.back(); i < stock.size(); ++i) want.push_back(stock[i]);
         push_hazard(want, x, false);
-        const Run got = run_step(qwen4exp_kva::step, x.b);
+        const Run got = run_step(qwen4exp_ridgefill::step, x.b);
         CHECK_EQ(differ_at(got.issues, want), 0);
         CHECK(has(got.log, "straddle, stage stock, split)"));
         CHECK_EQ(got.device_calls, 0);
@@ -1570,19 +1570,19 @@ TEST(a_speed_straddle_runs_its_late_blocks_over_the_tail_rows_only) {
  * (M = 1 on its own index row), and its bulk superset starts at s_lb. */
 TEST(a_mixed_step_corrects_only_the_last_sequence) {
     struct Case { Shape s; int64_t b, s_lb; };
-    Env stream_rows({{"RADIANCE_KVA_STAGE_ROWS", "4096"}});   /* the issue shape, not the guard */
+    Env stream_rows({{"RADIANCE_RIDGEFILL_STAGE_ROWS", "4096"}});   /* the issue shape, not the guard */
     for (const Case& c : {Case{{{1, 1, 128}, 2, 2048}, 130, 2}, Case{{{64, 128}, 0, 2048}, 192, 64},
                           Case{{{1, 64, 128}, 1, 2048}, 193, 65}}) {
         Pair p;
         declare_pair(p, "quality");
         REQUIRE_EQ(p.st, RAD_OK);
-        Batch x = make_step(p.kva, c.s);
+        Batch x = make_step(p.ridgefill, c.s);
         Want w;
         w.b = c.b; w.s_lb = c.s_lb; w.rho_rows = c.b;
         w.stream = w.project = w.correct = w.rho = w.scored = true;
-        const Run got = run_step(qwen4exp_kva::step, x.b);
+        const Run got = run_step(qwen4exp_ridgefill::step, x.b);
         CHECK_EQ(differ_at(got.issues, masked_expected(x, w)), 0);
-        CHECK_EQ(count(got.log, "kva: approximate step"), 1);
+        CHECK_EQ(count(got.log, "ridgefill: approximate step"), 1);
     }
 }
 
@@ -1593,7 +1593,7 @@ TEST(a_mixed_step_corrects_only_the_last_sequence) {
  * row n_seq - 1; the drop and every connection op run at M = n_tok. */
 TEST(r53_mixed_steps_are_the_in_tree_step_with_only_the_last_sequence_masked) {
     struct Case { Shape s; int64_t b, s_lb; };
-    Env stream_rows({{"RADIANCE_KVA_STAGE_ROWS", "4096"}});   /* the issue shape, not the guard */
+    Env stream_rows({{"RADIANCE_RIDGEFILL_STAGE_ROWS", "4096"}});   /* the issue shape, not the guard */
     const std::vector<Case> cases = {
         {{{1, 128}, 1, 2048}, 129, 1},
         {{{1, 1, 1, 1, 128}, 4, 2048}, 132, 4},
@@ -1610,12 +1610,12 @@ TEST(r53_mixed_steps_are_the_in_tree_step_with_only_the_last_sequence_masked) {
             Pair p;
             declare_pair(p, mode, 0, 1, 0, c.s.n_spec);
             REQUIRE_EQ(p.st, RAD_OK);
-            Batch x = make_step(p.kva, c.s);
-            const qwen4exp_kva::Pass pass = qwen4exp_kva::derive(qwen4exp_kva::g_kva[0], &x.b);
+            Batch x = make_step(p.ridgefill, c.s);
+            const qwen4exp_ridgefill::Pass pass = qwen4exp_ridgefill::derive(qwen4exp_ridgefill::g_ridgefill[0], &x.b);
             const bool decoders = !quality && c.b == x.b.n_tok && x.b.n_seq - x.b.n_seq_decode == 1;
-            CHECK_EQ(pass.path, decoders ? qwen4exp_kva::PATH_DECODERS : qwen4exp_kva::PATH_MASKED);
+            CHECK_EQ(pass.path, decoders ? qwen4exp_ridgefill::PATH_DECODERS : qwen4exp_ridgefill::PATH_MASKED);
             if (decoders) {
-                const Run got = run_step(qwen4exp_kva::step, x.b);
+                const Run got = run_step(qwen4exp_ridgefill::step, x.b);
                 CHECK_EQ(differ_at(got.issues, decoders_expected(x)), 0);
                 CHECK(has(got.log, "decoders, stage stream"));
                 continue;
@@ -1625,43 +1625,43 @@ TEST(r53_mixed_steps_are_the_in_tree_step_with_only_the_last_sequence_masked) {
             w.stream = w.project = w.correct = true;
             w.rho = w.scored = quality;
             w.split = c.b < x.b.n_tok;
-            const Run got = run_step(qwen4exp_kva::step, x.b);
+            const Run got = run_step(qwen4exp_ridgefill::step, x.b);
             CHECK_EQ(differ_at(got.issues, masked_expected(x, w)), 0);
-            CHECK_EQ(count(got.log, "kva: approximate step"), 1);
+            CHECK_EQ(count(got.log, "ridgefill: approximate step"), 1);
             CHECK_EQ(got.device_calls, 0);
         }
 }
 
-/* R54'S NEGATIVE CONTROL (RADIANCE_KVA_MASK=all): the mask op is declared in `step` mode (every row
+/* R54'S NEGATIVE CONTROL (RADIANCE_RIDGEFILL_MASK=all): the mask op is declared in `step` mode (every row
  * before the bulk end approximated, decoders included) and the projector covers the step from row
  * 0, so the decoders' rows are projected, selected and dropped like bulk rows; otherwise the issue
  * sequence is the masked path's. It is said loudly at declare, and plumb (which projects nothing)
  * refuses it. */
 TEST(the_mask_all_control_approximates_every_row_before_the_bulk_end) {
-    Env e({{"RADIANCE_KVA_MASK", "all"}});
+    Env e({{"RADIANCE_RIDGEFILL_MASK", "all"}});
     Pair p;
     const std::string log = stderr_of([&] { declare_pair(p, "quality"); });
     REQUIRE_EQ(p.st, RAD_OK);
-    CHECK(has(log, "DEBUG RADIANCE_KVA_MASK=all"));
+    CHECK(has(log, "DEBUG RADIANCE_RIDGEFILL_MASK=all"));
     int step_mode = 0;
-    for (const RecOp& o : p.kva.ops)
-        for (const RecParam& q : o.p) step_mode += o.op == "kva_mask" && q.key == "mode" && q.sval == "step";
+    for (const RecOp& o : p.ridgefill.ops)
+        for (const RecParam& q : o.p) step_mode += o.op == "ridgefill_mask" && q.key == "mode" && q.sval == "step";
     CHECK_EQ(step_mode, 1);
-    Batch x = make_step(p.kva, {{1, 1, 128}, 2, 2048});
+    Batch x = make_step(p.ridgefill, {{1, 1, 128}, 2, 2048});
     Want w;
     w.b = 130; w.s_lb = 0; w.rho_rows = 130;
     w.stream = w.project = w.correct = w.rho = true;
-    const Run got = run_step(qwen4exp_kva::step, x.b);
+    const Run got = run_step(qwen4exp_ridgefill::step, x.b);
     CHECK_EQ(differ_at(got.issues, masked_expected(x, w)), 0);
     CHECK(has(got.log, "s_lb 0,"));
     Pair q;
     const std::string err = stderr_of([&] { declare_pair(q, "plumb"); });
     CHECK_EQ(q.st, RAD_E_INVAL);
-    CHECK(has(err, "RADIANCE_KVA_MASK=all"));
+    CHECK(has(err, "RADIANCE_RIDGEFILL_MASK=all"));
 }
 
 /* DD-A's INSTRUMENT (Stage C, R65): speed and quality declare one LINEAR meta group bound to the
- * first late delta-net layer (so checkpoints snapshot it), the kva_hazard op and a host-mapped counter;
+ * first late delta-net layer (so checkpoints snapshot it), the ridgefill_hazard op and a host-mapped counter;
  * plumb and off declare none. A stock pass whose last sequence still has tail ahead (n_ahead < T)
  * ends with the op, counting only (no bounds); a stock pass with T or more ahead and a decode-only
  * step issue nothing. The counter is read on the host for the log alone. */
@@ -1669,37 +1669,37 @@ TEST(the_hazard_instrument_counts_on_tail_passes_and_records_on_approximate_ones
     Pair p;
     declare_pair(p, "quality");
     REQUIRE_EQ(p.st, RAD_OK);
-    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+    const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[0];
     REQUIRE(k.op_hazard != 0 && k.kv_meta != 0);
-    CHECK_EQ(std::count(p.kva.kv_groups.begin(), p.kva.kv_groups.end(), "kv_kva_meta"), 1);
+    CHECK_EQ(std::count(p.ridgefill.kv_groups.begin(), p.ridgefill.kv_groups.end(), "kv_ridgefill_meta"), 1);
     CHECK_EQ(k.meta_layer, kSplit);
     int binds = 0;
-    for (auto [layer, g] : p.kva.binds)
+    for (auto [layer, g] : p.ridgefill.binds)
         if (g == k.kv_meta) { CHECK_EQ(layer, kSplit); ++binds; }
     CHECK_EQ(binds, 1);
-    REQUIRE(qwen4exp_kva::g_hazard_dev[0] != nullptr);
-    Batch tail = make_step(p.kva, {{128}, 0, 0});          /* the final chunk: stock, n_ahead 0 */
-    const Run got = run_step(qwen4exp_kva::step, tail.b);
+    REQUIRE(qwen4exp_ridgefill::g_hazard_dev[0] != nullptr);
+    Batch tail = make_step(p.ridgefill, {{128}, 0, 0});          /* the final chunk: stock, n_ahead 0 */
+    const Run got = run_step(qwen4exp_ridgefill::step, tail.b);
     std::vector<RecIssue> want = run_step(qwen4exp_fp8::step, tail.b).issues;
     want.push_back({k.op_hazard, {praw(tail.b.cu_seqlens, RAD_I32, 2), praw(tail.b.positions, RAD_I32, 128), RAD_NONE,
                     praw(tail.b.positions, RAD_I32, k.cfg.tail), kv_cache(k.kv_meta, k.meta_layer),
-                    last_row(tail, k.kv_meta), praw(qwen4exp_kva::g_hazard_dev[0], RAD_F32, 1)}, 1});
+                    last_row(tail, k.kv_meta), praw(qwen4exp_ridgefill::g_hazard_dev[0], RAD_F32, 1)}, 1});
     CHECK_EQ(differ_at(got.issues, want), 0);
     for (const Shape& s : {Shape{{128}, 0, 4096}, Shape{{1, 1}, 2, 0}}) {   /* T+ ahead but stock; decode only */
-        Batch x = make_step(p.kva, s);
+        Batch x = make_step(p.ridgefill, s);
         if (s.D == 0) x.b.n_mm_rows = 1;                 /* a media step: stock whatever is ahead */
-        CHECK_EQ(differ(run_step(qwen4exp_kva::step, x.b).issues, run_step(qwen4exp_fp8::step, x.b).issues), 0);
+        CHECK_EQ(differ(run_step(qwen4exp_ridgefill::step, x.b).issues, run_step(qwen4exp_fp8::step, x.b).issues), 0);
     }
-    float* host = (float*)rad_dev_host_ptr(qwen4exp_kva::g_hazard_dev[0]);
+    float* host = (float*)rad_dev_host_ptr(qwen4exp_ridgefill::g_hazard_dev[0]);
     REQUIRE(host != nullptr);
-    *host = qwen4exp_kva::g_hazard_logged[0] + 1144.0f;
-    CHECK(has(run_step(qwen4exp_kva::step, tail.b).log, "kva: hazard 1144 positions"));
-    CHECK(!has(run_step(qwen4exp_kva::step, tail.b).log, "kva: hazard"));   /* said once */
+    *host = qwen4exp_ridgefill::g_hazard_logged[0] + 1144.0f;
+    CHECK(has(run_step(qwen4exp_ridgefill::step, tail.b).log, "ridgefill: hazard 1144 positions"));
+    CHECK(!has(run_step(qwen4exp_ridgefill::step, tail.b).log, "ridgefill: hazard"));   /* said once */
     Pair q;
     declare_pair(q, "plumb");
     REQUIRE_EQ(q.st, RAD_OK);
-    CHECK(qwen4exp_kva::g_kva[0].op_hazard == 0);
-    CHECK_EQ(std::count(q.kva.kv_groups.begin(), q.kva.kv_groups.end(), "kv_kva_meta"), 0);
+    CHECK(qwen4exp_ridgefill::g_ridgefill[0].op_hazard == 0);
+    CHECK_EQ(std::count(q.ridgefill.kv_groups.begin(), q.ridgefill.kv_groups.end(), "kv_ridgefill_meta"), 0);
 }
 
 /* A ONE-SEQUENCE CHUNK OFF THE DELTA NET'S TILE FAILS THE STEP BY NAME: the scheduler never cuts one,
@@ -1709,21 +1709,21 @@ TEST(a_chunk_off_the_tile_fails_the_step_by_name) {
     Pair p;
     declare_pair(p, "quality");
     REQUIRE_EQ(p.st, RAD_OK);
-    Batch x = make_step(p.kva, {{100}, 0, 2048});
+    Batch x = make_step(p.ridgefill, {{100}, 0, 2048});
     RadCtx c;
     c.batch = &x.b;
     g_ctx = &c;
-    qwen4exp_kva::step(&c, &x.b);
+    qwen4exp_ridgefill::step(&c, &x.b);
     g_ctx = nullptr;
     CHECK(has(c.step_fail, "tile"));
     CHECK(c.issues.empty());
-    Env e({{"RADIANCE_KVA_FORCE_SPLIT", "100"}});
+    Env e({{"RADIANCE_RIDGEFILL_FORCE_SPLIT", "100"}});
     Pair q;
     std::string err = stderr_of([&] { declare_pair(q, "plumb"); });
     REQUIRE_EQ(q.st, RAD_OK);
     CHECK(has(err, "OFF the delta net's tile"));
-    Batch y = make_step(q.kva, {{128}, 0, 2048});
-    const Run got = run_step(qwen4exp_kva::step, y.b);
+    Batch y = make_step(q.ridgefill, {{128}, 0, 2048});
+    const Run got = run_step(qwen4exp_ridgefill::step, y.b);
     CHECK(!got.issues.empty());
 }
 
@@ -1754,12 +1754,12 @@ TEST(speed_fills_late_layers_with_their_cache_writing_ops_only) {
     declare_pair(p, "speed");
     REQUIRE_EQ(p.st, RAD_OK);
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
-    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+    const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[0];
     REQUIRE(k.quant.op != 0);                          /* the served formats need codes */
     CHECK(m.a_x.q8_fed);
-    Batch x = make_step(p.kva, {{128}, 0, 2048});
+    Batch x = make_step(p.ridgefill, {{128}, 0, 2048});
     const Run want = run_step(qwen4exp_fp8::step, x.b);
-    const Run got = run_step(qwen4exp_kva::step, x.b);
+    const Run got = run_step(qwen4exp_ridgefill::step, x.b);
     std::vector<rad_op> reads, projs;
     for (int l = kSplit; l < 8; ++l) {
         reads.push_back(m.layers[(size_t)l].hc_mix.op_read);
@@ -1804,42 +1804,42 @@ TEST(speed_fills_late_layers_with_their_cache_writing_ops_only) {
         }
         CHECK_EQ(differ(slice(seg, 2, seg.size()), keep), 0);
     }
-    CHECK_EQ(count(got.log, "kva: approximate step"), 1);
+    CHECK_EQ(count(got.log, "ridgefill: approximate step"), 1);
     CHECK(has(got.log, "lean"));
     CHECK_EQ(got.device_calls, 0);
 }
 
 /* The correction is wired only where the model holds one, with the strength the switch names,
- * and its slot group binds exactly the late delta-net layers. Without kva.st.* nothing of it is
+ * and its slot group binds exactly the late delta-net layers. Without ridgefill.st.* nothing of it is
  * declared or issued (speed without correction, Stage 3's arm). */
 TEST(the_correction_is_declared_and_issued_only_when_held) {
     for (bool held : {true, false}) {
         RadModelMeta meta = flash_next_meta();
         RadBuildCtx c = served_ctx();
-        RadBuilder kva;
-        served(kva);
-        if (held) hold_kva(kva, {"kva.proj", "kva.st"});
-        else      hold_kva(kva, {"kva.proj"});
-        Env env({{"RADIANCE_KVA", "speed"}, {"RADIANCE_KVA_ALPHA", "0.5"}});
-        REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
-        const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+        RadBuilder ridgefill;
+        served(ridgefill);
+        if (held) hold_ridgefill(ridgefill, {"ridgefill.proj", "ridgefill.st"});
+        else      hold_ridgefill(ridgefill, {"ridgefill.proj"});
+        Env env({{"RADIANCE_RIDGEFILL", "speed"}, {"RADIANCE_RIDGEFILL_ALPHA", "0.5"}});
+        REQUIRE_EQ(qwen4exp_ridgefill::declare(&ridgefill, &meta, &c), RAD_OK);
+        const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[0];
         CHECK_EQ(k.kv_applied != 0, held);
-        CHECK_EQ(std::count(kva.kv_groups.begin(), kva.kv_groups.end(), "kv_kva_applied"), held ? 1 : 0);
+        CHECK_EQ(std::count(ridgefill.kv_groups.begin(), ridgefill.kv_groups.end(), "kv_ridgefill_applied"), held ? 1 : 0);
         int bound = 0;
-        for (const auto& [layer, g] : kva.binds) {
+        for (const auto& [layer, g] : ridgefill.binds) {
             if (g != k.kv_applied || !held) continue;
             ++bound;
             CHECK(layer >= kSplit && !qwen4exp_fp8::g_model[0].layers[(size_t)layer].full);
         }
         CHECK_EQ(bound, held ? 3 : 0);
-        for (const RecOp& o : kva.ops)
-            if (o.op == "kva_state_correct")
+        for (const RecOp& o : ridgefill.ops)
+            if (o.op == "ridgefill_state_correct")
                 for (const RecParam& q : o.p) if (q.key == "alpha") CHECK_EQ(q.dval, 0.5);
-        Batch bk = make_step(kva, {{128}, 0, 2048});
-        const Run r = run_step(qwen4exp_kva::step, bk.b);
+        Batch bk = make_step(ridgefill, {{128}, 0, 2048});
+        const Run r = run_step(qwen4exp_ridgefill::step, bk.b);
         int corrections = 0;
         for (const RecIssue& i : r.issues)
-            corrections += i.op && kva.ops[i.op - 1].op == "kva_state_correct";
+            corrections += i.op && ridgefill.ops[i.op - 1].op == "ridgefill_state_correct";
         CHECK_EQ(corrections, held ? 2 * 3 : 0);
     }
 }
@@ -1853,9 +1853,9 @@ TEST(at_tp2_each_rank_corrects_its_own_heads) {
         declare_pair(p, "speed", rank, 2);
         REQUIRE_EQ(p.st, RAD_OK);
         const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
-        const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
-        Batch bk = make_step(p.kva, {{128}, 0, 2048});
-        const Run r = run_step(qwen4exp_kva::step, bk.b, rank);
+        const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[rank];
+        Batch bk = make_step(p.ridgefill, {{128}, 0, 2048});
+        const Run r = run_step(qwen4exp_ridgefill::step, bk.b, rank);
         int seen = 0;
         for (const RecIssue& i : r.issues) {
             if (i.op != k.op_undo[kSplit] && i.op != k.op_apply[kSplit]) continue;
@@ -1875,12 +1875,12 @@ TEST(plumb_declares_no_correction) {
     Pair p;
     declare_pair(p, "plumb");
     REQUIRE_EQ(p.st, RAD_OK);
-    CHECK_EQ(p.kva.weights.size(), p.stock.weights.size());
+    CHECK_EQ(p.ridgefill.weights.size(), p.stock.weights.size());
     CHECK_EQ(g_mem.copies.size(), (size_t)0);
-    CHECK_EQ(qwen4exp_kva::g_kva[0].split, (int64_t)kSplit);
-    for (size_t i = p.stock.ops.size(); i < p.kva.ops.size(); ++i) {
-        const std::string& op = p.kva.ops[i].op;
-        CHECK(op == "kva_mask" || op == "moe_gemm_q");
+    CHECK_EQ(qwen4exp_ridgefill::g_ridgefill[0].split, (int64_t)kSplit);
+    for (size_t i = p.stock.ops.size(); i < p.ridgefill.ops.size(); ++i) {
+        const std::string& op = p.ridgefill.ops[i].op;
+        CHECK(op == "ridgefill_mask" || op == "moe_gemm_q");
     }
 }
 
@@ -1892,7 +1892,7 @@ TEST(plumb_declares_no_correction) {
 struct TempDir {
     std::filesystem::path path;
     TempDir() {
-        std::string t = (std::filesystem::temp_directory_path() / "kva_capture_XXXXXX").string();
+        std::string t = (std::filesystem::temp_directory_path() / "ridgefill_capture_XXXXXX").string();
         path = mkdtemp(t.data()) ? t : std::string();
     }
     ~TempDir() { if (!path.empty()) std::filesystem::remove_all(path); }
@@ -1931,7 +1931,7 @@ std::filesystem::path find_file(const std::filesystem::path& dir, const std::str
     return {};
 }
 
-/* RADIANCE_KVA_CAPTURE (off): on rank 0 a single-sequence prefill chunk issues the stock sequence
+/* RADIANCE_RIDGEFILL_CAPTURE (off): on rank 0 a single-sequence prefill chunk issues the stock sequence
  * exactly and writes the layout notes/arch.md documents -- the stream entering S and every late
  * layer's block input at the rows whose position is a multiple of 8, all ids and positions, one
  * jsonl line. Rank 1 and a two-sequence step capture nothing and copy nothing. */
@@ -1940,19 +1940,19 @@ TEST(capture_records_an_exact_chunk_and_issues_the_stock_sequence) {
     REQUIRE(!dir.path.empty());
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
-    RadBuilder stock, kva;
+    RadBuilder stock, ridgefill;
     served(stock);
-    served(kva);
-    hold_kva(kva, {"kva.proj", "kva.st"});
+    served(ridgefill);
+    hold_ridgefill(ridgefill, {"ridgefill.proj", "ridgefill.st"});
     REQUIRE_EQ(qwen4exp_fp8::declare(&stock, &meta, &c), RAD_OK);
-    Env env({{"RADIANCE_KVA_CAPTURE", dir.path.c_str()}});
-    REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
-    CHECK_EQ(kva.ops.size(), stock.ops.size());
-    CHECK_EQ(qwen4exp_kva::g_kva[0].split, (int64_t)kSplit);
+    Env env({{"RADIANCE_RIDGEFILL_CAPTURE", dir.path.c_str()}});
+    REQUIRE_EQ(qwen4exp_ridgefill::declare(&ridgefill, &meta, &c), RAD_OK);
+    CHECK_EQ(ridgefill.ops.size(), stock.ops.size());
+    CHECK_EQ(qwen4exp_ridgefill::g_ridgefill[0].split, (int64_t)kSplit);
     Batch bs = make_step(stock, {{128}, 0, 300, 4100});   /* positions 4100..4227 */
-    Batch bk = make_step(kva, {{128}, 0, 300, 4100});
+    Batch bk = make_step(ridgefill, {{128}, 0, 300, 4100});
     const Run want = run_step(qwen4exp_fp8::step, bs.b);
-    const Run got = run_step(qwen4exp_kva::step, bk.b);
+    const Run got = run_step(qwen4exp_ridgefill::step, bk.b);
     CHECK_EQ(differ(got.issues, want.issues), 0);
     CHECK(got.device_calls > 0);
     /* WHERE each read sits: b_h just before layer S's first issue, and x just after each late
@@ -2002,18 +2002,18 @@ TEST(capture_records_an_exact_chunk_and_issues_the_stock_sequence) {
     CHECK(has(line, "\"chunk_start\": 4100") && has(line, "\"split\": 4") && has(line, "\"rows\": 16") &&
           has(line, "\"layers\": [4, 5, 6, 7]") && has(line, "\"stride\": 8"));
     /* rank 1, and a two-sequence step: the stock step, nothing read */
-    const Run r1 = run_step(qwen4exp_kva::step, bk.b, 1);
+    const Run r1 = run_step(qwen4exp_ridgefill::step, bk.b, 1);
     CHECK_EQ(r1.device_calls, 0);
-    Batch two = make_step(kva, {{128}, 0, 300, 4100});
+    Batch two = make_step(ridgefill, {{128}, 0, 300, 4100});
     two.b.n_seq = 2;
-    CHECK_EQ(run_step(qwen4exp_kva::step, two.b).device_calls, 0);
+    CHECK_EQ(run_step(qwen4exp_ridgefill::step, two.b).device_calls, 0);
     CHECK_EQ(count(slurp(dir.path / "capture.jsonl"), "\n"), 1);
 }
 
 
-/* RADIANCE_KVA_CAPTURE_STATE: on an approximate chunk each late delta-net layer's slot is copied
+/* RADIANCE_RIDGEFILL_CAPTURE_STATE: on an approximate chunk each late delta-net layer's slot is copied
  * right after its scan and BEFORE the correction's apply; on an exact chunk after the step. Each is
- * one kva_state_read issue on the layer's own slot, and the step's other issues are unchanged. */
+ * one ridgefill_state_read issue on the layer's own slot, and the step's other issues are unchanged. */
 TEST(state_capture_copies_each_late_state_before_the_apply) {
     TempDir dir;
     REQUIRE(!dir.path.empty());
@@ -2022,23 +2022,23 @@ TEST(state_capture_copies_each_late_state_before_the_apply) {
     REQUIRE_EQ(p.st, RAD_OK);
     std::vector<std::vector<RecIssue>> plain;   /* the same chunks without the switch */
     for (int64_t ahead : {2048, 100}) {
-        Batch ref = make_step(p.kva, {{128}, 0, ahead, 2048});
-        plain.push_back(run_step(qwen4exp_kva::step, ref.b).issues);
+        Batch ref = make_step(p.ridgefill, {{128}, 0, ahead, 2048});
+        plain.push_back(run_step(qwen4exp_ridgefill::step, ref.b).issues);
     }
     const RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
-    RadBuilder kva;   /* the same folder and copies as the plain declare's */
-    served(kva);
-    Env env({{"RADIANCE_KVA", "speed"}, {"RADIANCE_KVA_CAPTURE_STATE", dir.path.c_str()}});
-    REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
+    RadBuilder ridgefill;   /* the same folder and copies as the plain declare's */
+    served(ridgefill);
+    Env env({{"RADIANCE_RIDGEFILL", "speed"}, {"RADIANCE_RIDGEFILL_CAPTURE_STATE", dir.path.c_str()}});
+    REQUIRE_EQ(qwen4exp_ridgefill::declare(&ridgefill, &meta, &c), RAD_OK);
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
-    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+    const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[0];
     REQUIRE(k.op_state_read != 0);
-    CHECK(kva.concurrent.count(k.b_state) == 1);
+    CHECK(ridgefill.concurrent.count(k.b_state) == 1);
     for (int64_t ahead : {2048, 100}) {   /* approximate, then exact */
-        Batch bk = make_step(kva, {{128}, 0, ahead, 2048});
+        Batch bk = make_step(ridgefill, {{128}, 0, ahead, 2048});
         const std::vector<RecIssue>& want = plain[ahead == 2048 ? 0 : 1];
-        const Run got = run_step(qwen4exp_kva::step, bk.b);
+        const Run got = run_step(qwen4exp_ridgefill::step, bk.b);
         std::vector<RecIssue> reads, rest;
         for (const RecIssue& i : got.issues) (i.op == k.op_state_read ? reads : rest).push_back(i);
         CHECK_EQ(differ(rest, want), 0);    /* the sequence without the copies is the plain one */
@@ -2076,26 +2076,26 @@ TEST(state_capture_copies_each_late_state_before_the_apply) {
     CHECK_EQ(descr, std::string("<f4"));
 }
 
-/* R61's instrument -- RADIANCE_KVA_CAPTURE_STATE ON A MIXED STEP copies, after the step, every
+/* R61's instrument -- RADIANCE_RIDGEFILL_CAPTURE_STATE ON A MIXED STEP copies, after the step, every
  * sequence's state of every late delta-net layer (sequence-major, its own index row), in off (the
  * stock step) and on a masked approximate step alike; the step's own issues are unchanged. */
 TEST(a_mixed_step_capture_copies_every_sequences_late_states_after_the_step) {
     for (const char* mode : {"off", "quality"}) {
         TempDir dir;
         REQUIRE(!dir.path.empty());
-        Env env({{"RADIANCE_KVA_STAGE_ROWS", "4096"}, {"RADIANCE_KVA_CAPTURE_STATE", dir.path.c_str()}});
+        Env env({{"RADIANCE_RIDGEFILL_STAGE_ROWS", "4096"}, {"RADIANCE_RIDGEFILL_CAPTURE_STATE", dir.path.c_str()}});
         Pair q;
         declare_pair(q, mode);
         REQUIRE_EQ(q.st, RAD_OK);
         const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
-        const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
-        Batch x = make_step(q.kva, {{1, 1, 128}, 2, 2048});
+        const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[0];
+        Batch x = make_step(q.ridgefill, {{1, 1, 128}, 2, 2048});
         Want w;   /* quality: the masked step of a_mixed_step_corrects_only_the_last_sequence */
         w.b = 130; w.s_lb = 2; w.rho_rows = 130;
         w.stream = w.project = w.correct = w.rho = w.scored = true;
         const std::vector<RecIssue> plain = std::strcmp(mode, "off") ? masked_expected(x, w)
                                                                      : run_step(qwen4exp_fp8::step, x.b).issues;
-        const Run got = run_step(qwen4exp_kva::step, x.b);
+        const Run got = run_step(qwen4exp_ridgefill::step, x.b);
         REQUIRE(got.issues.size() == plain.size() + 9);
         CHECK_EQ(differ_at(std::vector<RecIssue>(got.issues.begin(), got.issues.begin() + (long)plain.size()), plain), 0);
         for (int seq = 0; seq < 3; ++seq)
@@ -2116,21 +2116,21 @@ TEST(a_mixed_step_capture_copies_every_sequences_late_states_after_the_step) {
     }
 }
 
-/* Gate 1's instrument -- RADIANCE_KVA_DUMP_LOGITS writes, after a pass with output rows, each rank's
+/* Gate 1's instrument -- RADIANCE_RIDGEFILL_DUMP_LOGITS writes, after a pass with output rows, each rank's
  * logits rows and what each row is (its sequence by cu_seqlens, position, token), in any mode, off
  * included, and changes nothing the step issues. */
 TEST(the_logits_dump_names_each_rows_sequence_and_changes_no_issue) {
     TempDir dir;
     REQUIRE(!dir.path.empty());
-    Env e({{"RADIANCE_KVA_DUMP_LOGITS", dir.path.c_str()}});
+    Env e({{"RADIANCE_RIDGEFILL_DUMP_LOGITS", dir.path.c_str()}});
     Pair p;
     declare_pair(p, "off");
     REQUIRE_EQ(p.st, RAD_OK);
-    Batch x = make_step(p.kva, {{1, 1, 128}, 2, 0});
+    Batch x = make_step(p.ridgefill, {{1, 1, 128}, 2, 0});
     static int32_t out_ids[3] = {0, 1, 129};
     x.b.n_out = 3;
     x.b.out_ids = out_ids;
-    const Run got = run_step(qwen4exp_kva::step, x.b);
+    const Run got = run_step(qwen4exp_ridgefill::step, x.b);
     CHECK_EQ(differ(got.issues, run_step(qwen4exp_fp8::step, x.b).issues), 0);
     const std::string lines = slurp(dir.path / "logits.jsonl");
     CHECK_EQ(count(lines, "\n"), 1);
@@ -2144,38 +2144,38 @@ TEST(the_logits_dump_names_each_rows_sequence_and_changes_no_issue) {
 /* Speed declares the projector per late layer and one quantiser, after the whole in-tree graph and
 
 /* Every op a serving mode adds is declared after the whole in-tree graph and nothing in between:
- * the in-tree op list is a prefix of the KVA one. Speed adds the projector per late layer, one
+ * the in-tree op list is a prefix of the RidgeFill one. Speed adds the projector per late layer, one
  * quantiser, the correction pair per late delta-net layer, the mask, the stream copy, the select,
  * the drop and one alternate down handle per routed layer from S-1. */
 TEST(speed_adds_its_ops_after_the_in_tree_graph) {
     Pair p;
     declare_pair(p, "speed");
     REQUIRE_EQ(p.st, RAD_OK);
-    REQUIRE(p.kva.ops.size() > p.stock.ops.size());
-    for (size_t i = 0; i < p.stock.ops.size(); ++i) CHECK_EQ(p.kva.ops[i].op, p.stock.ops[i].op);
+    REQUIRE(p.ridgefill.ops.size() > p.stock.ops.size());
+    for (size_t i = 0; i < p.stock.ops.size(); ++i) CHECK_EQ(p.ridgefill.ops[i].op, p.stock.ops[i].op);
     std::map<std::string, int> n;
-    for (size_t i = p.stock.ops.size(); i < p.kva.ops.size(); ++i) {
-        const RecOp& o = p.kva.ops[i];
+    for (size_t i = p.stock.ops.size(); i < p.ridgefill.ops.size(); ++i) {
+        const RecOp& o = p.ridgefill.ops[i];
         ++n[o.op];
-        if (o.op != "kva_gemm_nt_bias") continue;
+        if (o.op != "ridgefill_gemm_nt_bias") continue;
         for (const RecParam& q : o.p) {
             if (q.key == "N") CHECK_EQ(q.ival, 2560LL);
             if (q.key == "K") CHECK_EQ(q.ival, 10240LL);
             if (q.key == "M") CHECK_EQ(q.ihi, 2048LL);
         }
     }
-    CHECK_EQ(n["kva_gemm_nt_bias"], 8 - kSplit);
+    CHECK_EQ(n["ridgefill_gemm_nt_bias"], 8 - kSplit);
     CHECK_EQ(n["quant_act_i8g"], 1);
-    CHECK_EQ(n["kva_state_correct"], 2 * 3);
-    CHECK_EQ(n["kva_mask"], 1);
+    CHECK_EQ(n["ridgefill_state_correct"], 2 * 3);
+    CHECK_EQ(n["ridgefill_mask"], 1);
     CHECK_EQ(n["cast"], 2);   /* the layer-S stream into h_S, and the staging ring's copy (always on) */
-    CHECK_EQ(n["kva_select"], 1);
-    CHECK_EQ(n["kva_drop_rows"], 1);
+    CHECK_EQ(n["ridgefill_select"], 1);
+    CHECK_EQ(n["ridgefill_drop_rows"], 1);
     CHECK_EQ(n["moe_gemm_q"], 0);
-    CHECK_EQ(n["kva_rho_update"], 0);
+    CHECK_EQ(n["ridgefill_rho_update"], 0);
     int total = 0;
     for (const auto& [op, c] : n) total += c;
-    CHECK_EQ(total, (int)(p.kva.ops.size() - p.stock.ops.size()));
+    CHECK_EQ(total, (int)(p.ridgefill.ops.size() - p.stock.ops.size()));
 }
 
 /* A SIZING DECLARE describes the same graph with only rows smaller and leaves the step's state
@@ -2193,11 +2193,11 @@ TEST(a_sizing_declare_matches_the_real_one) {
         c.shape_probe = 1;
         RadBuilder small;
         served(small);
-        hold_kva(small, {"kva.proj", "kva.st"});
-        hold_score(small, "kva.rowsel.score");
-        Env env({{"RADIANCE_KVA", "quality"}});
-        CHECK_EQ(qwen4exp_kva::declare(&small, &meta, &c), RAD_OK);
-        CHECK(g_mem.copies.empty() && !qwen4exp_kva::g_upload[0].done);
+        hold_ridgefill(small, {"ridgefill.proj", "ridgefill.st"});
+        hold_score(small, "ridgefill.rowsel.score");
+        Env env({{"RADIANCE_RIDGEFILL", "quality"}});
+        CHECK_EQ(qwen4exp_ridgefill::declare(&small, &meta, &c), RAD_OK);
+        CHECK(g_mem.copies.empty() && !qwen4exp_ridgefill::g_upload[0].done);
     }
     for (const char* mode : {"plumb", "speed", "quality"}) {
         Pair p;
@@ -2209,42 +2209,42 @@ TEST(a_sizing_declare_matches_the_real_one) {
         c.shape_probe = 1;
         RadBuilder small;   /* the real declare's folder and copies stay */
         served(small);
-        Env env({{"RADIANCE_KVA", mode}});
+        Env env({{"RADIANCE_RIDGEFILL", mode}});
         const size_t copies = g_mem.copies.size();
-        const void* block = qwen4exp_kva::g_upload[0].vram;
-        REQUIRE_EQ(qwen4exp_kva::declare(&small, &meta, &c), RAD_OK);
+        const void* block = qwen4exp_ridgefill::g_upload[0].vram;
+        REQUIRE_EQ(qwen4exp_ridgefill::declare(&small, &meta, &c), RAD_OK);
         CHECK_EQ(g_mem.copies.size(), copies);   /* a sizing declare copies nothing */
-        CHECK(qwen4exp_kva::g_upload[0].vram == block);
-        REQUIRE_EQ(small.ops.size(), p.kva.ops.size());
+        CHECK(qwen4exp_ridgefill::g_upload[0].vram == block);
+        REQUIRE_EQ(small.ops.size(), p.ridgefill.ops.size());
         int fixed_differ = 0;
         for (size_t i = 0; i < small.ops.size(); ++i) {
-            CHECK_EQ(small.ops[i].op, p.kva.ops[i].op);
-            REQUIRE_EQ(small.ops[i].p.size(), p.kva.ops[i].p.size());
-            CHECK(small.ops[i].w == p.kva.ops[i].w);
+            CHECK_EQ(small.ops[i].op, p.ridgefill.ops[i].op);
+            REQUIRE_EQ(small.ops[i].p.size(), p.ridgefill.ops[i].p.size());
+            CHECK(small.ops[i].w == p.ridgefill.ops[i].w);
             for (size_t j = 0; j < small.ops[i].p.size(); ++j) {
-                const RecParam& a = p.kva.ops[i].p[j];
+                const RecParam& a = p.ridgefill.ops[i].p[j];
                 const RecParam& q = small.ops[i].p[j];
-                const bool cap = (p.kva.ops[i].op == "qsa_work" && a.key == "work") ||
-                                 (p.kva.ops[i].op == "attn_paged_gate_quant" && a.key == "max_seqs");
+                const bool cap = (p.ridgefill.ops[i].op == "qsa_work" && a.key == "work") ||
+                                 (p.ridgefill.ops[i].op == "attn_paged_gate_quant" && a.key == "max_seqs");
                 if (a.kind == RAD_P_RANGE || (cap && q.ival <= a.ival)) continue;
                 fixed_differ += a.ival != q.ival || a.sval != q.sval || a.dval != q.dval;
             }
         }
         CHECK_EQ(fixed_differ, 0);
-        REQUIRE_EQ(small.weights.size(), p.kva.weights.size());
+        REQUIRE_EQ(small.weights.size(), p.ridgefill.weights.size());
         for (size_t i = 0; i < small.weights.size(); ++i)
-            CHECK_EQ(small.weights[i].first, p.kva.weights[i].first);
-        REQUIRE_EQ(small.bufs.size(), p.kva.bufs.size());
+            CHECK_EQ(small.weights[i].first, p.ridgefill.weights[i].first);
+        REQUIRE_EQ(small.bufs.size(), p.ridgefill.bufs.size());
         for (size_t i = 0; i < small.bufs.size(); ++i) {
-            CHECK_EQ(small.bufs[i].first, p.kva.bufs[i].first);
-            CHECK(small.bufs[i].second.shape[0] <= p.kva.bufs[i].second.shape[0]);
-            for (uint32_t d = 1; d < p.kva.bufs[i].second.rank; ++d)
-                CHECK_EQ(small.bufs[i].second.shape[d], p.kva.bufs[i].second.shape[d]);
+            CHECK_EQ(small.bufs[i].first, p.ridgefill.bufs[i].first);
+            CHECK(small.bufs[i].second.shape[0] <= p.ridgefill.bufs[i].second.shape[0]);
+            for (uint32_t d = 1; d < p.ridgefill.bufs[i].second.rank; ++d)
+                CHECK_EQ(small.bufs[i].second.shape[d], p.ridgefill.bufs[i].second.shape[d]);
         }
-        CHECK(small.kv_groups == p.kva.kv_groups);
+        CHECK(small.kv_groups == p.ridgefill.kv_groups);
         CHECK_EQ(qwen4exp_fp8::g_model[0].g.max_tok, 2048);
-        CHECK_EQ(qwen4exp_kva::g_kva[0].op_proj.size(), (size_t)8);
-        CHECK(qwen4exp_kva::g_kva[0].b_zeros != 0);
+        CHECK_EQ(qwen4exp_ridgefill::g_ridgefill[0].op_proj.size(), (size_t)8);
+        CHECK(qwen4exp_ridgefill::g_ridgefill[0].b_zeros != 0);
     }
 }
 
@@ -2257,7 +2257,7 @@ int refused(std::initializer_list<std::pair<const char*, const char*>> env, RadB
     c.max_tok = max_tok;
     Env e(env);
     int st = RAD_OK;
-    *err = stderr_of([&] { st = qwen4exp_kva::declare(&b, &meta, &c); });
+    *err = stderr_of([&] { st = qwen4exp_ridgefill::declare(&b, &meta, &c); });
     return st;
 }
 
@@ -2269,9 +2269,9 @@ TEST(a_tail_of_two_steps_less_a_tile_or_more_is_refused) {
                           Case{"2560", 2048, true}, Case{"2048", 1024, false}, Case{"1984", 1024, true},
                           Case{"1024", 1024, true}}) {
         RadBuilder b;
-        hold_kva(b, {"kva.proj", "kva.st"});
+        hold_ridgefill(b, {"ridgefill.proj", "ridgefill.st"});
         std::string err;
-        const int st = refused({{"RADIANCE_KVA", "speed"}, {"RADIANCE_KVA_TAIL", c.tail}}, b, &err, c.max_tok);
+        const int st = refused({{"RADIANCE_RIDGEFILL", "speed"}, {"RADIANCE_RIDGEFILL_TAIL", c.tail}}, b, &err, c.max_tok);
         CHECK_EQ(st == RAD_OK, c.ok);
         if (!c.ok) CHECK(has(err, c.tail) && has(err, std::to_string(c.max_tok).c_str()) && has(err, "tile"));
     }
@@ -2283,9 +2283,9 @@ TEST(a_tail_of_two_steps_less_a_tile_or_more_is_refused) {
  * rows of every chunk are exact): speed takes the tail-only straddle, quality the masked path when its
  * exact rows may stream (here forced by a high row threshold) and the exact step otherwise. */
 TEST(a_tail_past_the_step_approximates_the_provable_rows) {
-    using qwen4exp_kva::PATH_STOCK;
-    using qwen4exp_kva::PATH_MASKED;
-    using qwen4exp_kva::PATH_STRADDLE;
+    using qwen4exp_ridgefill::PATH_STOCK;
+    using qwen4exp_ridgefill::PATH_MASKED;
+    using qwen4exp_ridgefill::PATH_STRADDLE;
     struct Case { const char* mode; const char* rows; Shape s; int path; int64_t b, s_lb; };
     for (const Case& c : {Case{"speed", "64", {{2048}, 0, 2048}, PATH_STRADDLE, 1536, 0},
                           Case{"speed", "64", {{2048}, 0, 1024}, PATH_STRADDLE, 512, 0},
@@ -2295,12 +2295,12 @@ TEST(a_tail_past_the_step_approximates_the_provable_rows) {
                           Case{"quality", "4096", {{2048}, 0, 2048}, PATH_MASKED, 1536, 0},
                           Case{"quality", "", {{2048}, 0, 2048}, PATH_MASKED, 1536, 0},   /* the default */
                           Case{"speed", "4096", {{1, 1, 1, 1, 1, 1, 1, 1, 1984}, 8, 2048}, PATH_MASKED, 1480, 8}}) {
-        Env e({{"RADIANCE_KVA_TAIL", "2560"}, {"RADIANCE_KVA_STAGE_ROWS", c.rows}});
+        Env e({{"RADIANCE_RIDGEFILL_TAIL", "2560"}, {"RADIANCE_RIDGEFILL_STAGE_ROWS", c.rows}});
         Pair p;
         declare_pair(p, c.mode);
         REQUIRE_EQ(p.st, RAD_OK);
-        Batch x = make_step(p.kva, c.s);
-        const qwen4exp_kva::Pass got = qwen4exp_kva::derive(qwen4exp_kva::g_kva[0], &x.b);
+        Batch x = make_step(p.ridgefill, c.s);
+        const qwen4exp_ridgefill::Pass got = qwen4exp_ridgefill::derive(qwen4exp_ridgefill::g_ridgefill[0], &x.b);
         CHECK_EQ(got.path, c.path);
         CHECK_EQ(got.b, c.b);
         CHECK_EQ(got.s_lb, c.s_lb);
@@ -2309,115 +2309,115 @@ TEST(a_tail_past_the_step_approximates_the_provable_rows) {
 
 TEST(a_tail_below_the_measured_minimum_is_refused) {
     RadBuilder b;
-    hold_kva(b, {"kva.proj"});
+    hold_ridgefill(b, {"ridgefill.proj"});
     std::string err;
-    CHECK(refused({{"RADIANCE_KVA", "speed"}, {"RADIANCE_KVA_TAIL", "256"}}, b, &err) < 0);
+    CHECK(refused({{"RADIANCE_RIDGEFILL", "speed"}, {"RADIANCE_RIDGEFILL_TAIL", "256"}}, b, &err) < 0);
     CHECK(has(err, "256") && has(err, "512"));
 }
 
-/* Each kva.so op a mode issues is refused by name when no kernel library serves it -- plumb's mask
+/* Each ridgefill.so op a mode issues is refused by name when no kernel library serves it -- plumb's mask
  * included. (`cast` and `moe_gemm_q` are in-tree ops too: refusing them fails the in-tree declare
  * first, which is its own refusal.) */
-TEST(a_mode_whose_kva_op_no_kernel_serves_is_refused_by_name) {
+TEST(a_mode_whose_ridgefill_op_no_kernel_serves_is_refused_by_name) {
     struct Case { const char* mode; const char* op; };
-    for (const Case& c : {Case{"speed", "kva_state_correct"}, Case{"quality", "kva_mask"},
-                          Case{"plumb", "kva_mask"}, Case{"speed", "kva_select"},
-                          Case{"speed", "kva_drop_rows"}, Case{"quality", "kva_rho_update"},
-                          Case{"speed", "kva_gemm_nt_bias"}}) {
+    for (const Case& c : {Case{"speed", "ridgefill_state_correct"}, Case{"quality", "ridgefill_mask"},
+                          Case{"plumb", "ridgefill_mask"}, Case{"speed", "ridgefill_select"},
+                          Case{"speed", "ridgefill_drop_rows"}, Case{"quality", "ridgefill_rho_update"},
+                          Case{"speed", "ridgefill_gemm_nt_bias"}}) {
         RadBuilder b;
-        hold_kva(b, {"kva.proj", "kva.st"});
-        hold_score(b, "kva.rowsel.score");
+        hold_ridgefill(b, {"ridgefill.proj", "ridgefill.st"});
+        hold_score(b, "ridgefill.rowsel.score");
         b.refuse = {c.op};
         std::string err;
-        CHECK_EQ(refused({{"RADIANCE_KVA", c.mode}}, b, &err), RAD_E_UNSUPPORTED);
-        CHECK(has(err, c.op) && has(err, "kva.so"));
+        CHECK_EQ(refused({{"RADIANCE_RIDGEFILL", c.mode}}, b, &err), RAD_E_UNSUPPORTED);
+        CHECK(has(err, c.op) && has(err, "ridgefill.so"));
     }
 }
 
 TEST(a_switch_with_an_unknown_value_is_refused_naming_the_values) {
     struct Case { const char* name; const char* value; const char* allowed; };
-    for (const Case& c : {Case{"RADIANCE_KVA", "fast", "off|plumb|speed|quality"},
-                          Case{"RADIANCE_KVA_ROWSEL_TABLE", "rare", "class|none|all"},
-                          Case{"RADIANCE_KVA_STAGE", "never", "auto|stock"},
-                          Case{"RADIANCE_KVA_STRADDLE", "middle", "split|end"},
-                          Case{"RADIANCE_KVA_SCORE_BULK", "yes", "1 or unset"},
-                          Case{"RADIANCE_KVA_FORCE_SPLIT", "0", "a positive row count"},
-                          Case{"RADIANCE_KVA_FORCE_STREAM", "2", "1 or unset"}}) {
+    for (const Case& c : {Case{"RADIANCE_RIDGEFILL", "fast", "off|plumb|speed|quality"},
+                          Case{"RADIANCE_RIDGEFILL_ROWSEL_TABLE", "rare", "class|none|all"},
+                          Case{"RADIANCE_RIDGEFILL_STAGE", "never", "auto|stock"},
+                          Case{"RADIANCE_RIDGEFILL_STRADDLE", "middle", "split|end"},
+                          Case{"RADIANCE_RIDGEFILL_SCORE_BULK", "yes", "1 or unset"},
+                          Case{"RADIANCE_RIDGEFILL_FORCE_SPLIT", "0", "a positive row count"},
+                          Case{"RADIANCE_RIDGEFILL_FORCE_STREAM", "2", "1 or unset"}}) {
         RadBuilder b;
-        hold_kva(b, {"kva.proj"});
+        hold_ridgefill(b, {"ridgefill.proj"});
         std::string err;
-        const bool mode = !std::strcmp(c.name, "RADIANCE_KVA");
+        const bool mode = !std::strcmp(c.name, "RADIANCE_RIDGEFILL");
         CHECK_EQ(mode ? refused({{c.name, c.value}}, b, &err)
-                      : refused({{"RADIANCE_KVA", "speed"}, {c.name, c.value}}, b, &err), RAD_E_INVAL);
+                      : refused({{"RADIANCE_RIDGEFILL", "speed"}, {c.name, c.value}}, b, &err), RAD_E_INVAL);
         CHECK(has(err, c.allowed) && has(err, c.name));
     }
 }
 
-/* R81 -- THE DEFAULT IS OFF AND THE CONTAINER'S kva.mode IS NOT A SWITCH: a container that still says
- * kva.mode=quality, with RADIANCE_KVA unset, declares exactly the in-tree graph, and rank 0's real
+/* R81 -- THE DEFAULT IS OFF AND THE CONTAINER'S ridgefill.mode IS NOT A SWITCH: a container that still says
+ * ridgefill.mode=quality, with RADIANCE_RIDGEFILL unset, declares exactly the in-tree graph, and rank 0's real
  * declare says once that the metadata mode is ignored. */
 TEST(the_container_mode_is_ignored_and_said_so) {
     static const char* keys[kN + 1];
     static const char* vals[kN + 1];
     for (int i = 0; i < kN; ++i) { keys[i] = kKeys[i]; vals[i] = kVals[i]; }
-    keys[kN] = "kva.mode";
+    keys[kN] = "ridgefill.mode";
     vals[kN] = "quality";
     RadModelMeta meta = flash_next_meta();
     meta.n_kv = kN + 1; meta.kv_key = keys; meta.kv_val = vals;
     for (int rank : {0, 1}) {
         RadBuildCtx c = served_ctx(rank, 2);
-        RadBuilder stock, kva;
+        RadBuilder stock, ridgefill;
         served(stock);
-        served(kva);
-        hold_kva(kva, {"kva.proj", "kva.st"});
-        hold_score(kva, "kva.rowsel.score");
+        served(ridgefill);
+        hold_ridgefill(ridgefill, {"ridgefill.proj", "ridgefill.st"});
+        hold_score(ridgefill, "ridgefill.rowsel.score");
         REQUIRE_EQ(qwen4exp_fp8::declare(&stock, &meta, &c), RAD_OK);
         int st = RAD_E_INVAL;
-        const std::string err = stderr_of([&] { st = qwen4exp_kva::declare(&kva, &meta, &c); });
+        const std::string err = stderr_of([&] { st = qwen4exp_ridgefill::declare(&ridgefill, &meta, &c); });
         REQUIRE_EQ(st, RAD_OK);
-        check_same_graph(stock, kva);
-        CHECK_EQ(qwen4exp_kva::g_kva[rank].cfg.mode, (int)qwen4exp_kva::MODE_OFF);
-        CHECK_EQ(count(err, "kva.mode=quality is ignored"), rank == 0 ? 1 : 0);
+        check_same_graph(stock, ridgefill);
+        CHECK_EQ(qwen4exp_ridgefill::g_ridgefill[rank].cfg.mode, (int)qwen4exp_ridgefill::MODE_OFF);
+        CHECK_EQ(count(err, "ridgefill.mode=quality is ignored"), rank == 0 ? 1 : 0);
     }
 }
 
-/* A capture with no folder takes S from RADIANCE_KVA_CAPTURE_SPLIT, never from the container: a
- * kva.split key in the model's metadata is not read (nothing kva.* is, but kva.mode's notice). */
+/* A capture with no folder takes S from RADIANCE_RIDGEFILL_CAPTURE_SPLIT, never from the container: a
+ * ridgefill.split key in the model's metadata is not read (nothing ridgefill.* is, but ridgefill.mode's notice). */
 TEST(a_capture_without_a_folder_takes_its_split_from_the_env_not_the_container) {
     static const char* keys[kN + 1];
     static const char* vals[kN + 1];
     for (int i = 0; i < kN; ++i) { keys[i] = kKeys[i]; vals[i] = kVals[i]; }
-    keys[kN] = "kva.split";
+    keys[kN] = "ridgefill.split";
     vals[kN] = "4";
     RadModelMeta meta = flash_next_meta();
     meta.n_kv = kN + 1; meta.kv_key = keys; meta.kv_val = vals;
     RadBuildCtx c = served_ctx();
     for (const char* split : {"", "4"}) {
         RadBuilder b;
-        Env env({{"RADIANCE_KVA_CAPTURE", "/nonexistent"}, {"RADIANCE_KVA_CAPTURE_SPLIT", split}});
+        Env env({{"RADIANCE_RIDGEFILL_CAPTURE", "/nonexistent"}, {"RADIANCE_RIDGEFILL_CAPTURE_SPLIT", split}});
         int st = RAD_OK;
-        const std::string err = stderr_of([&] { st = qwen4exp_kva::declare(&b, &meta, &c); });
+        const std::string err = stderr_of([&] { st = qwen4exp_ridgefill::declare(&b, &meta, &c); });
         CHECK_EQ(st, *split ? RAD_OK : RAD_E_UNSUPPORTED);
-        if (*split) CHECK_EQ(qwen4exp_kva::g_kva[0].split, (int64_t)kSplit);
-        else CHECK(has(err, "RADIANCE_KVA_CAPTURE_SPLIT is unset"));
+        if (*split) CHECK_EQ(qwen4exp_ridgefill::g_ridgefill[0].split, (int64_t)kSplit);
+        else CHECK(has(err, "RADIANCE_RIDGEFILL_CAPTURE_SPLIT is unset"));
     }
 }
 
 TEST(capture_refuses_a_serving_mode) {
     RadBuilder b;
-    hold_kva(b, {"kva.proj"});
+    hold_ridgefill(b, {"ridgefill.proj"});
     std::string err;
-    CHECK_EQ(refused({{"RADIANCE_KVA", "speed"}, {"RADIANCE_KVA_CAPTURE", "x"}}, b, &err), RAD_E_INVAL);
-    CHECK(has(err, "RADIANCE_KVA=off"));
+    CHECK_EQ(refused({{"RADIANCE_RIDGEFILL", "speed"}, {"RADIANCE_RIDGEFILL_CAPTURE", "x"}}, b, &err), RAD_E_INVAL);
+    CHECK(has(err, "RADIANCE_RIDGEFILL=off"));
 }
 
-TEST(state_capture_without_kva_state_read_is_refused) {
+TEST(state_capture_without_ridgefill_state_read_is_refused) {
     RadBuilder b;
-    hold_kva(b, {"kva.proj"});
-    b.refuse = {"kva_state_read"};
+    hold_ridgefill(b, {"ridgefill.proj"});
+    b.refuse = {"ridgefill_state_read"};
     std::string err;
-    CHECK_EQ(refused({{"RADIANCE_KVA_CAPTURE_STATE", "x"}}, b, &err), RAD_E_UNSUPPORTED);
-    CHECK(has(err, "kva_state_read"));
+    CHECK_EQ(refused({{"RADIANCE_RIDGEFILL_CAPTURE_STATE", "x"}}, b, &err), RAD_E_UNSUPPORTED);
+    CHECK(has(err, "ridgefill_state_read"));
 }
 
 /* ==================================================================== the release guard (R83) */
@@ -2433,14 +2433,14 @@ TEST(the_release_scan_counts_nul_delimited_copies) {
         return (dir.path / name).string();
     };
     const std::string z(1, '\0');
-    CHECK_EQ(qwen4exp_kva::count_version(write("one", "abc" + z + "1.0.8" + z + "x").c_str(), "1.0.8"), 1);
-    CHECK_EQ(qwen4exp_kva::count_version(write("none", "x" + z + "1.0.80" + z + "11.0.8" + z).c_str(), "1.0.8"), 0);
-    CHECK_EQ(qwen4exp_kva::count_version(write("start", "1.0.8" + z + "q").c_str(), "1.0.8"), 0);
-    CHECK_EQ(qwen4exp_kva::count_version(write("two", z + "1.0.8" + z + "1.0.8" + z).c_str(), "1.0.8"), 2);
+    CHECK_EQ(qwen4exp_ridgefill::count_version(write("one", "abc" + z + "1.0.8" + z + "x").c_str(), "1.0.8"), 1);
+    CHECK_EQ(qwen4exp_ridgefill::count_version(write("none", "x" + z + "1.0.80" + z + "11.0.8" + z).c_str(), "1.0.8"), 0);
+    CHECK_EQ(qwen4exp_ridgefill::count_version(write("start", "1.0.8" + z + "q").c_str(), "1.0.8"), 0);
+    CHECK_EQ(qwen4exp_ridgefill::count_version(write("two", z + "1.0.8" + z + "1.0.8" + z).c_str(), "1.0.8"), 2);
     std::string big((1 << 20) - 3, 'a');
     big += z + "1.0.8" + z;
-    CHECK_EQ(qwen4exp_kva::count_version(write("straddle", big).c_str(), "1.0.8"), 1);
-    CHECK_EQ(qwen4exp_kva::count_version((dir.path / "absent").c_str(), "1.0.8"), -1);
+    CHECK_EQ(qwen4exp_ridgefill::count_version(write("straddle", big).c_str(), "1.0.8"), 1);
+    CHECK_EQ(qwen4exp_ridgefill::count_version((dir.path / "absent").c_str(), "1.0.8"), -1);
 }
 
 /* The log names the releases the engine does carry: every NUL-delimited d.d.d string, once each. */
@@ -2450,7 +2450,7 @@ TEST(the_found_releases_are_listed) {
     const std::string z(1, '\0'), p = (dir.path / "e").string();
     std::ofstream(p, std::ios::binary) << "x" + z + "1.0.9" + z + "0.46.1" + z + "1.0" + z + "v1.2.3" + z +
                                           "1..2" + z + "1.0.9" + z;
-    CHECK_EQ(qwen4exp_kva::releases_in(p.c_str()), std::string("1.0.9, 0.46.1"));
+    CHECK_EQ(qwen4exp_ridgefill::releases_in(p.c_str()), std::string("1.0.9, 0.46.1"));
 }
 
 /* FIPS 180-4's own vectors, so a logged sha256 names the binary it claims to. */
@@ -2460,7 +2460,7 @@ TEST(sha256_matches_the_fips_vectors) {
     auto sha = [&](const std::string& bytes) {
         const std::string p = (dir.path / "f").string();
         std::ofstream(p, std::ios::binary) << bytes;
-        return qwen4exp_kva::sha256_file(p.c_str());
+        return qwen4exp_ridgefill::sha256_file(p.c_str());
     };
     CHECK_EQ(sha(""), std::string("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"));
     CHECK_EQ(sha("abc"), std::string("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"));
@@ -2470,9 +2470,9 @@ TEST(sha256_matches_the_fips_vectors) {
 
 /* With no forward taken the plugin serves itself; the forward table is empty at load. */
 TEST(the_forward_table_starts_empty) {
-    CHECK(qwen4exp_kva::g_forward.declare == nullptr && qwen4exp_kva::g_forward.step == nullptr &&
-          qwen4exp_kva::g_forward.probe == nullptr);
-    CHECK(qwen4exp_kva::find_shadowed("", qwen4exp_kva::kShadowSo).empty() || std::getenv("RADIANCE_HOME") != nullptr);
+    CHECK(qwen4exp_ridgefill::g_forward.declare == nullptr && qwen4exp_ridgefill::g_forward.step == nullptr &&
+          qwen4exp_ridgefill::g_forward.probe == nullptr);
+    CHECK(qwen4exp_ridgefill::find_shadowed("", qwen4exp_ridgefill::kShadowSo).empty() || std::getenv("RADIANCE_HOME") != nullptr);
 }
 
 /* THE STAGING RING (DD-L, one slot since Stage E): each late layer's map + bias row block is copied
@@ -2482,15 +2482,15 @@ TEST(the_forward_table_starts_empty) {
 TEST(the_staging_ring_copies_each_map_a_layer_ahead_on_lane_1) {
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
-    Env env({{"RADIANCE_KVA", "speed"}});
-    RadBuilder kva;
-    served(kva);
-    hold_kva(kva, {"kva.proj", "kva.st"});
-    REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
-    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
-    const qwen4exp_kva::Upload& u = qwen4exp_kva::g_upload[0];
+    Env env({{"RADIANCE_RIDGEFILL", "speed"}});
+    RadBuilder ridgefill;
+    served(ridgefill);
+    hold_ridgefill(ridgefill, {"ridgefill.proj", "ridgefill.st"});
+    REQUIRE_EQ(qwen4exp_ridgefill::declare(&ridgefill, &meta, &c), RAD_OK);
+    const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[0];
+    const qwen4exp_ridgefill::Upload& u = qwen4exp_ridgefill::g_upload[0];
     REQUIRE(k.op_ring != 0);
-    CHECK_EQ(kva.ops[k.op_ring - 1].op, std::string("cast"));
+    CHECK_EQ(ridgefill.ops[k.op_ring - 1].op, std::string("cast"));
     const int64_t block = 2561LL * 10240 * 2;
     /* the row blocks, then this rank's correction heads (a few MiB) */
     CHECK(u.host_bytes > (8 - kSplit) * block && u.host_bytes < (8 - kSplit) * block + (16 << 20));
@@ -2503,8 +2503,8 @@ TEST(the_staging_ring_copies_each_map_a_layer_ahead_on_lane_1) {
         CHECK_EQ(k.ring_src[(size_t)l].rows, 2561);
         CHECK((uintptr_t)k.ring_src[(size_t)l].raw >= (uintptr_t)u.host + kDeviceView);
     }
-    Batch bk = make_step(kva, {{2048}, 0, 2048});   /* a lean speed pass */
-    const Run r = run_step(qwen4exp_kva::step, bk.b);
+    Batch bk = make_step(ridgefill, {{2048}, 0, 2048});   /* a lean speed pass */
+    const Run r = run_step(qwen4exp_ridgefill::step, bk.b);
     std::vector<std::string> seq;   /* the ring's events and the projector GEMMs, in issue order */
     for (const RecIssue& i : r.all) {
         if (i.op == kLane) seq.push_back("lane" + std::to_string(i.n));
@@ -2531,7 +2531,7 @@ TEST(the_staging_ring_copies_each_map_a_layer_ahead_on_lane_1) {
 
 /* ==================================================================== the int8 projector (R79) */
 
-/* FAKE INT8 GEMM ROWS, standing in for kva.so's forwards of libr4d's: each describes a stored form
+/* FAKE INT8 GEMM ROWS, standing in for ridgefill.so's forwards of libr4d's: each describes a stored form
  * 256 bytes longer than the plane (so a copy's size shows whether the hook was asked) and writes
  * every plane byte XOR 0x5A, then 0x77 padding. `tag` lets two rows disagree. */
 struct FakeI8 { int layouts = 0, relayouts = 0; const char* tag = "test.i8"; } g_fake_i8;
@@ -2565,7 +2565,7 @@ int fake_i8_relayout(const RadParam* p, int n_p, int opd, const RadEncoding* enc
 RadKernelInfo fake_i8_row(const char* name) {
     RadKernelInfo k{};
     k.name = name;
-    k.op = "kva_gemm_nt_q";
+    k.op = "ridgefill_gemm_nt_q";
     k.domain = RAD_DOMAIN_DEVICE;
     k.layout = fake_i8_layout;
     k.relayout = fake_i8_relayout;
@@ -2574,18 +2574,18 @@ RadKernelInfo fake_i8_row(const char* name) {
 RadKernelInfo g_i8_m16 = fake_i8_row("fake_i8_m16"), g_i8_tiled = fake_i8_row("fake_i8_tiled");
 std::vector<const RadKernelInfo*> g_i8_rows = { &g_i8_m16, &g_i8_tiled };
 
-/* hold_kva's folder with the maps in int8 (codes + scale + the bf16 bias) and the manifest saying
- * so; the fake int8 rows stand in for kva.so. */
-void hold_kva_i8(RadBuilder& b) {
-    hold_kva(b, {"kva.st"});
+/* hold_ridgefill's folder with the maps in int8 (codes + scale + the bf16 bias) and the manifest saying
+ * so; the fake int8 rows stand in for ridgefill.so. */
+void hold_ridgefill_i8(RadBuilder& b) {
+    hold_ridgefill(b, {"ridgefill.st"});
     const std::string text = std::string(R"({"format": 1, "adapter": "qwen4exp", "split": 4,
         "projector": {"dtype": "i8", "layout": "i8_row128"},
         "model": {"arch_id": "qwen4exp", "name": "test-q38-flashnext",
                   "meta": {"hc_count": "4", "linear_num_value_heads": "48"},
                   "vocab_sha256": ")") + kTinyVocab + R"("},
         "files": {"proj8.L4.safetensors": "unused by the test folder"}})";
-    g_test_folder.manifest = qwen4exp_kva::Json{};
-    qwen4exp_kva::json_parse(text.data(), text.size(), &g_test_folder.manifest);
+    g_test_folder.manifest = qwen4exp_ridgefill::Json{};
+    qwen4exp_ridgefill::json_parse(text.data(), text.size(), &g_test_folder.manifest);
     for (int l = kSplit; l < 8; ++l) {
         const std::string L = std::to_string(l);
         add_tensor("proj." + L + ".codes", RAD_I8, {2560, 4 * 2560});
@@ -2593,7 +2593,7 @@ void hold_kva_i8(RadBuilder& b) {
         add_tensor("proj." + L + ".bias", RAD_BF16, {2560});
     }
     g_fake_i8 = FakeI8{};
-    qwen4exp_kva::g_i8_rows_for_test = &g_i8_rows;
+    qwen4exp_ridgefill::g_i8_rows_for_test = &g_i8_rows;
 }
 
 /* THE INT8 PROJECTOR'S GEMM AT EVERY RANK COUNT. The projector is not sharded: every rank holds every late
@@ -2607,20 +2607,20 @@ TEST(every_rank_at_every_tp_declares_the_full_width_int8_projector) {
     for (int world : {1, 2, 4})
         for (int rank = 0; rank < world; ++rank) {
             RadBuildCtx c = served_ctx(rank, world);
-            Env env({{"RADIANCE_KVA", "quality"}});
-            RadBuilder kva;
-            served(kva);
-            hold_kva_i8(kva);
-            hold_score(kva, "kva.rowsel.score");
+            Env env({{"RADIANCE_RIDGEFILL", "quality"}});
+            RadBuilder ridgefill;
+            served(ridgefill);
+            hold_ridgefill_i8(ridgefill);
+            hold_score(ridgefill, "ridgefill.rowsel.score");
             std::string log;
             int st = RAD_OK;
-            log = stderr_of([&] { st = qwen4exp_kva::declare(&kva, &meta, &c); });
+            log = stderr_of([&] { st = qwen4exp_ridgefill::declare(&ridgefill, &meta, &c); });
             REQUIRE_EQ(st, RAD_OK);
-            const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[rank];
+            const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[rank];
             REQUIRE(k.int8);
             int gemms = 0;
-            for (const RecOp& o : kva.ops) {
-                if (o.op != "kva_gemm_nt_q") continue;
+            for (const RecOp& o : ridgefill.ops) {
+                if (o.op != "ridgefill_gemm_nt_q") continue;
                 ++gemms;
                 for (const RecParam& q : o.p) {
                     if (q.key == "N") CHECK_EQ(q.ival, 2560);
@@ -2628,13 +2628,13 @@ TEST(every_rank_at_every_tp_declares_the_full_width_int8_projector) {
                 }
             }
             CHECK_EQ(gemms, 8 - kSplit);
-            for (const RecParam& q : kva.ops[k.op_quant8 - 1].p) if (q.key == "n") CHECK_EQ(q.ival, 10240);
+            for (const RecParam& q : ridgefill.ops[k.op_quant8 - 1].p) if (q.key == "n") CHECK_EQ(q.ival, 10240);
             /* and the correction's ops at this rank's heads: one apply a late delta-net layer (4, 5, 6) */
             int applies = 0;
             for (int l = kSplit; l < 8; ++l) {
                 if (!k.op_apply[(size_t)l]) continue;
                 ++applies;
-                for (const RecParam& q : kva.ops[k.op_apply[(size_t)l] - 1].p)
+                for (const RecParam& q : ridgefill.ops[k.op_apply[(size_t)l] - 1].p)
                     if (q.key == "n_head") CHECK_EQ(q.ival, 48 / world);
             }
             CHECK_EQ(applies, 3);
@@ -2647,20 +2647,20 @@ TEST(every_rank_at_every_tp_declares_the_full_width_int8_projector) {
 TEST(an_int8_folder_uploads_its_maps_in_the_gemms_stored_form) {
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
-    Env env({{"RADIANCE_KVA", "quality"}});
-    RadBuilder kva;
-    served(kva);
-    hold_kva_i8(kva);
-    hold_score(kva, "kva.rowsel.score");
+    Env env({{"RADIANCE_RIDGEFILL", "quality"}});
+    RadBuilder ridgefill;
+    served(ridgefill);
+    hold_ridgefill_i8(ridgefill);
+    hold_score(ridgefill, "ridgefill.rowsel.score");
     int64_t at = 0;   /* distinct source bytes per tensor */
     for (auto& [name, t] : g_test_folder.tensors) { t.data = tensor_bytes() + at; at += 256; }
-    const std::string log = stderr_of([&] { CHECK_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK); });
-    const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+    const std::string log = stderr_of([&] { CHECK_EQ(qwen4exp_ridgefill::declare(&ridgefill, &meta, &c), RAD_OK); });
+    const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[0];
     REQUIRE(k.int8);
     std::map<std::string, int> n;
-    for (const RecOp& o : kva.ops) {
+    for (const RecOp& o : ridgefill.ops) {
         ++n[o.op];
-        if (o.op != "kva_gemm_nt_q") continue;
+        if (o.op != "ridgefill_gemm_nt_q") continue;
         CHECK(o.w.empty());
         for (const RecParam& q : o.p) {
             if (q.key == "M") CHECK(q.kind == RAD_P_RANGE && q.ival == 1 && q.ihi == 2048);
@@ -2670,15 +2670,15 @@ TEST(an_int8_folder_uploads_its_maps_in_the_gemms_stored_form) {
             if (q.key == "dtype") CHECK_EQ(q.sval, std::string("i8a8"));
         }
     }
-    CHECK_EQ(n["kva_gemm_nt_q"], 8 - kSplit);
-    CHECK_EQ(n["kva_gemm_nt_bias"], 0);
-    CHECK_EQ(kva.ops[k.op_quant8 - 1].op, std::string("quant_act_i8g"));
-    CHECK_EQ(kva.ops[k.op_bias - 1].op, std::string("add"));
-    for (const RecParam& q : kva.ops[k.op_quant8 - 1].p) if (q.key == "n") CHECK_EQ(q.ival, 10240);
-    for (const RecParam& q : kva.ops[k.op_bias - 1].p) if (q.key == "n") CHECK_EQ(q.ival, 2560);
-    CHECK_EQ(kva.bufs[k.b_q8 - 1].second.dtype, (uint32_t)RAD_I8);
-    CHECK_EQ(kva.bufs[k.b_s8 - 1].second.dtype, (uint32_t)RAD_F32);
-    CHECK(kva.concurrent.count(k.b_q8) && kva.concurrent.count(k.b_s8));
+    CHECK_EQ(n["ridgefill_gemm_nt_q"], 8 - kSplit);
+    CHECK_EQ(n["ridgefill_gemm_nt_bias"], 0);
+    CHECK_EQ(ridgefill.ops[k.op_quant8 - 1].op, std::string("quant_act_i8g"));
+    CHECK_EQ(ridgefill.ops[k.op_bias - 1].op, std::string("add"));
+    for (const RecParam& q : ridgefill.ops[k.op_quant8 - 1].p) if (q.key == "n") CHECK_EQ(q.ival, 10240);
+    for (const RecParam& q : ridgefill.ops[k.op_bias - 1].p) if (q.key == "n") CHECK_EQ(q.ival, 2560);
+    CHECK_EQ(ridgefill.bufs[k.b_q8 - 1].second.dtype, (uint32_t)RAD_I8);
+    CHECK_EQ(ridgefill.bufs[k.b_s8 - 1].second.dtype, (uint32_t)RAD_F32);
+    CHECK(ridgefill.concurrent.count(k.b_q8) && ridgefill.concurrent.count(k.b_s8));
     CHECK_EQ(g_fake_i8.relayouts, 2 * (8 - kSplit));
     /* The row block, from the hook's sizes (each 256 bytes past the plane): codes at 0, scales at the
      * next 256-byte boundary, the bias after them; whole rows of hc*n bf16. */
@@ -2705,13 +2705,13 @@ TEST(an_int8_folder_uploads_its_maps_in_the_gemms_stored_form) {
         CHECK(std::memcmp(block + bias_at, g_test_folder.tensors["proj." + L + ".bias"].data, 5120) == 0);
     }
     CHECK(has(log, "(int8 maps, correction, row table)"));
-    CHECK(kva.notes.size() && has(kva.notes.back(), "(int8, streamed from host)"));
+    CHECK(ridgefill.notes.size() && has(ridgefill.notes.back(), "(int8, streamed from host)"));
 }
 
-/* Each issue as text, with this declare's handles named: the KVA ops by role, every other op and
+/* Each issue as text, with this declare's handles named: the RidgeFill ops by role, every other op and
  * buffer by its declared name (op names numbered by occurrence), projector memory as "vram". Two
  * declares of different folders then compare op for op although their handles are numbered apart. */
-std::vector<std::string> named(const std::vector<RecIssue>& v, const RadBuilder& b, const qwen4exp_kva::Kva& k) {
+std::vector<std::string> named(const std::vector<RecIssue>& v, const RadBuilder& b, const qwen4exp_ridgefill::RidgeFill& k) {
     std::map<rad_op, std::string> ops;
     std::map<std::string, int> seen;
     for (size_t i = 0; i < b.ops.size(); ++i) ops[(rad_op)(i + 1)] = b.ops[i].op + "#" + std::to_string(seen[b.ops[i].op]++);
@@ -2751,8 +2751,8 @@ RadOperand rebuf(RadOperand o, const RadBuilder& from, const RadBuilder& to) {
 /* The bf16 run's issues, named, with each projector GEMM replaced by what the int8 projector issues:
  * at layer S the stream's codes from the GEMM's input rows, then per layer the int8 GEMM over those
  * codes into the same destination, then the bias added in place. */
-std::vector<std::string> as_int8(const std::vector<RecIssue>& bf16, const RadBuilder& bb, const qwen4exp_kva::Kva& kb,
-                                 const RadBuilder& b8, const qwen4exp_kva::Kva& k8) {
+std::vector<std::string> as_int8(const std::vector<RecIssue>& bf16, const RadBuilder& bb, const qwen4exp_ridgefill::RidgeFill& kb,
+                                 const RadBuilder& b8, const qwen4exp_ridgefill::RidgeFill& k8) {
     std::vector<std::string> out;
     for (const RecIssue& r : bf16) {
         int l = -1;
@@ -2782,34 +2782,34 @@ std::vector<std::string> as_int8(const std::vector<RecIssue>& bf16, const RadBui
  * once, at layer S, from exactly the rows the GEMMs read. */
 TEST(the_int8_projector_quantises_the_stream_once_then_gemm_and_bias_a_layer) {
     struct Case { const char* mode; Shape s; int path; };
-    for (const Case& cs : {Case{"speed", {{2048}, 0, 2048}, qwen4exp_kva::PATH_LEAN},
-                           Case{"speed", {{128}, 0, 1984}, qwen4exp_kva::PATH_STRADDLE},
-                           Case{"quality", {{128}, 0, 2048}, qwen4exp_kva::PATH_MASKED},
-                           Case{"quality", {{128}, 0, 1984}, qwen4exp_kva::PATH_MASKED},
-                           Case{"quality", {{1, 64, 128}, 1, 2048}, qwen4exp_kva::PATH_MASKED},   /* s_lb 65 */
-                           Case{"speed", {{1, 1984}, 1, 2048}, qwen4exp_kva::PATH_DECODERS}}) {
+    for (const Case& cs : {Case{"speed", {{2048}, 0, 2048}, qwen4exp_ridgefill::PATH_LEAN},
+                           Case{"speed", {{128}, 0, 1984}, qwen4exp_ridgefill::PATH_STRADDLE},
+                           Case{"quality", {{128}, 0, 2048}, qwen4exp_ridgefill::PATH_MASKED},
+                           Case{"quality", {{128}, 0, 1984}, qwen4exp_ridgefill::PATH_MASKED},
+                           Case{"quality", {{1, 64, 128}, 1, 2048}, qwen4exp_ridgefill::PATH_MASKED},   /* s_lb 65 */
+                           Case{"speed", {{1, 1984}, 1, 2048}, qwen4exp_ridgefill::PATH_DECODERS}}) {
         RadModelMeta meta = flash_next_meta();
         RadBuildCtx c = served_ctx();
-        Env env({{"RADIANCE_KVA", cs.mode}});
+        Env env({{"RADIANCE_RIDGEFILL", cs.mode}});
         RadBuilder bf, i8;
         served(bf);
         served(i8);
-        hold_kva(bf, {"kva.proj", "kva.st"});
-        hold_score(bf, "kva.rowsel.score");
-        REQUIRE_EQ(qwen4exp_kva::declare(&bf, &meta, &c), RAD_OK);
-        const qwen4exp_kva::Kva kb = qwen4exp_kva::g_kva[0];
+        hold_ridgefill(bf, {"ridgefill.proj", "ridgefill.st"});
+        hold_score(bf, "ridgefill.rowsel.score");
+        REQUIRE_EQ(qwen4exp_ridgefill::declare(&bf, &meta, &c), RAD_OK);
+        const qwen4exp_ridgefill::RidgeFill kb = qwen4exp_ridgefill::g_ridgefill[0];
         Batch x = make_step(bf, cs.s);
-        REQUIRE_EQ(qwen4exp_kva::derive(kb, &x.b).path, cs.path);
-        const Run rb = run_step(qwen4exp_kva::step, x.b);
-        hold_kva_i8(i8);
-        hold_score(i8, "kva.rowsel.score");
-        REQUIRE_EQ(qwen4exp_kva::declare(&i8, &meta, &c), RAD_OK);
-        const qwen4exp_kva::Kva& k8 = qwen4exp_kva::g_kva[0];
+        REQUIRE_EQ(qwen4exp_ridgefill::derive(kb, &x.b).path, cs.path);
+        const Run rb = run_step(qwen4exp_ridgefill::step, x.b);
+        hold_ridgefill_i8(i8);
+        hold_score(i8, "ridgefill.rowsel.score");
+        REQUIRE_EQ(qwen4exp_ridgefill::declare(&i8, &meta, &c), RAD_OK);
+        const qwen4exp_ridgefill::RidgeFill& k8 = qwen4exp_ridgefill::g_ridgefill[0];
         REQUIRE(k8.int8 && !kb.int8);
         /* the slot follows the folder's block (1,280 rows of codes, 20 of scales, 1 of bias), and no h_S */
-        CHECK_EQ(qwen4exp_kva::g_upload[0].vram_bytes, 1301LL * 10240 * 2);
+        CHECK_EQ(qwen4exp_ridgefill::g_upload[0].vram_bytes, 1301LL * 10240 * 2);
         CHECK(k8.b_hs == 0 && kb.b_hs != 0);
-        const Run r8 = run_step(qwen4exp_kva::step, x.b);
+        const Run r8 = run_step(qwen4exp_ridgefill::step, x.b);
         const std::vector<std::string> got_t = named(r8.all, i8, k8), want_t = as_int8(rb.all, bf, kb, i8, k8);
         int quants = 0, bad = 0;
         for (const RecIssue& r : r8.issues) quants += r.op == k8.op_quant8;
@@ -2837,7 +2837,7 @@ TEST(the_int8_projector_quantises_the_stream_once_then_gemm_and_bias_a_layer) {
 TEST(an_int8_folder_without_one_agreed_stored_form_is_refused_by_name) {
     RadModelMeta meta = flash_next_meta();
     RadBuildCtx c = served_ctx();
-    Env env({{"RADIANCE_KVA", "speed"}});
+    Env env({{"RADIANCE_RIDGEFILL", "speed"}});
     RadKernelInfo other = fake_i8_row("fake_other");
     other.layout = [](const RadParam* p, int n_p, int opd, const RadEncoding* e, const int* s, const RadTensor* pl,
                       int n, RadLayout* out) {
@@ -2847,28 +2847,28 @@ TEST(an_int8_folder_without_one_agreed_stored_form_is_refused_by_name) {
     };
     const std::vector<const RadKernelInfo*> none, disagree = { &g_i8_m16, &other };
     for (const auto* rows : { &none, &disagree }) {
-        RadBuilder kva;
-        served(kva);
-        hold_kva_i8(kva);
-        qwen4exp_kva::g_i8_rows_for_test = rows;
+        RadBuilder ridgefill;
+        served(ridgefill);
+        hold_ridgefill_i8(ridgefill);
+        qwen4exp_ridgefill::g_i8_rows_for_test = rows;
         int st = RAD_OK;
-        const std::string log = stderr_of([&] { st = qwen4exp_kva::declare(&kva, &meta, &c); });
+        const std::string log = stderr_of([&] { st = qwen4exp_ridgefill::declare(&ridgefill, &meta, &c); });
         CHECK(st != RAD_OK);
         CHECK(has(log, "cannot load the int8 projector"));
         CHECK(has(log, rows == &none ? "no kernel library offers the int8 GEMM" : "store the map differently"));
     }
-    RadBuilder stock, kva;
+    RadBuilder stock, ridgefill;
     served(stock);
-    served(kva);
-    hold_kva_i8(kva);
+    served(ridgefill);
+    hold_ridgefill_i8(ridgefill);
     std::string text = R"({"format": 1, "adapter": "qwen4exp", "split": 4, "projector": {"dtype": "i4"},
         "model": {"arch_id": "qwen4exp", "name": "test-q38-flashnext", "meta": {"hc_count": "4"},
                   "vocab_sha256": ")" + std::string(kTinyVocab) + R"("}, "files": {}})";
-    g_test_folder.manifest = qwen4exp_kva::Json{};
-    qwen4exp_kva::json_parse(text.data(), text.size(), &g_test_folder.manifest);
+    g_test_folder.manifest = qwen4exp_ridgefill::Json{};
+    qwen4exp_ridgefill::json_parse(text.data(), text.size(), &g_test_folder.manifest);
     REQUIRE_EQ(qwen4exp_fp8::declare(&stock, &meta, &c), RAD_OK);
-    const std::string log = stderr_of([&] { CHECK_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK); });
-    check_same_graph(stock, kva);
+    const std::string log = stderr_of([&] { CHECK_EQ(qwen4exp_ridgefill::declare(&ridgefill, &meta, &c), RAD_OK); });
+    check_same_graph(stock, ridgefill);
     CHECK(has(log, "its projector dtype 'i4' is neither bf16 nor i8"));
 }
 
@@ -2884,21 +2884,21 @@ const unsigned char* final_bytes() {
     return v.data();
 }
 
-/* hold_kva's folder plus final.weight [hc*n, hc*n] and final.bias [hc*n], and the manifest saying so. */
-void hold_kva_final(RadBuilder& b) {
-    hold_kva(b, {"kva.proj", "kva.st"});
-    hold_score(b, "kva.rowsel.score");
+/* hold_ridgefill's folder plus final.weight [hc*n, hc*n] and final.bias [hc*n], and the manifest saying so. */
+void hold_ridgefill_final(RadBuilder& b) {
+    hold_ridgefill(b, {"ridgefill.proj", "ridgefill.st"});
+    hold_score(b, "ridgefill.rowsel.score");
     const std::string text = std::string(R"({"format": 1, "adapter": "qwen4exp", "split": 4,
         "final": {"file": "final.safetensors", "dtype": "bf16"},
         "model": {"arch_id": "qwen4exp", "name": "test-q38-flashnext",
                   "meta": {"hc_count": "4", "linear_num_value_heads": "48"},
                   "vocab_sha256": ")") + kTinyVocab + R"("},
         "files": {"final.safetensors": "unused by the test folder"}})";
-    g_test_folder.manifest = qwen4exp_kva::Json{};
-    qwen4exp_kva::json_parse(text.data(), text.size(), &g_test_folder.manifest);
+    g_test_folder.manifest = qwen4exp_ridgefill::Json{};
+    qwen4exp_ridgefill::json_parse(text.data(), text.size(), &g_test_folder.manifest);
     for (auto [name, shape, at] : {std::tuple<const char*, std::vector<int64_t>, int64_t>{"final.weight", {10240, 10240}, 0},
                                    {"final.bias", {10240}, 10240LL * 10240 * 2}}) {
-        qwen4exp_kva::FolderTensor t;
+        qwen4exp_ridgefill::FolderTensor t;
         t.data = final_bytes() + at;
         t.dtype = RAD_BF16;
         t.shape = shape;
@@ -2909,7 +2909,7 @@ void hold_kva_final(RadBuilder& b) {
 
 /* With MTP (max_spec > 0) the final map is declared, uploaded as hc row blocks of [n + 1, hc*n] -- block i holds
  * rows i*n .. i*n + n of the map and that slice of the bias -- and ridden by the ring after the last late layer;
- * without MTP, with RADIANCE_KVA_FINAL=off, or with the switch unset -- THE SHIPPED DEFAULT (Dylan, 2026-10-05:
+ * without MTP, with RADIANCE_RIDGEFILL_FINAL=off, or with the switch unset -- THE SHIPPED DEFAULT (Dylan, 2026-10-05:
  * the map is not in the release) -- nothing of it is declared, held or streamed, even from a folder that holds it. */
 TEST(the_final_map_is_held_and_declared_only_with_mtp) {
     RadModelMeta meta = flash_next_meta();
@@ -2917,21 +2917,21 @@ TEST(the_final_map_is_held_and_declared_only_with_mtp) {
                                   {3, nullptr, false}}) {
         RadBuildCtx c = served_ctx();
         c.max_spec = spec;
-        Env env({{"RADIANCE_KVA", "quality"}, {"RADIANCE_KVA_FINAL", sw}});
-        RadBuilder kva;
-        served(kva);
-        hold_kva_final(kva);
-        REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
-        const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+        Env env({{"RADIANCE_RIDGEFILL", "quality"}, {"RADIANCE_RIDGEFILL_FINAL", sw}});
+        RadBuilder ridgefill;
+        served(ridgefill);
+        hold_ridgefill_final(ridgefill);
+        REQUIRE_EQ(qwen4exp_ridgefill::declare(&ridgefill, &meta, &c), RAD_OK);
+        const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[0];
         CHECK_EQ(k.want_final, want);
         CHECK_EQ(k.op_final != 0, want);
         CHECK_EQ(k.b_final != 0, want);
         CHECK_EQ(k.ring_end, (int64_t)(8 + (want ? 4 : 0)));
         CHECK_EQ(k.final_w.size(), (size_t)(want ? 4 : 0));
-        CHECK_EQ(qwen4exp_kva::g_upload[0].final_w.size(), (size_t)(want ? 4 : 0));   /* not uploaded either */
+        CHECK_EQ(qwen4exp_ridgefill::g_upload[0].final_w.size(), (size_t)(want ? 4 : 0));   /* not uploaded either */
         if (!want) continue;
-        CHECK_EQ(kva.ops[k.op_final - 1].op, std::string("kva_gemm_nt_bias"));
-        CHECK(kva.concurrent.count(k.b_final));
+        CHECK_EQ(ridgefill.ops[k.op_final - 1].op, std::string("ridgefill_gemm_nt_bias"));
+        CHECK(ridgefill.concurrent.count(k.b_final));
         const int64_t row = 10240 * 2;
         for (int i = 0; i < 4; ++i) {
             const unsigned char* block = (const unsigned char*)k.ring_src[(size_t)(8 + i)].raw - kDeviceView;
@@ -2947,15 +2947,15 @@ TEST(the_final_map_is_held_and_declared_only_with_mtp) {
 }
 
 /* R71: with MTP, every approximate path ends with the final map -- hc GEMMs over the bulk rows' layer-S stream
- * (h_S on the masked path, b_h's rows on lean and straddle), block i into columns i*n .. i*n + n of kva_final --
+ * (h_S on the masked path, b_h's rows on lean and straddle), block i into columns i*n .. i*n + n of ridgefill_final --
  * and the predicted rows go into b_h through the mask (masked, straddle) or by a row copy (lean), right before
  * the epilogue's connection read. Everything else is the pass without the map, op for op; the ring carries the
  * hc blocks after the last layer, each copied while the one before computes. */
 TEST(with_mtp_the_bulk_rows_take_the_predicted_final_stream_before_the_epilogue) {
     struct Case { const char* mode; Shape s; int path; };
-    for (const Case& cs : {Case{"speed", {{2048}, 0, 2048}, qwen4exp_kva::PATH_LEAN},
-                           Case{"speed", {{128}, 0, 1984}, qwen4exp_kva::PATH_STRADDLE},
-                           Case{"quality", {{1, 64, 128}, 1, 2048}, qwen4exp_kva::PATH_MASKED}}) {
+    for (const Case& cs : {Case{"speed", {{2048}, 0, 2048}, qwen4exp_ridgefill::PATH_LEAN},
+                           Case{"speed", {{128}, 0, 1984}, qwen4exp_ridgefill::PATH_STRADDLE},
+                           Case{"quality", {{1, 64, 128}, 1, 2048}, qwen4exp_ridgefill::PATH_MASKED}}) {
         RadModelMeta meta = flash_next_meta();
         RadBuildCtx c = served_ctx();
         c.max_spec = 3;
@@ -2964,15 +2964,15 @@ TEST(with_mtp_the_bulk_rows_take_the_predicted_final_stream_before_the_epilogue)
         Run r[2];
         RadBuilder b[2];
         for (int on = 0; on < 2; ++on) {
-            Env env({{"RADIANCE_KVA", cs.mode}, {"RADIANCE_KVA_FINAL", on ? "on" : "off"}});
+            Env env({{"RADIANCE_RIDGEFILL", cs.mode}, {"RADIANCE_RIDGEFILL_FINAL", on ? "on" : "off"}});
             served(b[on]);
-            hold_kva_final(b[on]);
-            REQUIRE_EQ(qwen4exp_kva::declare(&b[on], &meta, &c), RAD_OK);
+            hold_ridgefill_final(b[on]);
+            REQUIRE_EQ(qwen4exp_ridgefill::declare(&b[on], &meta, &c), RAD_OK);
             Batch x = make_step(b[on], cs.s);
-            const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
-            const qwen4exp_kva::Pass p = qwen4exp_kva::derive(k, &x.b);
+            const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[0];
+            const qwen4exp_ridgefill::Pass p = qwen4exp_ridgefill::derive(k, &x.b);
             REQUIRE_EQ(p.path, cs.path);
-            r[on] = run_step(qwen4exp_kva::step, x.b);
+            r[on] = run_step(qwen4exp_ridgefill::step, x.b);
             runs[on] = named(r[on].issues, b[on], k);
             if (!on) continue;
             /* the final segment: right before the mixer's read */
@@ -2980,18 +2980,18 @@ TEST(with_mtp_the_bulk_rows_take_the_predicted_final_stream_before_the_epilogue)
             size_t mix = 0;
             while (mix < v.size() && v[mix].op != m.mixer.op_read) ++mix;
             REQUIRE(mix >= 5 && mix < v.size());
-            const int64_t T = x.b.n_tok, r0 = p.path == qwen4exp_kva::PATH_MASKED ? p.s_lb : 0;
-            const int64_t rows = p.path == qwen4exp_kva::PATH_LEAN ? T : p.b - r0;
+            const int64_t T = x.b.n_tok, r0 = p.path == qwen4exp_ridgefill::PATH_MASKED ? p.s_lb : 0;
+            const int64_t rows = p.path == qwen4exp_ridgefill::PATH_LEAN ? T : p.b - r0;
             for (int i = 0; i < 4; ++i) {
                 const RecIssue& g = v[mix - 5 + (size_t)i];
                 CHECK_EQ(g.op, k.op_final);
                 CHECK_EQ(g.n, rows);
-                CHECK(same_operand(g.opd[0], brow_slice(p.path == qwen4exp_kva::PATH_MASKED ? k.b_hs : m.b_h, r0, rows, 10240)));
+                CHECK(same_operand(g.opd[0], brow_slice(p.path == qwen4exp_ridgefill::PATH_MASKED ? k.b_hs : m.b_h, r0, rows, 10240)));
                 CHECK(g.opd[1].raw == k.final_w[(size_t)i].raw && g.opd[2].raw == k.final_b[(size_t)i].raw);
                 CHECK(same_operand(g.opd[4], bcol_at(k.b_final, r0, 10240, i * 2560, 2560, rows)));
             }
             const RecIssue& in = v[mix - 1];
-            if (p.path == qwen4exp_kva::PATH_LEAN) {
+            if (p.path == qwen4exp_ridgefill::PATH_LEAN) {
                 CHECK_EQ(in.op, k.op_cast);
                 CHECK(same_operand(in.opd[1], brows(m.b_h, T)));
             } else {
@@ -3017,9 +3017,9 @@ TEST(with_mtp_the_bulk_rows_take_the_predicted_final_stream_before_the_epilogue)
         /* everything but the final segment is the pass without the map */
         std::vector<std::string> on_wo;
         for (const std::string& t : runs[1])
-            if (t.rfind("kva_gemm_nt_bias#" + std::to_string(8 - kSplit), 0) != 0) on_wo.push_back(t);
+            if (t.rfind("ridgefill_gemm_nt_bias#" + std::to_string(8 - kSplit), 0) != 0) on_wo.push_back(t);
         on_wo.erase(std::remove_if(on_wo.begin(), on_wo.end(), [](const std::string& t) {
-            return t.find("kva_final") != std::string::npos; }), on_wo.end());
+            return t.find("ridgefill_final") != std::string::npos; }), on_wo.end());
         CHECK(on_wo == runs[0]);
         CHECK_EQ(r[1].device_calls, 0);
     }
@@ -3047,7 +3047,7 @@ std::string safetensors(const std::vector<std::tuple<std::string, std::string, s
 }
 
 std::string sha_of(const std::string& bytes) {
-    return qwen4exp_kva::sha256_bytes((const unsigned char*)bytes.data(), bytes.size());
+    return qwen4exp_ridgefill::sha256_bytes((const unsigned char*)bytes.data(), bytes.size());
 }
 
 /* A folder of two files, one tensor each; its manifest lists both with their hashes. */
@@ -3061,7 +3061,7 @@ void write_folder(const std::filesystem::path& dir, const std::string& files_ove
         ? "{\"proj.L4.safetensors\": \"" + sha_of(a) + "\", \"rowsel.safetensors\": \"" + sha_of(b) +
               "\", \"README.md\": \"" + sha_of("hello") + "\"}"
         : files_override;
-    std::ofstream(dir / "kva.json") << "{\"format\": 1, \"files\": " << files << "}";
+    std::ofstream(dir / "ridgefill.json") << "{\"format\": 1, \"files\": " << files << "}";
 }
 
 
@@ -3086,17 +3086,17 @@ TEST(a_speed_straddle_downgraded_at_declare_is_said_once_at_startup) {
         for (const char* mode : {"speed", "quality"}) {
             RadModelMeta meta = indexer ? flash_next_meta() : flash_next_meta_without_indexer();
             RadBuildCtx c = served_ctx();
-            RadBuilder kva;
-            served(kva);
-            hold_kva(kva, {"kva.proj", "kva.st"});
-            hold_score(kva, "kva.rowsel.score");
-            Env env({{"RADIANCE_KVA", mode}});
+            RadBuilder ridgefill;
+            served(ridgefill);
+            hold_ridgefill(ridgefill, {"ridgefill.proj", "ridgefill.st"});
+            hold_score(ridgefill, "ridgefill.rowsel.score");
+            Env env({{"RADIANCE_RIDGEFILL", mode}});
             int st = RAD_OK;
-            const std::string log = stderr_of([&] { st = qwen4exp_kva::declare(&kva, &meta, &c); });
+            const std::string log = stderr_of([&] { st = qwen4exp_ridgefill::declare(&ridgefill, &meta, &c); });
             REQUIRE_EQ(st, RAD_OK);
             const bool speed = !std::strcmp(mode, "speed");
-            CHECK_EQ(qwen4exp_kva::g_kva[0].straddle_layers, speed && indexer);
-            CHECK_EQ(qwen4exp_kva::straddle_missing(qwen4exp_fp8::g_model[0].layers[7].attn) == nullptr, indexer);
+            CHECK_EQ(qwen4exp_ridgefill::g_ridgefill[0].straddle_layers, speed && indexer);
+            CHECK_EQ(qwen4exp_ridgefill::straddle_missing(qwen4exp_fp8::g_model[0].layers[7].attn) == nullptr, indexer);
             CHECK_EQ(count(log, "takes the masked path for straddle chunks"), speed && !indexer ? 1 : 0);
             if (speed && !indexer) CHECK(has(log, "late attention layer 7 lacks the indexer's selection (qsa_sel)"));
         }
@@ -3148,7 +3148,7 @@ TEST(media_steps_run_stock_and_the_text_after_an_image_approximates_at_its_rotar
     static int32_t rp[3 * 4096], mm[8];
     static uint16_t embd[8 * 2560], pix[64 * 1536];
     static int32_t coord[4 * 64], ecu[2] = {0, 64};
-    using qwen4exp_kva::PATH_STOCK;
+    using qwen4exp_ridgefill::PATH_STOCK;
     struct Edit { const char* why; std::function<void(RadBatch&)> f; };
     const std::vector<Edit> media = {
         {"encoder pass", [](RadBatch& b) { b.enc = 1; b.enc_n_patch = 64; b.enc_pixels = pix; b.enc_coord = coord;
@@ -3162,30 +3162,30 @@ TEST(media_steps_run_stock_and_the_text_after_an_image_approximates_at_its_rotar
         RadModelMeta meta = flash_next_vl_meta();
         RadBuildCtx c = served_ctx();
         c.max_enc_patches = 4096;
-        RadBuilder kva;
-        served(kva);
-        hold_kva(kva, {"kva.proj", "kva.st"});
-        hold_score(kva, "kva.rowsel.score");
-        Env env({{"RADIANCE_KVA", mode}});
-        REQUIRE_EQ(qwen4exp_kva::declare(&kva, &meta, &c), RAD_OK);
-        const qwen4exp_kva::Kva& k = qwen4exp_kva::g_kva[0];
+        RadBuilder ridgefill;
+        served(ridgefill);
+        hold_ridgefill(ridgefill, {"ridgefill.proj", "ridgefill.st"});
+        hold_score(ridgefill, "ridgefill.rowsel.score");
+        Env env({{"RADIANCE_RIDGEFILL", mode}});
+        REQUIRE_EQ(qwen4exp_ridgefill::declare(&ridgefill, &meta, &c), RAD_OK);
+        const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[0];
         REQUIRE(qwen4exp_fp8::g_model[0].media && qwen4exp_fp8::g_model[0].g.rope_mc && k.have_proj);
         for (const Edit& e : media) {
-            Batch x = make_step(kva, {{2048}, 0, 2048});
+            Batch x = make_step(ridgefill, {{2048}, 0, 2048});
             e.f(x.b);
-            CHECK_EQ(qwen4exp_kva::derive(k, &x.b).path, PATH_STOCK);
-            const Run got = run_step(qwen4exp_kva::step, x.b), want = run_step(qwen4exp_fp8::step, x.b);
+            CHECK_EQ(qwen4exp_ridgefill::derive(k, &x.b).path, PATH_STOCK);
+            const Run got = run_step(qwen4exp_ridgefill::step, x.b), want = run_step(qwen4exp_fp8::step, x.b);
             CHECK(want.issues.size() > (x.b.enc ? 10u : 100u));
             if (differ(got.all, want.issues) != 0) std::fprintf(stderr, "    %s / %s differs\n", mode, e.why);
             CHECK_EQ(differ(got.all, want.issues), 0);
             CHECK_EQ(got.device_calls, 0);
         }
         /* the text after it: rotary planes present, components equal -- approximated, at the rotary positions */
-        Batch x = make_step(kva, {{2048}, 0, 2048});
+        Batch x = make_step(ridgefill, {{2048}, 0, 2048});
         x.b.rope_pos = rp;
-        const qwen4exp_kva::Pass p = qwen4exp_kva::derive(k, &x.b);
+        const qwen4exp_ridgefill::Pass p = qwen4exp_ridgefill::derive(k, &x.b);
         CHECK(p.path != PATH_STOCK && p.b == 2048);
-        const Run got = run_step(qwen4exp_kva::step, x.b), stock = run_step(qwen4exp_fp8::step, x.b);
+        const Run got = run_step(qwen4exp_ridgefill::step, x.b), stock = run_step(qwen4exp_fp8::step, x.b);
         std::map<rad_op, std::set<std::string>> want;
         for (const RecIssue& r : stock.issues) want[r.op].insert(position_tags(r, x.b));
         int rotary = 0, bad = 0;
@@ -3208,10 +3208,10 @@ TEST(a_folder_is_read_and_a_damaged_one_refused_by_name) {
     TempDir dir;
     REQUIRE(!dir.path.empty());
     write_folder(dir.path);
-    qwen4exp_kva::Folder f;
+    qwen4exp_ridgefill::Folder f;
     f.place.dir = dir.path.string();
     std::string why;
-    REQUIRE(qwen4exp_kva::read_folder(&f, &why));
+    REQUIRE(qwen4exp_ridgefill::read_folder(&f, &why));
     CHECK_EQ(f.tensors.size(), (size_t)3);
     CHECK(f.tensors["proj.4.weight"].dtype == RAD_BF16 && f.tensors["proj.4.weight"].shape == std::vector<int64_t>({2, 8}));
     CHECK_EQ(f.tensors["score"].bytes, 20);
@@ -3219,7 +3219,7 @@ TEST(a_folder_is_read_and_a_damaged_one_refused_by_name) {
     const Case cases[] = {
         { [&] { std::filesystem::remove(dir.path / "rowsel.safetensors"); }, "lists rowsel.safetensors, which is missing" },
         { [&] { std::ofstream(dir.path / "README.md") << "hullo"; }, "README.md is corrupt" },
-        { [&] { std::ofstream(dir.path / "kva.json") << "{\"format\": 2, \"files\": {}}"; }, "format-1" },
+        { [&] { std::ofstream(dir.path / "ridgefill.json") << "{\"format\": 2, \"files\": {}}"; }, "format-1" },
         { [&] { write_folder(dir.path, "{\"../x\": \"00\"}"); }, "lists ../x" },
         { [&] { const std::string a = safetensors({{"score", "F32", {5}, 4}});
                 std::ofstream(dir.path / "proj.L4.safetensors", std::ios::binary) << a;
@@ -3230,18 +3230,18 @@ TEST(a_folder_is_read_and_a_damaged_one_refused_by_name) {
     for (const Case& c : cases) {
         write_folder(dir.path);
         c.damage();
-        qwen4exp_kva::Folder g;
+        qwen4exp_ridgefill::Folder g;
         g.place.dir = dir.path.string();
         why.clear();
-        CHECK(!qwen4exp_kva::read_folder(&g, &why));
+        CHECK(!qwen4exp_ridgefill::read_folder(&g, &why));
         CHECK(has(why, c.said));
         if (!has(why, c.said)) std::fprintf(stderr, "    said: %s\n", why.c_str());
     }
 }
 
 /* A HUB'S README IS NOT THE FOLDER'S (release, 2026-10-06): on Hugging Face a repo's README.md is its model card, so a
- * folder downloaded into <model dir>/projector carries a README nobody hashed. tools/kva_projector.py lists no
- * documentation in kva.json (is_doc, `reseal` for existing folders), and the loader verifies exactly what is listed:
+ * folder downloaded into <model dir>/projector carries a README nobody hashed. tools/ridgefill_projector.py lists no
+ * documentation in ridgefill.json (is_doc, `reseal` for existing folders), and the loader verifies exactly what is listed:
  * a model card in place of README.md, or no README at all, still reads; one changed weight byte is still refused by
  * name. */
 TEST(a_folder_reads_whatever_its_unlisted_readme_holds_and_still_refuses_a_changed_weight) {
@@ -3251,10 +3251,10 @@ TEST(a_folder_reads_whatever_its_unlisted_readme_holds_and_still_refuses_a_chang
     const std::string b = safetensors({{"score", "F32", {5}, 4}});
     const std::string unlisted = "{\"proj.L4.safetensors\": \"" + sha_of(a) + "\", \"rowsel.safetensors\": \"" + sha_of(b) + "\"}";
     const auto read = [&](std::string* why) {
-        qwen4exp_kva::Folder f;
+        qwen4exp_ridgefill::Folder f;
         f.place.dir = dir.path.string();
         why->clear();
-        return qwen4exp_kva::read_folder(&f, why);
+        return qwen4exp_ridgefill::read_folder(&f, why);
     };
     std::string why;
     write_folder(dir.path, unlisted);
@@ -3270,7 +3270,7 @@ TEST(a_folder_reads_whatever_its_unlisted_readme_holds_and_still_refuses_a_chang
     CHECK(has(why, "proj.L4.safetensors is corrupt"));
 }
 
-/* Discovery: RADIANCE_KVA_PROJECTOR wins and names itself; otherwise projector/ beside the model
+/* Discovery: RADIANCE_RIDGEFILL_PROJECTOR wins and names itself; otherwise projector/ beside the model
  * file this process has MAPPED (the test maps the tiny container, as the engine maps its model);
  * with neither there is no folder, and the places looked at are said. */
 TEST(the_folder_is_found_by_the_env_then_beside_the_mapped_model) {
@@ -3279,59 +3279,59 @@ TEST(the_folder_is_found_by_the_env_then_beside_the_mapped_model) {
     const std::filesystem::path model = dir.path / "model.rad", proj = dir.path / "projector";
     std::filesystem::copy_file(tiny_container(), model);
     {
-        const qwen4exp_kva::FolderPlace none = qwen4exp_kva::find_folder();
+        const qwen4exp_ridgefill::FolderPlace none = qwen4exp_ridgefill::find_folder();
         CHECK(none.dir.empty());
         CHECK(has(none.how, "no model file is mapped"));
     }
     size_t size = 0;
-    const unsigned char* mapped = qwen4exp_kva::map_file(model.string(), &size);
+    const unsigned char* mapped = qwen4exp_ridgefill::map_file(model.string(), &size);
     REQUIRE(mapped != nullptr);
-    qwen4exp_kva::FolderPlace at = qwen4exp_kva::find_folder();
+    qwen4exp_ridgefill::FolderPlace at = qwen4exp_ridgefill::find_folder();
     CHECK_EQ(at.container, model.string());
     CHECK(at.dir.empty() && has(at.how, (proj).string().c_str()));
     std::filesystem::create_directory(proj);
     write_folder(proj);
-    at = qwen4exp_kva::find_folder();
+    at = qwen4exp_ridgefill::find_folder();
     CHECK_EQ(at.dir, proj.string());
     CHECK(has(at.how, "beside the resolved model file"));
     {
         TempDir other;
         write_folder(other.path);
-        Env env({{"RADIANCE_KVA_PROJECTOR", other.path.c_str()}});
-        at = qwen4exp_kva::find_folder();
+        Env env({{"RADIANCE_RIDGEFILL_PROJECTOR", other.path.c_str()}});
+        at = qwen4exp_ridgefill::find_folder();
         CHECK_EQ(at.dir, other.path.string());
-        CHECK(has(at.how, "$RADIANCE_KVA_PROJECTOR="));
+        CHECK(has(at.how, "$RADIANCE_RIDGEFILL_PROJECTOR="));
     }
     {
-        Env env({{"RADIANCE_KVA_PROJECTOR", (dir.path / "nowhere").c_str()}});
-        at = qwen4exp_kva::find_folder();
-        CHECK(at.dir.empty() && has(at.how, "(no kva.json there)"));
+        Env env({{"RADIANCE_RIDGEFILL_PROJECTOR", (dir.path / "nowhere").c_str()}});
+        at = qwen4exp_ridgefill::find_folder();
+        CHECK(at.dir.empty() && has(at.how, "(no ridgefill.json there)"));
     }
     munmap((void*)mapped, size);
 }
 
 /* The container is read through the public format: an entry's planes and the tokenizer's canonical
- * form hash to the values tools/kva_projector.py's test expects of the same bytes. */
+ * form hash to the values tools/ridgefill_projector.py's test expects of the same bytes. */
 TEST(the_container_hashes_are_the_builders) {
-    qwen4exp_kva::Container c;
-    REQUIRE(qwen4exp_kva::open_container(tiny_container(), &c));
-    CHECK_EQ(qwen4exp_kva::vocab_sha256(c), std::string(kTinyVocab));
-    CHECK_EQ(qwen4exp_kva::entry_sha256(c, "anchor.weight"), std::string(kTinyAnchor));
-    CHECK(qwen4exp_kva::entry_sha256(c, "absent.weight").empty());
+    qwen4exp_ridgefill::Container c;
+    REQUIRE(qwen4exp_ridgefill::open_container(tiny_container(), &c));
+    CHECK_EQ(qwen4exp_ridgefill::vocab_sha256(c), std::string(kTinyVocab));
+    CHECK_EQ(qwen4exp_ridgefill::entry_sha256(c, "anchor.weight"), std::string(kTinyAnchor));
+    CHECK(qwen4exp_ridgefill::entry_sha256(c, "absent.weight").empty());
     munmap((void*)c.base, c.size);
-    qwen4exp_kva::Container bad;
-    CHECK(!qwen4exp_kva::open_container("/proc/self/cmdline", &bad));
+    qwen4exp_ridgefill::Container bad;
+    CHECK(!qwen4exp_ridgefill::open_container("/proc/self/cmdline", &bad));
 }
 
 /* The JSON reader: what the manifest and safetensors headers use, and what it refuses. */
 TEST(the_json_reader_reads_the_manifest_forms) {
-    qwen4exp_kva::Json j;
+    qwen4exp_ridgefill::Json j;
     const std::string ok = R"({"a": [1, -2.5e3, true, false, null], "s": "x\"\\\/\n\u00e9\ud83d\ude00", "a": {"b": 3}})";
-    REQUIRE(qwen4exp_kva::json_parse(ok.data(), ok.size(), &j));
+    REQUIRE(qwen4exp_ridgefill::json_parse(ok.data(), ok.size(), &j));
     CHECK_EQ(j.get("a")->integer("b", 0), 3);   /* a repeated key reads as its last */
     CHECK_EQ(j.text("s"), std::string("x\"\\/\n\xc3\xa9\xf0\x9f\x98\x80"));
     for (const char* bad : {"{", "{\"a\":}", "[1,]", "{\"a\":1} x", "\"\\q\"", "nul"})
-        CHECK(!qwen4exp_kva::json_parse(bad, std::strlen(bad), &j));
+        CHECK(!qwen4exp_ridgefill::json_parse(bad, std::strlen(bad), &j));
 }
 
 /* Every case starts with no folder and no copies: a folder one case hands the plugin must not leak

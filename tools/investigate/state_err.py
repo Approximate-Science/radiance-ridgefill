@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """How much of radiance's GDN fill error at a chunk end does a constant correction C remove?
 
-Inputs: two capture dirs written by RADIANCE_KVA_CAPTURE_STATE (notes/arch.md "Capture"): an exact run
+Inputs: two capture dirs written by RADIANCE_RIDGEFILL_CAPTURE_STATE (notes/arch.md "Capture"): an exact run
 (mode off) and an approximate run (speed, nothing applied before the copy), same prompts, same chunking.
 Per (prompt, chunk end, rank) the files are f32 [n_late_gdn, H_local, 128 (V), 128 (K)].
 E = S_exact - S_pred at every approximate chunk end. Reports, per layer (both ranks pooled):

@@ -1,9 +1,9 @@
-/* folder_fixture.h -- a projector folder the host tests build in memory (kva_folder.h's Folder, handed to
+/* folder_fixture.h -- a projector folder the host tests build in memory (ridgefill_folder.h's Folder, handed to
  * load_folder through g_folder_for_test), and the tiny container its manifest's tokenizer hash points at.
- * Include after the core (kva_folder.h) and rad_fake.h.
+ * Include after the core (ridgefill_folder.h) and rad_fake.h.
  */
-#ifndef KVA_TEST_FOLDER_FIXTURE_H
-#define KVA_TEST_FOLDER_FIXTURE_H
+#ifndef RIDGEFILL_TEST_FOLDER_FIXTURE_H
+#define RIDGEFILL_TEST_FOLDER_FIXTURE_H
 
 #include <cstring>
 #include <string>
@@ -14,7 +14,7 @@ namespace {
 /* ==================================================================== the projector folder */
 
 /* A container of a few KiB (abi/rad_format.h): three tokens (the third with empty text), one merge
- * and one 16-byte entry. tools/kva_projector.py's test builds the same bytes and expects the same
+ * and one 16-byte entry. tools/ridgefill_projector.py's test builds the same bytes and expects the same
  * two hashes (kTinyVocab, kTinyAnchor), which is what ties the two canonical forms together. */
 const char* kTinyVocab  = "3988fb447f719ad3fc2c75e5a0fa3daeb2b6a5e10e964744619d1dfbc6e95ff6";
 const char* kTinyAnchor = "be45cb2605bf36bebde684841a28f0fd43c69850a3dce5fedba69928ee3a8991";
@@ -54,7 +54,7 @@ std::vector<unsigned char> tiny_container_bytes() {
 const std::string& tiny_container() {
     static std::string path;
     if (path.empty()) {
-        char t[] = "/tmp/kva_tiny_XXXXXX";
+        char t[] = "/tmp/ridgefill_tiny_XXXXXX";
         const int fd = mkstemp(t);
         const std::vector<unsigned char> f = tiny_container_bytes();
         if (fd >= 0 && write(fd, f.data(), f.size()) == (ssize_t)f.size()) path = t;
@@ -69,19 +69,19 @@ const unsigned char* tensor_bytes() {
     return z.data();
 }
 
-kva::Folder g_test_folder;
+ridgefill::Folder g_test_folder;
 
 /* The plugin forgets every folder and copy; the next declare looks again (every case starts so). */
 void reset_projector() {
-    kva::g_folder_for_test = nullptr;
-    kva::g_i8_rows_for_test = nullptr;
-    kva::g_loaded = kva::Loaded{};
-    kva::free_uploads();
+    ridgefill::g_folder_for_test = nullptr;
+    ridgefill::g_i8_rows_for_test = nullptr;
+    ridgefill::g_loaded = ridgefill::Loaded{};
+    ridgefill::free_uploads();
     g_mem.copies.clear();
 }
 
 void add_tensor(const std::string& name, uint32_t dtype, std::vector<int64_t> shape) {
-    kva::FolderTensor t;
+    ridgefill::FolderTensor t;
     t.data = tensor_bytes();
     t.dtype = dtype;
     t.shape = shape;
@@ -93,4 +93,4 @@ void add_tensor(const std::string& name, uint32_t dtype, std::vector<int64_t> sh
 
 }  /* namespace */
 
-#endif /* KVA_TEST_FOLDER_FIXTURE_H */
+#endif /* RIDGEFILL_TEST_FOLDER_FIXTURE_H */

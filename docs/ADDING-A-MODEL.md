@@ -1,13 +1,13 @@
 # Adding a model (dense, MoE or hybrid): one adapter, no core change
 
-The KVA core (`arch/kva_*.h`, namespace `kva`) names no model type. It reads the model through ONE
-struct, `kva::KvaAdapter` (arch/kva_adapter.h): facts plus hooks, each field's comment its contract.
+The RidgeFill core (`arch/ridgefill_*.h`, namespace `ridgefill`) names no model type. It reads the model through ONE
+struct, `ridgefill::RidgeFillAdapter` (arch/ridgefill_adapter.h): facts plus hooks, each field's comment its contract.
 qwen4exp is the worked example: arch/qwen4exp_adapter.h, qwen4exp_blocks.h, qwen4exp_fill.h,
-qwen4exp_moe.h, qwen4exp_kva.cpp.
+qwen4exp_moe.h, qwen4exp_ridgefill.cpp.
 
 0. Read radiance docs/PLUGIN.md §11: your adapter is ONE .so claiming (arch_id, quant) and
-   shadowing the in-tree stem on $RADIANCE_HOME. Copy qwen4exp_kva.cpp's scaffolding
-   (`RAD_ARCH_NO_EXPORTS` + the `#include` of your in-tree arch .cpp, then `#include "kva_core.h"`,
+   shadowing the in-tree stem on $RADIANCE_HOME. Copy qwen4exp_ridgefill.cpp's scaffolding
+   (`RAD_ARCH_NO_EXPORTS` + the `#include` of your in-tree arch .cpp, then `#include "ridgefill_core.h"`,
    the declare/step/probe thins that call `core_declare` / `core_step`, the `RAD_ARCH_PLUGIN` exports)
    and arch/CMakeLists.txt's `rad_add_plugin` entry (stem = the shadowed .so's name; pass the same
    name as `shadow_so` and to `open_guard`, so a release mismatch forwards to it).
@@ -35,10 +35,10 @@ qwen4exp_moe.h, qwen4exp_kva.cpp.
    file>` pair a line; arch/qwen4exp.copies is the example). scripts/update_radiance.sh reads it to say,
    for each new radiance release, which of your files to port -- the static oracle says whether you must
    (and CI, .github/workflows/radiance-watch.yml, says it daily against radiance's newest release).
-7. Fit the projector from exact captures (RADIANCE_KVA=off + RADIANCE_KVA_CAPTURE; notes/refit.md),
+7. Fit the projector from exact captures (RADIANCE_RIDGEFILL=off + RADIANCE_RIDGEFILL_CAPTURE; notes/refit.md),
    then gate: `ctest -LE gpu`, off ≡ stock (scripts/ident.sh), and the KL rows (scripts/grade.sh).
 
-The step around the late layers is the core's too (arch/kva_step.h): the adapter adds prologue /
+The step around the late layers is the core's too (arch/ridgefill_step.h): the adapter adds prologue /
 stock_layer / epilogue / stock_step (copies of its in-tree step's pieces) and, if it keeps the debug
 captures, capture_step / finish_state / capture_mixed. tests/adapter_core_test.cpp is a whole
 adapter in one file -- a toy dense model -- and the smallest example of the contract.

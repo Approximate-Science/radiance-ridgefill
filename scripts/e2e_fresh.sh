@@ -5,7 +5,7 @@
 # built install and behave on a stock radiance: a stock stilldeadcode/radiance runtime image, the
 # stock published .rad container, a clean RADIANCE_HOME holding ONLY the packaged plugin, the
 # projector folder unpacked from the package. This release selects the mode server-wide only
-# (RADIANCE_KVA=off|quality|speed); the per-request chat-template feature is PARKED
+# (RADIANCE_RIDGEFILL=off|quality|speed); the per-request chat-template feature is PARKED
 # (notes/future/per-request.md), so the dist carries no template package by default.
 #
 # THE MODEL FILE IS NEVER COPIED (it is 114 GiB): <work>/model/<basename> is a SYMLINK to RK_MODEL,
@@ -13,7 +13,7 @@
 # symlink targets across the mount (the target path would not exist inside the container), so
 # every container mounts the model's REAL directory at /models (scripts/common.sh's rule), and
 # the projector folder is put beside the model INSIDE the container through a second bind mount
-# at /models/projector (the loader's discovery order: $RADIANCE_KVA_PROJECTOR -> beside --model
+# at /models/projector (the loader's discovery order: $RADIANCE_RIDGEFILL_PROJECTOR -> beside --model
 # -> beside the resolved file; the mount makes /models/projector the folder discovery finds).
 #
 # THE CASES (every run carries the same engine flags as scripts/common.sh RK_FLAGS):
@@ -21,17 +21,17 @@
 #      and one 16,384-token TTFT -- the numbers every other case is compared against.
 #   1  no projector mounted (an EMPTY dir shadows any real projector/ the model dir may hold):
 #      the plugin logs the no-projector line and serves stock -> ident EQUALS the baseline.
-#   2  projector mounted, RADIANCE_KVA=off: off never looks -> ident EQUALS the baseline.
-#   3  RADIANCE_KVA=quality: the startup log has the projector line with 0 warning(s) AND at
+#   2  projector mounted, RADIANCE_RIDGEFILL=off: off never looks -> ident EQUALS the baseline.
+#   3  RADIANCE_RIDGEFILL=quality: the startup log has the projector line with 0 warning(s) AND at
 #      least one approximate-step line (the approximation is logged), and a 16,384-token prompt
 #      (tools/speed.py's prompt builder) is FASTER than the baseline TTFT.
-#   4  RADIANCE_KVA=speed: the same checks.
+#   4  RADIANCE_RIDGEFILL=speed: the same checks.
 #   5  a corrupted projector copy (one byte flipped in one proj file, in a scratch copy): the
 #      startup REFUSES that folder BY NAME and serves stock -> ident EQUALS the baseline.
-#   6  the retired switch RADIANCE_KVA_PROJ_PLACE=vram (the projector is ALWAYS streamed from
+#   6  the retired switch RADIANCE_RIDGEFILL_PROJ_PLACE=vram (the projector is ALWAYS streamed from
 #      host RAM now; placement and its switches are gone): the engine REFUSES at startup naming
 #      the switch -- the container exits before /health ever answers.
-#   7  --override-chat-template with "chat_template_kwargs": {"kva": "on"}: PARKED with the
+#   7  --override-chat-template with "chat_template_kwargs": {"ridgefill": "on"}: PARKED with the
 #      per-request feature (notes/future/per-request.md) -- SKIPPED with that reason unless
 #      RK_E2E_STAGE_F=1 (which needs a dist built with `package.py --with-template`).
 #
@@ -98,8 +98,8 @@ E2E_TTFT_REPS=$RK_E2E_TTFT_REPS
 export RK_FLAGS RK_MODEL RK_DIST RK_E2E_TTFT_LEN RK_E2E_TTFT_REPS   # the report assembler reads them
 
 # a leftover server would fight for the cards and the port
-e_running=$(docker ps --filter name=radiance-kva- --format '{{.Names}}' 2>/dev/null || true)
-[ -z "$e_running" ] || rk_die "refusing to start: a radiance-kva container is already running: $e_running"
+e_running=$(docker ps --filter name=radiance-ridgefill- --format '{{.Names}}' 2>/dev/null || true)
+[ -z "$e_running" ] || rk_die "refusing to start: a radiance-ridgefill container is already running: $e_running"
 
 if ! mkdir -p "$RK_E2E_WORK" 2>/dev/null; then
     rk_die "cannot create RK_E2E_WORK: $RK_E2E_WORK"
@@ -122,20 +122,20 @@ printf 'e2e: work %s; dist %s; image %s; model %s\n' "$E2E_WORK" "$RK_DIST" "$RK
 [ -f "$RK_DIST/SHA256SUMS" ] || rk_die "the dist dir has no SHA256SUMS: $RK_DIST"
 (cd "$RK_DIST" && sha256sum -c SHA256SUMS) || rk_die "the dist tarballs do not match $RK_DIST/SHA256SUMS"
 
-set -- "$RK_DIST"/radiance-kva-*.tar.gz
-[ "$#" -eq 1 ] || rk_die "expected exactly one radiance-kva-<version>.tar.gz in $RK_DIST, found: $*"
+set -- "$RK_DIST"/radiance-ridgefill-*.tar.gz
+[ "$#" -eq 1 ] || rk_die "expected exactly one radiance-ridgefill-<version>.tar.gz in $RK_DIST, found: $*"
 E2E_PLUGIN_TARBALL=$1
-# the projector package is named by the dtype its own kva.json carries (bf16 or int8 --
+# the projector package is named by the dtype its own ridgefill.json carries (bf16 or int8 --
 # the shipped folder may be either), so it is found by pattern, never hard-coded
-set -- "$RK_DIST"/projector-qwen3.8-flash-next-*.tar.gz
-[ "$#" -eq 1 ] || rk_die "expected exactly one projector-qwen3.8-flash-next-<dtype>.tar.gz in $RK_DIST, found: $*"
+set -- "$RK_DIST"/ridgefill-projector-qwen3.8-flash-next-*.tar.gz
+[ "$#" -eq 1 ] || rk_die "expected exactly one ridgefill-projector-qwen3.8-flash-next-<dtype>.tar.gz in $RK_DIST, found: $*"
 E2E_PROJECTOR_TARBALL=$1
 E2E_PROJECTOR_DIRNAME=$(basename "$E2E_PROJECTOR_TARBALL" .tar.gz)
-# the chat-template package is NOT built by default (per-request KVA is parked): it is
+# the chat-template package is NOT built by default (per-request RidgeFill is parked): it is
 # extracted when present, and demanded only when RK_E2E_STAGE_F=1 asks for its case
-E2E_TEMPLATE_TARBALL=$RK_DIST/kva-chat-template.tar.gz
+E2E_TEMPLATE_TARBALL=$RK_DIST/ridgefill-chat-template.tar.gz
 if [ ! -f "$E2E_TEMPLATE_TARBALL" ] && [ "$RK_E2E_STAGE_F" = 1 ]; then
-    rk_die "RK_E2E_STAGE_F=1 needs the chat-template package, which $RK_DIST does not carry: rebuild the dist with tools/package.py --with-template (per-request KVA is parked, notes/future/per-request.md)"
+    rk_die "RK_E2E_STAGE_F=1 needs the chat-template package, which $RK_DIST does not carry: rebuild the dist with tools/package.py --with-template (per-request RidgeFill is parked, notes/future/per-request.md)"
 fi
 for e_tb in "$E2E_PLUGIN_TARBALL" "$E2E_PROJECTOR_TARBALL"; do
     [ -f "$e_tb" ] || rk_die "the dist dir lacks the packaged tarball: $e_tb"
@@ -147,20 +147,20 @@ done
 E2E_TEMPLATE_DIR=''
 if [ -f "$E2E_TEMPLATE_TARBALL" ]; then
     e_root=$(tar -tzf "$E2E_TEMPLATE_TARBALL" | head -1)
-    e_want=kva-chat-template/
+    e_want=ridgefill-chat-template/
     [ "$e_root" = "$e_want" ] || rk_die "$E2E_TEMPLATE_TARBALL does not contain a single root dir $e_want (first entry: $e_root)"
     tar -xzf "$E2E_TEMPLATE_TARBALL" -C "$E2E_EXTRACT"
-    E2E_TEMPLATE_DIR=$E2E_EXTRACT/kva-chat-template
+    E2E_TEMPLATE_DIR=$E2E_EXTRACT/ridgefill-chat-template
 fi
 
 E2E_PLUGIN_VERSION=$(basename "$E2E_PLUGIN_TARBALL" .tar.gz)
-E2E_PLUGIN_VERSION=${E2E_PLUGIN_VERSION#radiance-kva-}
-E2E_PLUGIN_HOME=$E2E_EXTRACT/radiance-kva-$E2E_PLUGIN_VERSION
+E2E_PLUGIN_VERSION=${E2E_PLUGIN_VERSION#radiance-ridgefill-}
+E2E_PLUGIN_HOME=$E2E_EXTRACT/radiance-ridgefill-$E2E_PLUGIN_VERSION
 E2E_PROJECTOR=$E2E_EXTRACT/$E2E_PROJECTOR_DIRNAME
 export RK_PLUGIN_HOME="$E2E_PLUGIN_HOME"     # rk_docker_prefix mounts it at /plugins:ro
 [ -f "$E2E_PLUGIN_HOME/architectures/qwen4exp_fp8.so" ] || rk_die "the packaged plugin home has no architectures/qwen4exp_fp8.so: $E2E_PLUGIN_HOME"
-[ -f "$E2E_PLUGIN_HOME/kernels/kva.so" ] || rk_die "the packaged plugin home has no kernels/kva.so: $E2E_PLUGIN_HOME"
-[ -f "$E2E_PROJECTOR/kva.json" ] || rk_die "the extracted projector package has no kva.json: $E2E_PROJECTOR"
+[ -f "$E2E_PLUGIN_HOME/kernels/ridgefill.so" ] || rk_die "the packaged plugin home has no kernels/ridgefill.so: $E2E_PLUGIN_HOME"
+[ -f "$E2E_PROJECTOR/ridgefill.json" ] || rk_die "the extracted projector package has no ridgefill.json: $E2E_PROJECTOR"
 if [ -n "$E2E_TEMPLATE_DIR" ]; then
     [ -f "$E2E_TEMPLATE_DIR/chat_template.jinja" ] || rk_die "the template package has no chat_template.jinja: $E2E_TEMPLATE_DIR"
 fi
@@ -171,11 +171,11 @@ for e_dir in "$@"; do
         rk_die "the extracted package does not match its SHA256SUMS: $e_dir"
 done
 if [ -n "$E2E_TEMPLATE_DIR" ]; then
-    e_extra=', kva-chat-template'
+    e_extra=', ridgefill-chat-template'
 else
-    e_extra=' (no chat-template package: per-request KVA is parked)'
+    e_extra=' (no chat-template package: per-request RidgeFill is parked)'
 fi
-printf 'e2e: extracted and verified radiance-kva-%s, %s%s\n' "$E2E_PLUGIN_VERSION" \
+printf 'e2e: extracted and verified radiance-ridgefill-%s, %s%s\n' "$E2E_PLUGIN_VERSION" \
     "$E2E_PROJECTOR_DIRNAME" "$e_extra"
 
 # ---------------------------------------------------------------- (b) the model: a symlink, never a copy
@@ -202,7 +202,7 @@ fi
 
 # e2e_die REASON -- record the abort, stop every container, write the report, exit 1.
 e2e_die() {
-    printf 'radiance-kva e2e: FAIL: %s\n' "$*" >&2
+    printf 'radiance-ridgefill e2e: FAIL: %s\n' "$*" >&2
     printf '%s\n' "$*" > "$E2E_CASES/abort.reason"
     e2e_cleanup
     e2e_report
@@ -242,7 +242,7 @@ e2e_skipped() {
 }
 
 # e2e_serve NAME MODE PROJECTOR TEMPLATE [extra engine args...]
-#   start container radiance-kva-e2e-<NAME> with the standard prefix (common.sh), the same
+#   start container radiance-ridgefill-e2e-<NAME> with the standard prefix (common.sh), the same
 #   RK_FLAGS as every other measurement, the packaged plugin home as the only plugin home
 #   (exact: the image's own home, no plugin), plus the projector / template bind mounts;
 #   wait for /health. The whole command line is kept in logs/<NAME>.cmd.
@@ -258,7 +258,7 @@ e2e_serve() {
             e2e_die "preflight failed before case $e_name; nothing was started"
         e2e_ev "$e_name" "preflight: OK ($(cat "$E2E_LOGS/$e_name.preflight.txt" | tail -1))"
     fi
-    e_container=radiance-kva-e2e-$e_name
+    e_container=radiance-ridgefill-e2e-$e_name
     e_args=$E2E_LOGS/$e_name.cmd
     if [ -n "${RK_E2E_CACHE_ROOT:-}" ]; then   # a fresh prefix-cache dir per case (mounted at /kvcache)
         RK_CACHE_DIR=$RK_E2E_CACHE_ROOT/$e_name; mkdir -p "$RK_CACHE_DIR"; export RK_CACHE_DIR
@@ -346,7 +346,7 @@ e2e_drop_cache() {
 # e2e_stop NAME -- capture the container's whole log (the evidence the log checks grep),
 # then stop and remove it.
 e2e_stop() {
-    e_container=radiance-kva-e2e-$1
+    e_container=radiance-ridgefill-e2e-$1
     docker logs "$e_container" > "$E2E_LOGS/$1.log" 2>&1 ||
         e2e_die "docker logs failed for $e_container"
     e2e_ev "$1" "container log: logs/$1.log"
@@ -401,7 +401,7 @@ speed.BASE = f"http://127.0.0.1:{port}"
 speed.HTTP_TIMEOUT = float(os.environ.get("RK_E2E_TTFT_HTTP_TIMEOUT", "3600"))
 
 # the filler: prose, grown until one /tokenize covers the whole target length
-filler = ("The KVA end-to-end gate fills its prefill prompt with plain prose like this, "
+filler = ("The RidgeFill end-to-end gate fills its prefill prompt with plain prose like this, "
           "tokenised by the served model's own tokenizer. ") * 64
 doc_ids = [speed.tokenize(filler)]
 while sum(len(d) for d in doc_ids) < length:
@@ -433,12 +433,12 @@ ids = ["0", "1", "2", "3", "4", "5", "6", "7"]
 titles = {
     "0": "stock baseline (image's own plugin home, no projector)",
     "1": "no projector mounted: plugin serves stock (ident == stock)",
-    "2": "projector + RADIANCE_KVA=off: ident == stock",
-    "3": "RADIANCE_KVA=quality: projector 0-warning line + approximation logged + TTFT faster than stock",
-    "4": "RADIANCE_KVA=speed: projector 0-warning line + approximation logged + TTFT faster than stock",
+    "2": "projector + RADIANCE_RIDGEFILL=off: ident == stock",
+    "3": "RADIANCE_RIDGEFILL=quality: projector 0-warning line + approximation logged + TTFT faster than stock",
+    "4": "RADIANCE_RIDGEFILL=speed: projector 0-warning line + approximation logged + TTFT faster than stock",
     "5": "corrupted projector: refused by name, ident == stock",
-    "6": "RADIANCE_KVA_PROJ_PLACE=vram: refused by name at startup",
-    "7": "--override-chat-template + kva:on request (parked: per-request KVA)",
+    "6": "RADIANCE_RIDGEFILL_PROJ_PLACE=vram: refused by name at startup",
+    "7": "--override-chat-template + ridgefill:on request (parked: per-request RidgeFill)",
 }
 
 def read(name):
@@ -513,28 +513,28 @@ e2e_serve 1 quality "$E2E_EMPTY_PROJECTOR" ''
 e2e_ident 1 1 || e2e_die "scripts/ident.sh failed in case 1"
 e2e_stop 1
 e_rc=0
-if grep -q 'KVA: no projector folder' "$E2E_LOGS/1.log"; then
+if grep -q 'RidgeFill: no projector folder' "$E2E_LOGS/1.log"; then
     e2e_ev 1 "PASS: the log has the no-projector line:"
-    grep 'KVA: no projector folder' "$E2E_LOGS/1.log" | while IFS= read -r e_line; do
+    grep 'RidgeFill: no projector folder' "$E2E_LOGS/1.log" | while IFS= read -r e_line; do
         e2e_ev 1 "  $e_line"
     done
 else
-    e2e_ev 1 "FAIL: no 'KVA: no projector folder' line in logs/1.log (the plugin did not report serving stock)"
+    e2e_ev 1 "FAIL: no 'RidgeFill: no projector folder' line in logs/1.log (the plugin did not report serving stock)"
     e_rc=1
 fi
 e2e_ident_equals_stock 1 1 || e_rc=1
 e2e_status 1 "no projector mounted: plugin serves stock (ident == stock)" "$e_rc"
 
-# ---------------------------------------------------------------- case 2: projector + RADIANCE_KVA=off
+# ---------------------------------------------------------------- case 2: projector + RADIANCE_RIDGEFILL=off
 
 e2e_serve 2 off "$E2E_PROJECTOR" ''
 e2e_ident 2 2 || e2e_die "scripts/ident.sh failed in case 2"
 e2e_stop 2
 e_rc=0
 e2e_ident_equals_stock 2 2 || e_rc=1
-e2e_status 2 "projector + RADIANCE_KVA=off: ident == stock" "$e_rc"
+e2e_status 2 "projector + RADIANCE_RIDGEFILL=off: ident == stock" "$e_rc"
 
-# ---------------------------------------------------------------- case 3: RADIANCE_KVA=quality
+# ---------------------------------------------------------------- case 3: RADIANCE_RIDGEFILL=quality
 
 e2e_serve 3 quality "$E2E_PROJECTOR" ''
 if ! E2E_TTFT=$(e2e_ttft); then
@@ -543,22 +543,22 @@ if ! E2E_TTFT=$(e2e_ttft); then
 fi
 e2e_stop 3
 e_rc=0
-if grep -Eq 'KVA: projector .* matches .* 0 warning\(s\)' "$E2E_LOGS/3.log"; then
+if grep -Eq 'RidgeFill: projector .* matches .* 0 warning\(s\)' "$E2E_LOGS/3.log"; then
     e2e_ev 3 "PASS: the startup log has the projector line with 0 warning(s):"
-    grep 'KVA: projector' "$E2E_LOGS/3.log" | while IFS= read -r e_line; do
+    grep 'RidgeFill: projector' "$E2E_LOGS/3.log" | while IFS= read -r e_line; do
         e2e_ev 3 "  $e_line"
     done
 else
-    e2e_ev 3 "FAIL: no 'KVA: projector ... matches ... 0 warning(s)' line in logs/3.log"
+    e2e_ev 3 "FAIL: no 'RidgeFill: projector ... matches ... 0 warning(s)' line in logs/3.log"
     e_rc=1
 fi
-if e_n=$(grep -c 'kva: approximate step (quality' "$E2E_LOGS/3.log"); then
+if e_n=$(grep -c 'ridgefill: approximate step (quality' "$E2E_LOGS/3.log"); then
     e2e_ev 3 "PASS: the log shows ${e_n} approximate step(s) in quality mode:"
-    grep 'kva: approximate step (quality' "$E2E_LOGS/3.log" | head -3 | while IFS= read -r e_line; do
+    grep 'ridgefill: approximate step (quality' "$E2E_LOGS/3.log" | head -3 | while IFS= read -r e_line; do
         e2e_ev 3 "  $e_line"
     done
 else
-    e2e_ev 3 "FAIL: no 'kva: approximate step (quality, ...' line in logs/3.log (the approximation was never logged)"
+    e2e_ev 3 "FAIL: no 'ridgefill: approximate step (quality, ...' line in logs/3.log (the approximation was never logged)"
     e_rc=1
 fi
 if [ -n "$E2E_TTFT" ]; then
@@ -572,9 +572,9 @@ if [ -n "$E2E_TTFT" ]; then
 else
     e_rc=1
 fi
-e2e_status 3 "RADIANCE_KVA=quality: projector 0-warning line + approximation logged + TTFT faster than stock" "$e_rc"
+e2e_status 3 "RADIANCE_RIDGEFILL=quality: projector 0-warning line + approximation logged + TTFT faster than stock" "$e_rc"
 
-# ---------------------------------------------------------------- case 4: RADIANCE_KVA=speed
+# ---------------------------------------------------------------- case 4: RADIANCE_RIDGEFILL=speed
 
 e2e_serve 4 speed "$E2E_PROJECTOR" ''
 if ! E2E_TTFT=$(e2e_ttft); then
@@ -583,22 +583,22 @@ if ! E2E_TTFT=$(e2e_ttft); then
 fi
 e2e_stop 4
 e_rc=0
-if grep -Eq 'KVA: projector .* matches .* 0 warning\(s\)' "$E2E_LOGS/4.log"; then
+if grep -Eq 'RidgeFill: projector .* matches .* 0 warning\(s\)' "$E2E_LOGS/4.log"; then
     e2e_ev 4 "PASS: the startup log has the projector line with 0 warning(s):"
-    grep 'KVA: projector' "$E2E_LOGS/4.log" | while IFS= read -r e_line; do
+    grep 'RidgeFill: projector' "$E2E_LOGS/4.log" | while IFS= read -r e_line; do
         e2e_ev 4 "  $e_line"
     done
 else
-    e2e_ev 4 "FAIL: no 'KVA: projector ... matches ... 0 warning(s)' line in logs/4.log"
+    e2e_ev 4 "FAIL: no 'RidgeFill: projector ... matches ... 0 warning(s)' line in logs/4.log"
     e_rc=1
 fi
-if e_n=$(grep -c 'kva: approximate step (speed' "$E2E_LOGS/4.log"); then
+if e_n=$(grep -c 'ridgefill: approximate step (speed' "$E2E_LOGS/4.log"); then
     e2e_ev 4 "PASS: the log shows ${e_n} approximate step(s) in speed mode:"
-    grep 'kva: approximate step (speed' "$E2E_LOGS/4.log" | head -3 | while IFS= read -r e_line; do
+    grep 'ridgefill: approximate step (speed' "$E2E_LOGS/4.log" | head -3 | while IFS= read -r e_line; do
         e2e_ev 4 "  $e_line"
     done
 else
-    e2e_ev 4 "FAIL: no 'kva: approximate step (speed, ...' line in logs/4.log (the approximation was never logged)"
+    e2e_ev 4 "FAIL: no 'ridgefill: approximate step (speed, ...' line in logs/4.log (the approximation was never logged)"
     e_rc=1
 fi
 if [ -n "$E2E_TTFT" ]; then
@@ -612,7 +612,7 @@ if [ -n "$E2E_TTFT" ]; then
 else
     e_rc=1
 fi
-e2e_status 4 "RADIANCE_KVA=speed: projector 0-warning line + approximation logged + TTFT faster than stock" "$e_rc"
+e2e_status 4 "RADIANCE_RIDGEFILL=speed: projector 0-warning line + approximation logged + TTFT faster than stock" "$e_rc"
 
 # ---------------------------------------------------------------- case 5: a corrupted projector copy
 
@@ -645,7 +645,7 @@ e_rc=0
 if grep -q 'REFUSED' "$E2E_LOGS/5.log" && grep -q "$E2E_CORRUPT_FILE" "$E2E_LOGS/5.log" \
     && grep -q 'serving stock' "$E2E_LOGS/5.log"; then
     e2e_ev 5 "PASS: the log refuses the folder naming $E2E_CORRUPT_FILE and serves stock:"
-    grep 'KVA: projector' "$E2E_LOGS/5.log" | while IFS= read -r e_line; do
+    grep 'RidgeFill: projector' "$E2E_LOGS/5.log" | while IFS= read -r e_line; do
         e2e_ev 5 "  $e_line"
     done
 else
@@ -658,38 +658,38 @@ e2e_status 5 "corrupted projector: refused by name, ident == stock" "$e_rc"
 # ---------------------------------------------------------------- case 6: a retired switch
 
 # The projector is ALWAYS streamed from host RAM now; VRAM placement and its switches are
-# gone. RADIANCE_KVA_PROJ_PLACE is one of the retired pair (_RING is the other): the
+# gone. RADIANCE_RIDGEFILL_PROJ_PLACE is one of the retired pair (_RING is the other): the
 # engine must REFUSE at startup NAMING the switch (an old command line cannot silently
 # run something else) -- the container exits before /health ever answers.
-export RADIANCE_KVA_PROJ_PLACE=vram
+export RADIANCE_RIDGEFILL_PROJ_PLACE=vram
 E2E_SERVE_EXPECT=refusal
 e2e_serve 6 quality "$E2E_PROJECTOR" ''
-unset RADIANCE_KVA_PROJ_PLACE
+unset RADIANCE_RIDGEFILL_PROJ_PLACE
 unset E2E_SERVE_EXPECT
 e_rc=0
-if grep -q 'RADIANCE_KVA_PROJ_PLACE' "$E2E_LOGS/6.log"; then
-    e2e_ev 6 "PASS: the startup log refuses RADIANCE_KVA_PROJ_PLACE by name:"
-    grep 'RADIANCE_KVA_PROJ_PLACE' "$E2E_LOGS/6.log" | while IFS= read -r e_line; do
+if grep -q 'RADIANCE_RIDGEFILL_PROJ_PLACE' "$E2E_LOGS/6.log"; then
+    e2e_ev 6 "PASS: the startup log refuses RADIANCE_RIDGEFILL_PROJ_PLACE by name:"
+    grep 'RADIANCE_RIDGEFILL_PROJ_PLACE' "$E2E_LOGS/6.log" | while IFS= read -r e_line; do
         e2e_ev 6 "  $e_line"
     done
 else
-    e2e_ev 6 "FAIL: no line names RADIANCE_KVA_PROJ_PLACE in logs/6.log (the refusal must name the retired switch)"
+    e2e_ev 6 "FAIL: no line names RADIANCE_RIDGEFILL_PROJ_PLACE in logs/6.log (the refusal must name the retired switch)"
     e_rc=1
 fi
-e2e_status 6 "RADIANCE_KVA_PROJ_PLACE=vram: refused by name at startup" "$e_rc"
+e2e_status 6 "RADIANCE_RIDGEFILL_PROJ_PLACE=vram: refused by name at startup" "$e_rc"
 
-# ---------------------------------------------------------------- case 7: the kva:on request (parked)
+# ---------------------------------------------------------------- case 7: the ridgefill:on request (parked)
 
 # PARKED with the per-request feature (notes/future/per-request.md): this release selects
 # the mode server-wide only. The case stays behind RK_E2E_STAGE_F=1 and needs the optional
 # chat-template package (a dist built with `tools/package.py --with-template`).
 
 if [ "$RK_E2E_STAGE_F" != 1 ]; then
-    e2e_skipped 7 "--override-chat-template + kva:on request (parked: per-request KVA)" \
-        "PARKED: per-request KVA (Stage F) is saved for a future update (notes/future/per-request.md); set RK_E2E_STAGE_F=1 and build the dist with tools/package.py --with-template to run it"
+    e2e_skipped 7 "--override-chat-template + ridgefill:on request (parked: per-request RidgeFill)" \
+        "PARKED: per-request RidgeFill (Stage F) is saved for a future update (notes/future/per-request.md); set RK_E2E_STAGE_F=1 and build the dist with tools/package.py --with-template to run it"
 else
     e2e_serve 7 off "$E2E_PROJECTOR" "$E2E_TEMPLATE_DIR"
-    printf '%s' '{"model":"m","messages":[{"role":"user","content":"Say OK."}],"max_tokens":8,"temperature":0,"chat_template_kwargs":{"kva":"on"}}' \
+    printf '%s' '{"model":"m","messages":[{"role":"user","content":"Say OK."}],"max_tokens":8,"temperature":0,"chat_template_kwargs":{"ridgefill":"on"}}' \
         > "$E2E_WORK/case7-request.json"
     e_code=$(curl -s -m 900 -o "$E2E_WORK/case7-response.json" -w '%{http_code}' \
         -H 'Content-Type: application/json' -d @"$E2E_WORK/case7-request.json" \
@@ -697,9 +697,9 @@ else
     e2e_stop 7
     e_rc=0
     if [ "$e_code" = 200 ]; then
-        e2e_ev 7 "PASS: the kva:on request succeeded (HTTP 200, response in case7-response.json)"
+        e2e_ev 7 "PASS: the ridgefill:on request succeeded (HTTP 200, response in case7-response.json)"
     else
-        e2e_ev 7 "FAIL: the kva:on request did not succeed (HTTP ${e_code:-none})"
+        e2e_ev 7 "FAIL: the ridgefill:on request did not succeed (HTTP ${e_code:-none})"
         e_rc=1
     fi
     if grep -qi 'marker' "$E2E_LOGS/7.log"; then
@@ -711,7 +711,7 @@ else
         e2e_ev 7 "FAIL: no marker line in logs/7.log"
         e_rc=1
     fi
-    e2e_status 7 "--override-chat-template + kva:on request (parked: per-request KVA)" "$e_rc"
+    e2e_status 7 "--override-chat-template + ridgefill:on request (parked: per-request RidgeFill)" "$e_rc"
 fi
 
 # ---------------------------------------------------------------- the report and the verdict
@@ -722,5 +722,5 @@ if [ "$e_failures" -eq 0 ]; then
     printf 'e2e: ALL CASES PASSED (case 7 skipped does not fail the gate); the release is verified end to end\n'
     exit 0
 fi
-printf 'radiance-kva e2e: FAIL: %s case(s) failed; see %s/e2e-report.json\n' "$e_failures" "$E2E_WORK" >&2
+printf 'radiance-ridgefill e2e: FAIL: %s case(s) failed; see %s/e2e-report.json\n' "$e_failures" "$E2E_WORK" >&2
 exit 1

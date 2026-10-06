@@ -40,6 +40,6 @@ docker run --rm --security-opt label=disable \
     rk_die "build or host tests failed for $short"
 
 cp "$src/build/radiance_home/architectures/qwen4exp_fp8.so" "$home/architectures/"
-cp "$src/build/radiance_home/kernels/kva.so" "$home/kernels/"
+cp "$src/build/radiance_home/kernels/ridgefill.so" "$home/kernels/"
 printf 'home %s (commit %s)\n' "$home" "$(git -C "$RK_REPO" rev-parse "$short")"
-sha256sum "$home/architectures/qwen4exp_fp8.so" "$home/kernels/kva.so"
+sha256sum "$home/architectures/qwen4exp_fp8.so" "$home/kernels/ridgefill.so"

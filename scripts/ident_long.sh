@@ -1,5 +1,5 @@
 #!/bin/sh
-# ident_long.sh -- ident.sh with a LONG prompt (R89): is a server reproducible when KVA approximates the
+# ident_long.sh -- ident.sh with a LONG prompt (R89): is a server reproducible when RidgeFill approximates the
 # prompt? ident.sh's two questions are too short for any approximate chunk; here each question follows a
 # ~30K-token document, so a speed or quality server approximates most of it. One hash per (temperature,
 # question), compared across restarts of the SAME configuration.

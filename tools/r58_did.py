@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""r58_did.py -- R58': does sharing a step with another prompt move a KVA mode's tails more than it
+"""r58_did.py -- R58': does sharing a step with another prompt move a RidgeFill mode's tails more than it
 moves stock's?
 
 Two prefills share a step only at a doc hand-over, and the top-up shifts every later doc's chunk

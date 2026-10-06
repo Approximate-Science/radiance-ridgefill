@@ -5,7 +5,7 @@
  * (tests/kernel_test.cpp). Everything here is compiled -ffp-contract=off, so `x + s*c` rounds
  * twice exactly as the device code does.
  */
-#include "kva.h"
+#include "ridgefill.h"
 
 #include <cmath>
 #include <cstring>
@@ -40,7 +40,7 @@ static int index_rows(const RadTensor* t, int64_t* rows, int64_t* pitch) {
     return RAD_OK;
 }
 
-/* An optional kva_mask `bounds` operand: i32, dense, at least `need` elements; null when absent. */
+/* An optional ridgefill_mask `bounds` operand: i32, dense, at least `need` elements; null when absent. */
 static int optional_bounds(const RadTensor* t, int64_t need, const int32_t** out) {
     *out = nullptr;
     if (!t) return RAD_OK;
@@ -58,8 +58,8 @@ static int parse_mode(const char* s, const char* const* names, int n) {
 }
 
 /* Every check that needs no operand VALUE: cu_last is device memory on the device row, so its
- * order (s <= e <= n) is checked where it is read (kva_mask_window). */
-extern "C" int kva_mask_parse(const RadArgs* a, KvaMask* g) {
+ * order (s <= e <= n) is checked where it is read (ridgefill_mask_window). */
+extern "C" int ridgefill_mask_parse(const RadArgs* a, RidgeFillMask* g) {
     const RadTensor* cu = rad_arg_in(a, MK_CU);
     const RadTensor* tok = rad_arg_in(a, MK_TOKENS);
     const RadTensor* pos = rad_arg_in(a, MK_POS);
@@ -71,7 +71,7 @@ extern "C" int kva_mask_parse(const RadArgs* a, KvaMask* g) {
     g->mode = parse_mode(rad_args_gets(a, "mode"), modes, 5);
     g->share = rad_args_getf_or(a, "share", NAN);
     long long seed = 0;
-    const bool ranked = g->mode == KVA_MODE_CLASS || g->mode == KVA_MODE_RANDOM;
+    const bool ranked = g->mode == RIDGEFILL_MODE_CLASS || g->mode == RIDGEFILL_MODE_RANDOM;
     if (!cu || !tok || !pos || !mask || !bounds || (ranked && !score) || g->mode < 0 ||
         !rad_args_geti(a, "seed", &seed) || !(g->share >= 0.0 && g->share <= 1.0)) return RAD_E_INVAL;
     if (cu->dtype != RAD_I32 || tok->dtype != RAD_I32 || pos->dtype != RAD_I32 ||
@@ -101,7 +101,7 @@ extern "C" int kva_mask_parse(const RadArgs* a, KvaMask* g) {
     return RAD_OK;
 }
 
-extern "C" int kva_rho_parse(const RadArgs* a, KvaRho* g) {
+extern "C" int ridgefill_rho_parse(const RadArgs* a, RidgeFillRho* g) {
     const RadTensor* av = rad_arg_in(a, RH_A);
     const RadTensor* mask = rad_arg_in(a, RH_MASK);
     const RadTensor* alog = rad_arg_in(a, RH_ALOG);
@@ -142,7 +142,7 @@ extern "C" int kva_rho_parse(const RadArgs* a, KvaRho* g) {
     return RAD_OK;
 }
 
-extern "C" int kva_correct_parse(const RadArgs* a, KvaCorrect* g) {
+extern "C" int ridgefill_correct_parse(const RadArgs* a, RidgeFillCorrect* g) {
     const RadTensor* st = rad_arg_in(a, SC_STATE);
     const RadTensor* sidx = rad_arg_in(a, SC_STATE_IDX);
     const RadTensor* ap = rad_arg_in(a, SC_APPLIED);
@@ -194,7 +194,7 @@ extern "C" int kva_correct_parse(const RadArgs* a, KvaCorrect* g) {
     return RAD_OK;
 }
 
-extern "C" int kva_state_read_parse(const RadArgs* a, KvaStateRead* g) {
+extern "C" int ridgefill_state_read_parse(const RadArgs* a, RidgeFillStateRead* g) {
     const RadTensor* st = rad_arg_in(a, SR_STATE);
     const RadTensor* sidx = rad_arg_in(a, SR_STATE_IDX);
     const RadTensor* out = rad_arg_in(a, SR_OUT);
@@ -221,16 +221,16 @@ extern "C" int kva_state_read_parse(const RadArgs* a, KvaStateRead* g) {
 /* The widest word (16, 4 or 1 bytes) that every address, pitch and row width of a pair is a
  * multiple of. The device row copies in such words: a byte at a time would be 16x the loads on a
  * bf16 activation row, the bulk of what the op moves. */
-static int copy_word(const KvaCopy& p) {
+static int copy_word(const RidgeFillCopy& p) {
     const uint64_t all = (uint64_t)(uintptr_t)p.src | (uint64_t)(uintptr_t)p.dst |
                          (uint64_t)p.src_pitch | (uint64_t)p.dst_pitch | (uint64_t)p.row_bytes;
     return all % 16 == 0 ? 16 : (all % 4 == 0 ? 4 : 1);
 }
 
-/* One kva_select pair: present or absent together, one dtype of whole bytes, one row width
+/* One ridgefill_select pair: present or absent together, one dtype of whole bytes, one row width
  * (shape[1]), last stride 1, at least n rows each; the row pitches come off each tensor. */
-static int select_pair(const RadTensor* src, const RadTensor* dst, int64_t n, KvaCopy* p) {
-    *p = KvaCopy{};
+static int select_pair(const RadTensor* src, const RadTensor* dst, int64_t n, RidgeFillCopy* p) {
+    *p = RidgeFillCopy{};
     if (!src && !dst) return RAD_OK;
     if (!src || !dst) return RAD_E_INVAL;
     const int bits = rad_dtype_bits(src->dtype);
@@ -248,14 +248,14 @@ static int select_pair(const RadTensor* src, const RadTensor* dst, int64_t n, Kv
     return RAD_OK;
 }
 
-extern "C" int kva_select_parse(const RadArgs* a, KvaSelect* g) {
+extern "C" int ridgefill_select_parse(const RadArgs* a, RidgeFillSelect* g) {
     const RadTensor* mask = rad_arg_in(a, SL_MASK);
     if (!mask || !rad_arg_in(a, SL_X_SRC) || !rad_arg_in(a, SL_X)) return RAD_E_INVAL;
     if (mask->dtype != RAD_I32) return RAD_E_DTYPE;
     if (!dense(mask)) return RAD_E_STRIDE;
     g->mask = (const int32_t*)mask->data;
     g->n = rad_tensor_numel(mask);
-    for (int k = 0; k < KVA_SELECT_PAIRS; ++k) {
+    for (int k = 0; k < RIDGEFILL_SELECT_PAIRS; ++k) {
         const int rc = select_pair(rad_arg_in(a, SL_X_SRC + k), rad_arg_in(a, SL_X + k), g->n,
                                    &g->pair[k]);
         if (rc != RAD_OK) return rc;
@@ -263,7 +263,7 @@ extern "C" int kva_select_parse(const RadArgs* a, KvaSelect* g) {
     return RAD_OK;
 }
 
-extern "C" int kva_drop_parse(const RadArgs* a, KvaDrop* g) {
+extern "C" int ridgefill_drop_parse(const RadArgs* a, RidgeFillDrop* g) {
     const RadTensor* mask = rad_arg_in(a, DR_MASK);
     const RadTensor* ids = rad_arg_in(a, DR_IDS);
     long long top_k = -1;
@@ -279,59 +279,59 @@ extern "C" int kva_drop_parse(const RadArgs* a, KvaDrop* g) {
     return RAD_OK;
 }
 
-/* ================================================================== kva_mask */
+/* ================================================================== ridgefill_mask */
 
 /* How many rows of the window rank before window row j, by the mode's key. */
-static int64_t mask_ahead(const KvaMask& g, const std::vector<float>& key,
+static int64_t mask_ahead(const RidgeFillMask& g, const std::vector<float>& key,
                           const std::vector<uint32_t>& hash, int64_t j) {
     int64_t ahead = 0;
     for (int64_t m = 0; m < (int64_t)key.size(); ++m)
-        ahead += g.mode == KVA_MODE_CLASS
+        ahead += g.mode == RIDGEFILL_MODE_CLASS
                      ? key[(size_t)m] > key[(size_t)j] || (key[(size_t)m] == key[(size_t)j] && m < j)
                      : hash[(size_t)m] < hash[(size_t)j] || (hash[(size_t)m] == hash[(size_t)j] && m < j);
     return ahead;
 }
 
 /* The rule inside W = [s, end): kept rows 0, every other row 1. */
-static void mask_window_host(const KvaMask& g, int64_t s, int64_t end) {
+static void mask_window_host(const RidgeFillMask& g, int64_t s, int64_t end) {
     const int64_t w = end - s;
     std::vector<float> key((size_t)w, -INFINITY);   /* class: the score, -inf where no match */
     std::vector<uint32_t> hash((size_t)w, 0);       /* random: the row's rank key */
     int64_t matches = 0;
-    const bool ranked = g.mode == KVA_MODE_CLASS || g.mode == KVA_MODE_RANDOM;
+    const bool ranked = g.mode == RIDGEFILL_MODE_CLASS || g.mode == RIDGEFILL_MODE_RANDOM;
     for (int64_t j = 0; j < w && ranked; ++j) {
-        key[(size_t)j] = kva_mask_score(&g, s + j);
-        hash[(size_t)j] = kva_row_hash(g.seed, (uint32_t)g.positions[(s + j) * g.pos_stride]);
+        key[(size_t)j] = ridgefill_mask_score(&g, s + j);
+        hash[(size_t)j] = ridgefill_row_hash(g.seed, (uint32_t)g.positions[(s + j) * g.pos_stride]);
         matches += key[(size_t)j] > -INFINITY ? 1 : 0;
     }
     const int64_t k = (int64_t)std::rint(g.share * (double)matches);   /* half to even */
     for (int64_t j = 0; j < w; ++j) {
-        bool kept = g.mode == KVA_MODE_ALL;
-        if (g.mode == KVA_MODE_CLASS) kept = key[(size_t)j] > -INFINITY && mask_ahead(g, key, hash, j) < k;
-        if (g.mode == KVA_MODE_RANDOM) kept = mask_ahead(g, key, hash, j) < k;
+        bool kept = g.mode == RIDGEFILL_MODE_ALL;
+        if (g.mode == RIDGEFILL_MODE_CLASS) kept = key[(size_t)j] > -INFINITY && mask_ahead(g, key, hash, j) < k;
+        if (g.mode == RIDGEFILL_MODE_RANDOM) kept = mask_ahead(g, key, hash, j) < k;
         g.mask[s + j] = kept ? 0 : 1;
     }
 }
 
-extern "C" int kva_mask_host(const RadArgs* a, RadStream) {
-    KvaMask g{};
-    const int rc = kva_mask_parse(a, &g);
+extern "C" int ridgefill_mask_host(const RadArgs* a, RadStream) {
+    RidgeFillMask g{};
+    const int rc = ridgefill_mask_parse(a, &g);
     if (rc != RAD_OK) return rc;
     int64_t w[3];
-    if (!kva_mask_window(g.cu_last[0], g.cu_last[1], g.b, g.n, w)) return RAD_E_INVAL;
+    if (!ridgefill_mask_window(g.cu_last[0], g.cu_last[1], g.b, g.n, w)) return RAD_E_INVAL;
     for (int64_t i = 0; i < g.n; ++i) g.mask[i] = 0;   /* outside the window: exact */
-    mask_window_host(g, kva_mask_from(g.mode, w), w[1]);
+    mask_window_host(g, ridgefill_mask_from(g.mode, w), w[1]);
     const int32_t bounds[4] = { (int32_t)w[0], (int32_t)w[1], (int32_t)w[1], (int32_t)w[2] };
     std::memcpy(g.bounds, bounds, sizeof bounds);
     for (int64_t i = 0; i < g.n_zeros; ++i) g.zeros[i] = 0;
     return RAD_OK;
 }
 
-/* ================================================================== kva_rho_update */
+/* ================================================================== ridgefill_rho_update */
 
-extern "C" int kva_rho_host(const RadArgs* a, RadStream) {
-    KvaRho g{};
-    const int rc = kva_rho_parse(a, &g);
+extern "C" int ridgefill_rho_host(const RadArgs* a, RadStream) {
+    RidgeFillRho g{};
+    const int rc = ridgefill_rho_parse(a, &g);
     if (rc != RAD_OK) return rc;
     const int32_t slot = g.state_idx[0];
     if (slot < 0 || slot >= g.n_states) return RAD_OK;   /* no slot: nothing to carry */
@@ -339,11 +339,11 @@ extern "C" int kva_rho_host(const RadArgs* a, RadStream) {
         float* nd = g.nd + slot * g.nd_slot + h * g.nd_head;
         float n = nd[0], d = nd[g.nd_inner];
         const float decay = expf(g.a_log[h]);
-        for (int64_t t = kva_rho_first_row(&g); t < g.n; ++t) {
+        for (int64_t t = ridgefill_rho_first_row(&g); t < g.n; ++t) {
             const int64_t at = t * g.a_pitch + h * g.a_col;
-            const float av = g.a_bf16 ? kva_bf16_to_f32(((const uint16_t*)g.a)[at])
+            const float av = g.a_bf16 ? ridgefill_bf16_to_f32(((const uint16_t*)g.a)[at])
                                       : ((const float*)g.a)[at];
-            const float e = expf(-decay * kva_softplus(av + g.dt_bias[h]));
+            const float e = expf(-decay * ridgefill_softplus(av + g.dt_bias[h]));
             d = e * d + 1.0f;
             n = e * n + (float)g.mask[t];
         }
@@ -353,21 +353,21 @@ extern "C" int kva_rho_host(const RadArgs* a, RadStream) {
     return RAD_OK;
 }
 
-/* ================================================================== kva_state_correct */
+/* ================================================================== ridgefill_state_correct */
 
-extern "C" int kva_correct_host(const RadArgs* a, RadStream) {
-    KvaCorrect g{};
-    const int rc = kva_correct_parse(a, &g);
-    if (rc != RAD_OK || !kva_correct_has_bulk(&g)) return rc;
+extern "C" int ridgefill_correct_host(const RadArgs* a, RadStream) {
+    RidgeFillCorrect g{};
+    const int rc = ridgefill_correct_parse(a, &g);
+    if (rc != RAD_OK || !ridgefill_correct_has_bulk(&g)) return rc;
     for (int64_t s = 0; s < g.n_seq; ++s) {
         int64_t st_slot = 0, ap_slot = 0, nd_slot = 0;
-        if (!kva_correct_slots(&g, s, &st_slot, &ap_slot, &nd_slot)) continue;
+        if (!ridgefill_correct_slots(&g, s, &st_slot, &ap_slot, &nd_slot)) continue;
         for (int64_t h = 0; h < g.n_head; ++h) {
             float* applied = g.applied + ap_slot * g.ap_slot + h * g.ap_head;
             float scale = *applied;
             if (g.apply) {
                 const float* nd = g.nd ? g.nd + nd_slot * g.nd_slot + h * g.nd_head : nullptr;
-                scale = g.alpha * (nd ? kva_rho(nd[0], nd[g.nd_inner]) : 1.0f);
+                scale = g.alpha * (nd ? ridgefill_rho(nd[0], nd[g.nd_inner]) : 1.0f);
             }
             float* state = g.state + st_slot * g.st_slot + h * g.st_head;
             const float* c = g.c + h * g.c_head;
@@ -383,11 +383,11 @@ extern "C" int kva_correct_host(const RadArgs* a, RadStream) {
     return RAD_OK;
 }
 
-/* ================================================================== kva_state_read */
+/* ================================================================== ridgefill_state_read */
 
-extern "C" int kva_state_read_host(const RadArgs* a, RadStream) {
-    KvaStateRead g{};
-    const int rc = kva_state_read_parse(a, &g);
+extern "C" int ridgefill_state_read_host(const RadArgs* a, RadStream) {
+    RidgeFillStateRead g{};
+    const int rc = ridgefill_state_read_parse(a, &g);
     if (rc != RAD_OK) return rc;
     for (int64_t s = 0; s < g.n_seq; ++s) {
         const int32_t slot = g.idx[s * g.idx_pitch];
@@ -404,33 +404,33 @@ extern "C" int kva_state_read_host(const RadArgs* a, RadStream) {
     return RAD_OK;
 }
 
-/* ================================================================== kva_select, kva_drop_rows */
+/* ================================================================== ridgefill_select, ridgefill_drop_rows */
 
-extern "C" int kva_select_host(const RadArgs* a, RadStream) {
-    KvaSelect g{};
-    const int rc = kva_select_parse(a, &g);
+extern "C" int ridgefill_select_host(const RadArgs* a, RadStream) {
+    RidgeFillSelect g{};
+    const int rc = ridgefill_select_parse(a, &g);
     if (rc != RAD_OK) return rc;
     for (int64_t i = 0; i < g.n; ++i)
-        for (int k = 0; k < KVA_SELECT_PAIRS && g.mask[i] == 1; ++k) {
-            const KvaCopy& p = g.pair[k];
+        for (int k = 0; k < RIDGEFILL_SELECT_PAIRS && g.mask[i] == 1; ++k) {
+            const RidgeFillCopy& p = g.pair[k];
             /* memmove: a destination may be its own source, which is a no-op copy. */
             if (p.word) std::memmove(p.dst + i * p.dst_pitch, p.src + i * p.src_pitch, (size_t)p.row_bytes);
         }
     return RAD_OK;
 }
 
-extern "C" int kva_drop_host(const RadArgs* a, RadStream) {
-    KvaDrop g{};
-    const int rc = kva_drop_parse(a, &g);
+extern "C" int ridgefill_drop_host(const RadArgs* a, RadStream) {
+    RidgeFillDrop g{};
+    const int rc = ridgefill_drop_parse(a, &g);
     if (rc != RAD_OK) return rc;
     for (int64_t i = 0; i < g.n; ++i)
         for (int64_t j = 0; j < g.top_k && g.mask[i] == 1; ++j) g.ids[i * g.pitch + j] = -1;
     return RAD_OK;
 }
 
-/* ================================================================== kva_hazard */
+/* ================================================================== ridgefill_hazard */
 
-extern "C" int kva_hazard_parse(const RadArgs* a, KvaHazard* g) {
+extern "C" int ridgefill_hazard_parse(const RadArgs* a, RidgeFillHazard* g) {
     const RadTensor* cu = rad_arg_in(a, HZ_CU);
     const RadTensor* pos = rad_arg_in(a, HZ_POS);
     const RadTensor* span = rad_arg_in(a, HZ_SPAN);     /* optional: its extent is T - n_ahead */
@@ -460,11 +460,11 @@ extern "C" int kva_hazard_parse(const RadArgs* a, KvaHazard* g) {
     return RAD_OK;
 }
 
-extern "C" int kva_hazard_host(const RadArgs* a, RadStream) {
-    KvaHazard g{};
-    const int rc = kva_hazard_parse(a, &g);
+extern "C" int ridgefill_hazard_host(const RadArgs* a, RadStream) {
+    RidgeFillHazard g{};
+    const int rc = ridgefill_hazard_parse(a, &g);
     if (rc != RAD_OK) return rc;
     if (g.cu_last[0] < 0 || g.cu_last[0] > g.cu_last[1]) return RAD_E_INVAL;
-    kva_hazard_step(&g);
+    ridgefill_hazard_step(&g);
     return RAD_OK;
 }

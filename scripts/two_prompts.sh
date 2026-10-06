@@ -15,7 +15,7 @@
 #       exact-at-1 shows. RK_FLAGS selects 2048 or 8192.
 #   scripts/two_prompts.sh live <label>
 #       against the server scripts/serve.sh left running (start it with RADIANCE_LOG_STEPS=1 and
-#       RADIANCE_KVA_DUMP=<dir> mounted writable): two RK_LENGTHS prompts in ONE batched request beside
+#       RADIANCE_RIDGEFILL_DUMP=<dir> mounted writable): two RK_LENGTHS prompts in ONE batched request beside
 #       RK_CONC decoders (default 8); the log window's approximate lines with Pn 2 are counted, and
 #       tools/mask_pn2.py <dump dir> checks the dumped mask of every two-prefill step: no row before
 #       the last sequence approximated.
@@ -32,8 +32,8 @@ kl)
 live)
     [ "$#" -eq 2 ] || rk_die "usage: scripts/two_prompts.sh live <label>"
     [ -n "${RK_DOCS:-}" ] && [ -r "$RK_DOCS" ] || rk_die "RK_DOCS is not a readable file: ${RK_DOCS:-unset}"
-    RK_CONTAINER=${RK_CONTAINER:-$(docker ps --filter name=radiance-kva- --format '{{.Names}}' | head -1)}
-    [ -n "$RK_CONTAINER" ] || rk_die "no radiance-kva container is running (scripts/serve.sh first)"
+    RK_CONTAINER=${RK_CONTAINER:-$(docker ps --filter name=radiance-ridgefill- --format '{{.Names}}' | head -1)}
+    [ -n "$RK_CONTAINER" ] || rk_die "no radiance-ridgefill container is running (scripts/serve.sh first)"
     : "${RK_LENGTHS:=32768}" "${RK_CONC:=8}"
     export RK_CONTAINER RK_DOCS RK_LENGTHS RK_CONC
     exec python3 "$RK_TOOLS/conc.py" pair "$2" ;;

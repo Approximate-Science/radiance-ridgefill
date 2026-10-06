@@ -1,4 +1,4 @@
-/* kva_plan.h -- WHAT AN APPROXIMATE PASS IS, decided from numbers alone (model-agnostic).
+/* ridgefill_plan.h -- WHAT AN APPROXIMATE PASS IS, decided from numbers alone (model-agnostic).
  *
  * A pure function: the keyed batch fields the decision may read (radiance core/runtime/ctx.cpp:989-995)
  * and the declare-time configuration, in; the pass plan out. No model type, no device data, no
@@ -31,13 +31,13 @@
  *             remainder cannot repay -- and the decoders riding that step pay it too (Stage B).
  * plumb (the oracle mode) always takes the masked path.
  */
-#ifndef KVA_PLAN_H
-#define KVA_PLAN_H
+#ifndef RIDGEFILL_PLAN_H
+#define RIDGEFILL_PLAN_H
 
 #include <algorithm>
 #include <cstdint>
 
-namespace kva {
+namespace ridgefill {
 
 using namespace rad::arch;
 
@@ -57,7 +57,7 @@ struct PlanIn {
     bool    straddle_ok = false;     /* every late attention layer takes its per-row sparse form */
 };
 
-/* Declare-time numbers (kva_config.h). */
+/* Declare-time numbers (ridgefill_config.h). */
 struct PlanConfig {
     int64_t tail = 2048;             /* T */
     int64_t tile = 64;               /* G: the delta net's chunk */
@@ -119,6 +119,6 @@ inline Pass plan_pass(const PlanIn& in, const PlanConfig& c) {
     return p.path == PATH_MASKED ? p : Pass{};
 }
 
-}  /* namespace kva */
+}  /* namespace ridgefill */
 
-#endif /* KVA_PLAN_H */
+#endif /* RIDGEFILL_PLAN_H */

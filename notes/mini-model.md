@@ -12,22 +12,22 @@ check with the evidence line, and stops at the wall.
 | thing | where (job folder, git-ignored) | time |
 |---|---|---|
 | radiance host-only (`RAD_WITH_HIP=OFF`, `-DRAD_WITH_FFMPEG=OFF`, Release, install prefix inside the tree) | `<job>/build-radiance-host/` | ~4 min (12 cores) |
-| this repo's plugins host-only (`-DRADIANCE_SRC=/var/home/dylan/projects/inference/radiance`) | `<job>/build-host/` (`radiance_home/{architectures/qwen4exp_fp8.so,kernels/kva.so}`) | ~2.5 min |
+| this repo's plugins host-only (`-DRADIANCE_SRC=/var/home/dylan/projects/inference/radiance`) | `<job>/build-host/` (`radiance_home/{architectures/qwen4exp_fp8.so,kernels/ridgefill.so}`) | ~2.5 min |
 | `ctest -LE gpu` on the plugin build | 3/3 passed (`arch_static_test`, `kernel_test`, `rho_ref`) | 1.8 s |
 | the Python tier (`pytest tests -q`, needs no build) | 201 passed, 33 skipped (machine-local data skips, each names its env var) | 12 s |
 | mini checkpoint (`tools/mini_model.py`) | `<job>/mini/ckpt/` | 4.5 s |
 | `rad-convert --plan-only` (namespace gate) | fails only on the op wall below | ~3 s |
 | serving (`--debug-accept-reference-kernels --tp 1 --max-num-batched-tokens 512 --max-model-len 8192`) | exits 1 at declare, both homes | ~2 s |
 
-`kva.so` itself is host-clean: `rad-info --plugins` lists it "7 kernel(s), 7 schema(s), built for
-host", and `kva_gemm_nt_bias` forwards **libref's HOST row** when libr4d is absent
+`ridgefill.so` itself is host-clean: `rad-info --plugins` lists it "7 kernel(s), 7 schema(s), built for
+host", and `ridgefill_gemm_nt_bias` forwards **libref's HOST row** when libr4d is absent
 (kernels/forward.cpp), so the plugin's own kernel side is not the blocker. The blocker is the
 in-tree architecture it must include.
 
 ## 2. The mini model (`tools/mini_model.py`): exact dimensions
 
 An HF-format checkpoint with the published container's source config (the `Qwen/Qwen3.8-Flash-Next`
-config that radiance-kva's data/stub records) scaled down, and **the real tokenizer files**
+config that radiance-ridgefill's data/stub records) scaled down, and **the real tokenizer files**
 (tokenizer.json: 248077 tokens / 247587 merges; marker ids 248044-248057 all exist).
 
 | kept (the architecture's identity) | value |
@@ -65,12 +65,12 @@ folder's `encodings` fingerprint compares -- is the same w4nl64a8h as the publis
 ## 3. What the mini run CAN and CANNOT test
 
 CAN and does (no GPU): the host-only builds of both trees; `ctest -LE gpu` (the graph/issue
-oracle against the in-tree plugin, the kva.so host rows against the fixture, rho's numpy oracle);
-the whole Python tier; the plugin's own host kernel path (`kva.so` built for host, its
-`kva_gemm_nt_bias` forwarding libref's host row); the checkpoint/recipe namespace gates.
+oracle against the in-tree plugin, the ridgefill.so host rows against the fixture, rho's numpy oracle);
+the whole Python tier; the plugin's own host kernel path (`ridgefill.so` built for host, its
+`ridgefill_gemm_nt_bias` forwarding libref's host row); the checkpoint/recipe namespace gates.
 
 CANNOT (blocked before any of it runs): live CPU serving of ANY qwen4exp model -- stock home or
-plugin home, `RADIANCE_KVA` off/speed/quality, `--tp 1` or `--tp 2` (the same declare runs, so
+plugin home, `RADIANCE_RIDGEFILL` off/speed/quality, `--tp 1` or `--tp 2` (the same declare runs, so
 host-only tp 2 is untestable and would not pass either); the mini `.rad` container (rad-convert
 dies at the same declare); the projector folder and its loader (`tools/dev/mini_projector.py` --
 unwritable without a container to fingerprint, and untestable without serving); every
@@ -111,7 +111,7 @@ resolve ops against the kernel registry, which is why this never surfaced.
 2. The QSA chain needs real host rows (`qsa_*`) or a no-indexer config accepted for the mini --
    which loses the straddle path's "per-row sparse gated form" but keeps masked/quality.
 3. Then: `tools/dev/mini_projector.py` (the manifest/fingerprint code is a direct port of
-   tools/kva_projector.py's, reading the mini container), split at layer 4 (half of 8, a group
+   tools/ridgefill_projector.py's, reading the mini container), split at layer 4 (half of 8, a group
    boundary, past PLE's layer 1), and the step-3/4 checks as specified.
 
 Nothing in this repo was changed to work around the wall: the plugin, the kernel library, the

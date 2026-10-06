@@ -2,7 +2,7 @@
 
 Worker: account-B Opus 5.5, worktree `radiance-kva-wt-b`, branch `stage-b` (rebased on main `02b674e`:
 the guard streams every masked pass by default, 0d75987). radiance `140987f` (v1.0.8), read only.
-Model: the PUBLISHED container (`0af5e962…4d20`, no kva.* inside); projector folder
+Model: the PUBLISHED container (`0af5e962…4d20`, no ridgefill.* inside); projector folder
 `~/models/rad/projector/` found by discovery. Boot `75e3e39b-cc5b-49de-8087-a4791f372a92` (KL
 reference `data/kld/ref-stage0` valid). Plan: fix-246 HANDOVER-FIX §3, PLAN-FIX §3/§8, REQUIREMENTS-FIX
 R53′–R61, REFUTATION §3. Labbook predictions HB-R54-text … HB-R60-spec (seq 368–374) registered
@@ -11,15 +11,15 @@ before any engine run.
 ## 1. What Stage A already had, and what Stage B added
 
 Stage A built the mixed-step mechanism the plan asks for (notes/impl.md §1, §3): the decode half
-issued verbatim over `[0, DT)` with `num_accepted` (`arch/kva_layer.h` `gdn_decode_half`), the
+issued verbatim over `[0, DT)` with `num_accepted` (`arch/ridgefill_layer.h` `gdn_decode_half`), the
 other prefill sequences' scan as stock (`gdn_prefill_scans`, `P > 1`), the correction and decay
 sums on index row `n_seq − 1` with M = 1 (`last_slot`), the device mask that only ever marks rows
 of the last sequence's window `[s, b)`. Stage B adds no serving mechanism. It adds:
 
 | commit | what | why |
 |---|---|---|
-| `a0ce022` | kernels: `kva_mask` mode `step` (mask 1 on `[0, b′)` when the window is not empty; bounds keep `s`) | R54's negative control: a gate that says "decoders unchanged" must be shown able to fail |
-| `1252304` | arch: `RADIANCE_KVA_MASK=all` (declares the mask op in `step` mode, projector from row 0, refused in plumb, said loudly); R53′ static set; `RADIANCE_KVA_CAPTURE_STATE` on MIXED steps (every sequence's late delta-net states after the step, `mixed.jsonl` + one `.npy` a step and rank) | R53′, R54, R61 |
+| `a0ce022` | kernels: `ridgefill_mask` mode `step` (mask 1 on `[0, b′)` when the window is not empty; bounds keep `s`) | R54's negative control: a gate that says "decoders unchanged" must be shown able to fail |
+| `1252304` | arch: `RADIANCE_RIDGEFILL_MASK=all` (declares the mask op in `step` mode, projector from row 0, refused in plumb, said loudly); R53′ static set; `RADIANCE_RIDGEFILL_CAPTURE_STATE` on MIXED steps (every sequence's late delta-net states after the step, `mixed.jsonl` + one `.npy` a step and rank) | R53′, R54, R61 |
 | `58ac8d4` | `scripts/conc.sh` (ttft = fnconc both halves + log windows; text = deterministic tiercross), `scripts/two_prompts.sh` (R58′: KL at `--max-num-seqs 2`, live pair + 8 decoders), `tools/conc_steps.py` (R57), `tools/state_compare.py` (R61), `tools/mask_pn2.py` (R58′); `mask.jsonl` gains `n_seq`/`n_seq_decode`; `grade.sh` `RK_KLD_SEQS` | the engine gates |
 | `02058bb` | conc.py reads labelled metrics | `wait_idle` would not have waited |
 
@@ -54,7 +54,7 @@ Mutants (scratch copy `/tmp/stageb-mut`, `evidence/stageB/sessions/mutate_b.py`,
 ```
 B1 correction over every sequence            B2 correction on index row 0
 B3 decode half skipped                       B4 decode half without num_accepted
-B5 decode half depth from max_q_len          B6 kva_drop_rows omitted
+B5 decode half depth from max_q_len          B6 ridgefill_drop_rows omitted
 B7 stager probes omitted (the plan's "stock down handle" mutant; the alternate handle is not
    declarable, notes/impl.md §2)             B8 projector from the decode rows (s_lb = DT)
 B9 other prefill's scan dropped              B10 conv/kkt over the decode rows' cu
@@ -66,13 +66,13 @@ K1 step mode from s (host row)               K2 step mode from 0 on an empty win
 
 ## 3. Engine gates
 
-(results below as they land; frozen home `data/home-58ac8d4`: arch 3ce44304…, kva.so 9d80ee76…)
+(results below as they land; frozen home `data/home-58ac8d4`: arch 3ce44304…, ridgefill.so 9d80ee76…)
 
 ### Session 1 -- correctness (2026-10-05 10:08-10:23Z; `evidence/stageB/session1.log`, script `sessions/s1.sh`)
 Boot 75e3e39b…, model 121,969,901,568 B (published), image stilldeadcode/radiance:1.0.8, RK_FLAGS of
 scripts/common.sh, `RADIANCE_LOG_STEPS=1` on every server. Kernel log clean before and after.
 
-- **kva_mask device leg** (card 0000:13:00.0, `ROCR_VISIBLE_DEVICES=1`, "device 0 of 1 visible, PCI
+- **ridgefill_mask device leg** (card 0000:13:00.0, `ROCR_VISIBLE_DEVICES=1`, "device 0 of 1 visible, PCI
   0000:13:00.0"): 240 configurations (192 before + 48 `step`) device mask and bounds == host; 1,076
   checks; ctest gpu 1/1.
 - **R6/R7 green**: off @ 58ac8d4, ident.sh = R3's six hashes (dc7115567e4d85e4 baba87f4bfdebdca /
@@ -89,21 +89,21 @@ scripts/common.sh, `RADIANCE_LOG_STEPS=1` on every server. Kernel log clean befo
 |---|---|---|
 | speed (180 approximate steps, all masked/stream) | **20 / 20** (D=1 ×3, D=4 ×3 = 15 concurrent + 5 solo) | differs (it is approximated) |
 | quality (180, masked/stream) | **20 / 20** | differs |
-| quality + `RADIANCE_KVA_MASK=all` (negative control, 60) | **0 / 5 concurrent** (diverge after 0-2 characters); 5/5 solos identical (no prefill beside them) | differs |
+| quality + `RADIANCE_RIDGEFILL_MASK=all` (negative control, 60) | **0 / 5 concurrent** (diverge after 0-2 characters); 5/5 solos identical (no prefill beside them) | differs |
 
   The control proves the gate can fail, and fails hard. "Equals A solo except where ident.sh's header
   allows": **stock itself** gives a decoder a different text beside a 32K prefill than alone -- off
   concurrent vs off solo share 0 / 0 / 462 / 14 characters (D=4 decoders 0-3), the first divergence
-  at the first generated token after `Answer:` (`' '` vs `'\n'`, both continuations sensible). KVA
+  at the first generated token after `Answer:` (`' '` vs `'\n'`, both continuations sensible). RidgeFill
   changes none of it (its texts equal off's concurrent AND off's solo texts byte for byte).
   **Session 1b (10:24-10:26Z) confirms it is the stock engine's own**: `exact` (the image's plugin
   home, nothing of ours mounted), same arrangement: D=1 `a1fb40bb…`, D=4 `bd6ac2fc… 35b2d8e6… cd60a13d…
   3807e191…`, solos `2a82de60… 6ea5a478… 130b1312… 570771a1…` -- the same hashes as off, speed and
   quality. (Reading the first token's margin was not possible: this build's sampler refuses
   `logprobs`, HTTP 400.) Whether a first-token flip between M = 21 and M = 2,005 is a "defect" in the
-  ident header's sense is a stock-engine question; KVA's bar -- identical to off in the same
+  ident header's sense is a stock-engine question; RidgeFill's bar -- identical to off in the same
   arrangement -- holds byte for byte.
-- **R61 green** (`RADIANCE_KVA_CAPTURE_STATE` on mixed steps, D = 1, 1 rep a mode; captures
+- **R61 green** (`RADIANCE_RIDGEFILL_CAPTURE_STATE` on mixed steps, D = 1, 1 rep a mode; captures
   `data/stageB/r61-{off,quality,speed}`, 10 GB): off logged 31 MIXED steps; all 31 × 2 ranks matched
   by key in quality and in speed:
 
@@ -126,7 +126,7 @@ every slot, the long prompt QUEUES until they finish (8,144 decode-only steps) a
 -- its prompt_ms is a solo number filed as C = 8. That run is kept in `evidence/stageB/invalid-seqs8/`;
 conc.py now refuses a rep with no mixed step or > 2 s queued (642c43b).
 
-| arm | length | C | prompt_ms | speedup vs exact | **R55**: speedup(C)/speedup(0) | decoder gap median, prefill (ms) | **R56** KVA/exact median gap |
+| arm | length | C | prompt_ms | speedup vs exact | **R55**: speedup(C)/speedup(0) | decoder gap median, prefill (ms) | **R56** RidgeFill/exact median gap |
 |---|---|---|---|---|---|---|---|
 | exact | 16K | 0 / 1 / 4 / 8 | 9,633 / 10,041 / 10,222 / 10,301 | 1 | | - / 64.6 / 77.8 / 92.3 | |
 | exact | 32K | 0 / 1 / 4 / 8 | 19,382 / 20,239 / 20,515 / 20,660 | 1 | | - / 72.0 / 86.6 / 99.7 | |
@@ -149,7 +149,7 @@ conc.py now refuses a rep with no mixed step or > 2 s queued (642c43b).
 
 Decoders' longest and p90 gaps during the prefill (median over the settled reps):
 
-| arm | 16K C 1 / 4 / 8: p90 ms (KVA / exact) | 16K max ms (KVA / exact) | 32K p90 | 32K max |
+| arm | 16K C 1 / 4 / 8: p90 ms (RidgeFill / exact) | 16K max ms (RidgeFill / exact) | 32K p90 | 32K max |
 |---|---|---|---|---|
 | quality | 706/1,199 · 787/1,211 · 843/1,210 | 1,371/1,211 · 1,389/1,217 · 1,394/1,219 | 657/1,211 · 735/1,219 · 759/1,221 | 1,347/1,218 · 1,368/1,224 · 1,373/1,229 |
 | speed | 524/1,199 · 575/1,211 · 608/1,210 | 1,365/1,211 · 1,385/1,217 · 1,389/1,219 | 445/1,211 · 487/1,219 · 501/1,221 | 1,342/1,218 · 1,365/1,224 · 1,365/1,229 |
@@ -157,11 +157,11 @@ Decoders' longest and p90 gaps during the prefill (median over the settled reps)
 Reading:
 - **R55 RED.** Speed keeps 0.67-0.81 of its solo speedup with ANY decoder beside it (prediction
   HB-R55-speed: ~0.75-0.85, confirmed in direction; slightly worse). Mechanism (by construction,
-  `kva_plan.h`): the lean fill needs `D == 0`; one decoder moves every bulk chunk onto the masked path,
+  `ridgefill_plan.h`): the lean fill needs `D == 0`; one decoder moves every bulk chunk onto the masked path,
   which runs every late block over all rows. Quality keeps 0.956 at C = 1 but 0.85-0.89 at C = 4 and 8
   (prediction 0.95-1.0: refuted). The long prompt is still 1.34-2.30x faster than stock in every cell.
 - **R56: medians green, the longest stall red.** Decoders' median and p90 gaps during the prefill are
-  at or below stock's (KVA steps are shorter); but their single longest gap is +10-14% (1,342-1,394 vs
+  at or below stock's (RidgeFill steps are shorter); but their single longest gap is +10-14% (1,342-1,394 vs
   1,211-1,229 ms) in every cell. Leading suspect (to test, session 2c): the prompt's last chunks run the
   stock step on an ON server, which holds ~1.2 GiB less expert VRAM a card (A.1's residual) -- see 2b.
 - **R57 GREEN** (`tools/conc_steps.py`, every rep of quality and speed): every chunk the rule
@@ -181,7 +181,7 @@ Reading:
   exact's 39.0 -> 52.4 ms. Short (64-row) steps: exact 185 ms, quality 211 ms a step (all ops, profiled).
   Profiled times do not compare across arms (profiling restores synchronisations; quality's big step
   reads 671 ms profiled while it is the FASTER arm unprofiled), so session 2c times steps unprofiled.
-- The stager-lever-off arm (`RADIANCE_KVA_STAGE=stock`) cannot test it: with the lever off the
+- The stager-lever-off arm (`RADIANCE_RIDGEFILL_STAGE=stock`) cannot test it: with the lever off the
   never-slower guard sends every masked pass to the stock step (0 approximate steps). What it did
   measure: **an ON (quality) server running every chunk exact takes 11.6 s at 16K vs the stock server's
   9.6 s (+20%)** -- A.1's projector-VRAM residual (fewer resident experts, bigger staging buffers),
@@ -196,7 +196,7 @@ step's other 1,024 rows to the next doc's first chunk (12 two-prefill steps a ru
 **Second attempt (12:41Z) aborted on a lane breach** -- see "Incident" below.
 
 KL half: `scripts/two_prompts.sh kl` (= grade.sh at `--max-num-seqs 2`), every candidate
-`RADIANCE_KVA_SCORE_BULK=1`. "s1/s2" = `--max-num-seqs` 1/2. Scoring `scripts/kl_tail.py`; R58′'s test
+`RADIANCE_RIDGEFILL_SCORE_BULK=1`. "s1/s2" = `--max-num-seqs` 1/2. Scoring `scripts/kl_tail.py`; R58′'s test
 `tools/r58_did.py`: per doc, (mode s2 − s1) − (exact s2 − s1), bootstrap 95% over the 9 docs.
 
 | chunk | run | approx. steps (Pn 2) | dNLL vs stock ref, last 512 | KL | top-1 |
@@ -224,7 +224,7 @@ Reading:
   whole tail is then BETTER than solo (−0.0145, CI excludes 0) -- the design's "every other row
   exact", paid in speed, not a defect.
 - Live half, 2,048 (`two_prompts.sh live`, two 32K prompts in one request beside 8 decoders, `--max-num-seqs
-  10`, `RADIANCE_KVA_DUMP`): 45 approximate steps, **16 with Pn 2**; `tools/mask_pn2.py`: **0 rows before
+  10`, `RADIANCE_RIDGEFILL_DUMP`): 45 approximate steps, **16 with Pn 2**; `tools/mask_pn2.py`: **0 rows before
   the last sequence approximated** on all 16 (e.g. n_tok 1,992, s = 72, window 1,838/1,920 approximated --
   the 8 decoder rows and the 64 rows of the other prompt all exact).
 - Live half, 8,192: the quality server (projector in VRAM) **refused to start** at `--max-num-batched-tokens
@@ -233,8 +233,8 @@ Reading:
   starts at those flags and runs the arm with the projector in host memory.
 
 **Incident (12:41Z, reported to the coordinator).** My session took the GPU lock while Stage E's
-`radiance-kva-quality` server was still up on port 8100; my KL runs failed on the port (no GPU work), and
-the session's cleanup (`scripts/stop.sh`, which stops every `radiance-kva-*` container) stopped THEIR
+`radiance-ridgefill-quality` server was still up on port 8100; my KL runs failed on the port (no GPU work), and
+the session's cleanup (`scripts/stop.sh`, which stops every `radiance-ridgefill-*` container) stopped THEIR
 server mid-measurement. Every Stage B session now refuses to start anything, and exits, if any radiance
 container is up when it holds the lock (`guard()` in `sessions/s{2c,3,3b,4}.sh`).
 
@@ -243,10 +243,10 @@ container is up when it holds the lock (`guard()` in `sessions/s{2c,3,3b,4}.sh`)
   start** (health OK); **quality with the projector in VRAM refuses to start** ("DID NOT FIT 461 x
   blk.*.ffn_gate_up_exps (554.94 MiB): the host pool is full and no --weights-disk-tier was given").
   The 1.2 GiB a card the VRAM projector holds turns a configuration stock serves into one that does not
-  start -- by name, and `RADIANCE_KVA_PROJ_PLACE=host` (or `--weights-disk-tier`, or a larger
+  start -- by name, and `RADIANCE_RIDGEFILL_PROJ_PLACE=host` (or `--weights-disk-tier`, or a larger
   `--host-pool-mib`) serves it. Finding for the placement trade (Stage E / DD-I), not a Stage B
   mechanism; reported.
-- Live pair at 8,192 with `RADIANCE_KVA_PROJ_PLACE=host`: 15 approximate steps, **all 15 with Pn 2**
+- Live pair at 8,192 with `RADIANCE_RIDGEFILL_PROJ_PLACE=host`: 15 approximate steps, **all 15 with Pn 2**
   (n_tok 4,104 = 8 decoders + the first prompt's 2,048-row chunk + the second's); `mask_pn2.py`: **0 rows
   before the last sequence approximated** (window 1,922-1,955 of 2,048 approximated: quality's class rows).
 
@@ -324,14 +324,14 @@ windows each, after a warm pass):
 
 An ON server with the projector in VRAM decodes exactly like stock; session 2's 2-second "alone" gaps
 were noise. With the projector in host memory, decode at C = 8 is +87% in the first window and +8.7%
-after -- a decode-only step runs no KVA op, so this is the placement's effect on the expert tiers (host
+after -- a decode-only step runs no RidgeFill op, so this is the placement's effect on the expert tiers (host
 pool / SSD), Stage E's to explain; reported.
 
 ### Session 5 -- R55 quality, interleaved, both lengths (14:21-15:1xZ; `session5.log`)
 Same instrument as 2c (rep-major, 6 reps reading 3-6, warmed, `--max-num-seqs 9`), C = 0 / 1 / 4 / 8,
 16K and 32K, exact vs quality (VRAM placement).
 
-| length | exact prompt_ms C 0/1/4/8 | quality prompt_ms C 0/1/4/8 | speedup C 0 | **R55 ratio C 1 / 4 / 8** | R56 KVA/exact median gap C 1 / 4 / 8 |
+| length | exact prompt_ms C 0/1/4/8 | quality prompt_ms C 0/1/4/8 | speedup C 0 | **R55 ratio C 1 / 4 / 8** | R56 RidgeFill/exact median gap C 1 / 4 / 8 |
 |---|---|---|---|---|---|
 | 16K | 9,703 / 10,129 / 10,222 / 10,278 | 7,190 / 7,762 / 7,939 / 8,136 | 1.350 [1.327, 1.359] | **0.967 / 0.954 / 0.936** | 1.51 [1.29, 1.57] / 1.41 [1.08, 1.65] / 1.27 [1.01, 1.59] |
 | 32K | 19,415 / 20,317 / 20,578 / 20,998 | 12,572 / 13,619 / 14,143 / 14,799 | 1.544 [1.520, 1.551] | **0.966 / 0.942 / 0.919** | 1.45 [1.23, 1.50] / 1.26 [0.98, 1.44] / 1.09 [0.86, 1.57] |
@@ -369,10 +369,10 @@ here), acceptance within the round-to-round spread of each arm.
 
 ## 4. Decisions of 15:10Z (Dylan via the orchestrator) and what was built
 
-- **R55 speed: option (A), "decoders full, bulk lean"** -- 173dfc4. `PATH_DECODERS` in `kva_plan.h`: speed,
+- **R55 speed: option (A), "decoders full, bulk lean"** -- 173dfc4. `PATH_DECODERS` in `ridgefill_plan.h`: speed,
   one prefill entry whose chunk is all bulk, decoders beside, every late attention layer on the per-row
   sparse form (`straddle_ok`), the stager lever on, not `MASK=all`. Per late layer (`decoders_layer`,
-  `kva_layer.h`): the bulk rows [DT, n) get the lean pieces (projector from the layer-S stream + codes,
+  `ridgefill_layer.h`): the bulk rows [DT, n) get the lean pieces (projector from the layer-S stream + codes,
   K/V or the delta net's projections + corrected scan); the decoder rows [0, DT) get the in-tree layer
   over that range with the in-tree helpers' r0/rows -- connection read/write, attention per row (the
   query path over every row, as A.1's straddle: an M-RoPE plane cannot be column-sliced), the delta
@@ -385,7 +385,7 @@ here), acceptance within the round-to-round spread of each arm.
   D1-D12 all caught (`evidence/stageB/mutants-decoders.txt`; D6 "decoders path in quality" needed a
   planner-level case, as A.1's A10 did).
 - **Gate 1's instrument** -- fd9e174. The server refuses `logprobs` (HTTP 400), so
-  `RADIANCE_KVA_DUMP_LOGITS=<dir>` (debug, read at declare, any mode incl. off, issues nothing) dumps
+  `RADIANCE_RIDGEFILL_DUMP_LOGITS=<dir>` (debug, read at declare, any mode incl. off, issues nothing) dumps
   each live pass's logits rows on every rank with each row's sequence/position/token;
   `tools/logit_capture.py` sends the batched arrangement and each decoder alone and records which dump
   lines belong to which request; `tools/logit_compare.py` gives a decoder's per-token KL(A||B) and top-1
@@ -397,10 +397,10 @@ here), acceptance within the round-to-round spread of each arm.
 - Prediction HB-R55-speedA registered before any run (labbook seq 418).
 
 ### Session 7a / 8a -- R6/R7 and gate 1 for the decoders path (15:39-16:05Z; home `data/home-fd9e174`:
-### arch fceea9dd…, kva.so 9d80ee76…; host placement from 15:40Z, Dylan: the VRAM placement is removed)
+### arch fceea9dd…, ridgefill.so 9d80ee76…; host placement from 15:40Z, Dylan: the VRAM placement is removed)
 - **R6/R7 green at fd9e174**: off ident = R3's six hashes (`ident-off-fd9e174.txt`, session 7a; 7a was then
   stopped and its captures rerun with host placement as session 8a).
-- **Gate 1 (session 8a)**: `--profile-ops` servers with `RADIANCE_KVA_DUMP_LOGITS`, `RADIANCE_KVA_PROJ_PLACE=host`;
+- **Gate 1 (session 8a)**: `--profile-ops` servers with `RADIANCE_RIDGEFILL_DUMP_LOGITS`, `RADIANCE_RIDGEFILL_PROJ_PLACE=host`;
   one request [4 decoders, 32K prompt] (128 tokens) + each decoder alone. Speed took the decoders path on 14
   of its 15 approximate steps (1 masked: the step where the decoders' prompts are prefilled beside the
   first chunk -- no decoder is decoding yet, Pn 5). `tools/logit_compare.py` follows each decoder as a
@@ -424,7 +424,7 @@ here), acceptance within the round-to-round spread of each arm.
 ### Session 8b/8c/8e -- R55 / R56 / R57 on the deployed configuration (projector in host memory, guard
 ### 1,024 bulk rows), home `data/home-fd9e174`, interleaved, 6 reps reading 3-6 (16:00-17:10Z)
 
-| arm | length | C 0 / 1 / 4 / 8 prompt_ms | solo speedup | **R55 ratio C 1 / 4 / 8** | decoder gap median, KVA / exact (ms) C 1/4/8 | longest gap KVA / exact (ms) |
+| arm | length | C 0 / 1 / 4 / 8 prompt_ms | solo speedup | **R55 ratio C 1 / 4 / 8** | decoder gap median, RidgeFill / exact (ms) C 1/4/8 | longest gap RidgeFill / exact (ms) |
 |---|---|---|---|---|---|---|
 | exact | 16K | 9,696 / 10,127 / 10,222 / 10,336 | 1 | | 66 / 81 / 101 | 1,213 |
 | exact | 32K | 19,418 / 20,304 / 20,585 / 21,184 | 1 | | 76 / 90 / 130 | 1,219-1,226 |

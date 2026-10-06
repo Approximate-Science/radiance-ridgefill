@@ -1,26 +1,26 @@
-/* kva_hazard.h -- DD-A's exact branch-hazard instrument (PLAN-FIX §5.4; Stage C, R65/R68).
+/* ridgefill_hazard.h -- DD-A's exact branch-hazard instrument (PLAN-FIX §5.4; Stage C, R65/R68).
  *
  * A request resuming from a prefix-cache checkpoint that a LONGER request wrote may find some of its
  * exact-tail positions were approximated by that producer (the branch-shorter case, §5.2). Each
  * sequence carries a LINEAR meta slot -- zeroed at admission, snapshotted with every checkpoint because
  * the group is bound to a late layer (radiance core/mem/kv.cpp:1449-1486) -- holding its last
- * approximated position; kva_hazard (kva.so) records it on every approximate pass and, on a pass whose
+ * approximated position; ridgefill_hazard (ridgefill.so) records it on every approximate pass and, on a pass whose
  * last sequence still has tail ahead (span = T - n_ahead > 0, keyed), counts the tail positions before
  * the pass that the restored slot says were approximated, once, into a host-mapped counter. Rank 0 logs
  * the counter when it moves, on a LATER step: it is read for the log only, never for an issue (R99).
  * Speed and quality only; plumb, which approximates nothing, and off declare none of it.
  */
-#ifndef KVA_HAZARD_H
-#define KVA_HAZARD_H
+#ifndef RIDGEFILL_HAZARD_H
+#define RIDGEFILL_HAZARD_H
 
-namespace kva {
+namespace ridgefill {
 
 using namespace rad::arch;
 
 /* After the step: count (span > 0) and, on an approximate pass, record. The last bulk position comes
- * from kva_mask's bounds {s, b'} on the masked, straddle and decoders paths, and is the chunk's last
+ * from ridgefill_mask's bounds {s, b'} on the masked, straddle and decoders paths, and is the chunk's last
  * row on the lean path, whose whole chunk is bulk ({s, e} itself). */
-static void hazard_issue(RadCtx* c, const Kva& k, const RadBatch* batch, const Pass& p) {
+static void hazard_issue(RadCtx* c, const RidgeFill& k, const RadBatch* batch, const Pass& p) {
     if (!k.op_hazard || !g_hazard_dev[rad_rank(c)] || batch->enc || batch->draft_pass) return;
     int64_t D = 0, DT = 0;
     batch_split(batch, &D, &DT);
@@ -41,11 +41,11 @@ static void hazard_log(RadCtx* c) {
     if (r != 0 || !g_hazard_dev[r]) return;
     const float* h = (const float*)rad_dev_host_ptr(g_hazard_dev[r]);
     if (!h || *h == g_hazard_logged[r]) return;
-    std::fprintf(stderr, "radiance: %s: kva: hazard %lld positions (total %lld)\n", g_log_name,   /* tools/hazard_rate.py HAZARD_LOG_RE */
+    std::fprintf(stderr, "radiance: %s: ridgefill: hazard %lld positions (total %lld)\n", g_log_name,   /* tools/hazard_rate.py HAZARD_LOG_RE */
                  (long long)(*h - g_hazard_logged[r]), (long long)*h);
     g_hazard_logged[r] = *h;
 }
 
-}  /* namespace kva */
+}  /* namespace ridgefill */
 
-#endif /* KVA_HAZARD_H */
+#endif /* RIDGEFILL_HAZARD_H */

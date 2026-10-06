@@ -5,7 +5,7 @@ weights, as an HF-format checkpoint rad-convert turns into a .rad container (not
   mini_model.py --out DIR [--real-config DIR] [--tokenizer DIR] [dims...]
 
 WHY. The plugin's correctness gates must run with no GPU, and the real model is 122 GB: this builds
-the smallest checkpoint the ARCHITECTURE accepts (radiance arch/qwen4exp_fp8, which arch/qwen4exp_kva.cpp
+the smallest checkpoint the ARCHITECTURE accepts (radiance arch/qwen4exp_fp8, which arch/qwen4exp_ridgefill.cpp
 shadows) so `radiance --debug-accept-reference-kernels` can serve it on the host backend.
 
 WHAT IS KEPT (the architecture's identity -- see notes/mini-model.md for the full table):

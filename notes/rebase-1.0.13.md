@@ -2,7 +2,7 @@
 
 Branch `rebase-1.0.13` from main f704bd9 (= the merged split), worktree `radiance-kva-wt-b`.
 radiance 1.0.13 = commit **d0f639bd** (tag object 53282fa); 1.0.8 = 140987f. Source:
-`<radiance-kva>/data/radiance-src-1.0.13` (read-only; every abi/ and arch/ file and tests/rad_test.h
+`<radiance-ridgefill>/data/radiance-src-1.0.13` (read-only; every abi/ and arch/ file and tests/rad_test.h
 byte-identical to `git show v1.0.13:<file>` in the radiance checkout -- checked, 0 differ).
 
 ## What 1.0.9-1.0.13 changed that the plugin sees (`git diff v1.0.8 v1.0.13 -- abi/ arch/`)
@@ -19,7 +19,7 @@ No abi/ change (ABI 15.0.0 at both). In arch/:
 | rad_arch.h: `vocab_per_rank` (block-aligned ceil where the world does not divide), geom_from flag | 1.0.13 | n_vocab fact reads `m.g.n_vocab`, which is this rank's either way | nothing to port |
 | rad_block_ple.h: n-gram placement (device gather) | 1.0.10/11 | comments + buffer domain wording only; the adapter calls `ple.ids`/`ple.step` | nothing to port |
 | rad_block_gdn_fp8.h, rad_block_attn_gated_fp8.h, rad_qsa.h | -- | unchanged: the blocks/fill copies and their line citations hold | stamps say "1.0.8 through 1.0.13" |
-| libr4d / libref rows kva.so forwards (gemm_nt_bias, gemm_nt_q i8a8, quant_act_i8g, cast, add) | -- | no diff line mentions them; kva_kernels_host passes against 1.0.13's libref | -- |
+| libr4d / libref rows ridgefill.so forwards (gemm_nt_bias, gemm_nt_q i8a8, quant_act_i8g, cast, add) | -- | no diff line mentions them; ridgefill_kernels_host passes against 1.0.13's libref | -- |
 
 1.0.12's conv-state slot fix and the --num-speculative-tokens 0 audit fix are core-side (core/); the
 plugin touches neither the conv slot's width nor the all-reduce argument struct.
@@ -46,17 +46,17 @@ plugin touches neither the conv slot's width nor the all-reduce argument struct.
   them apart), **scripts/ident.sh** (provenance), **docs/release/PLUGIN-README.md** (1.0.8 -> 1.0.13).
 - The build needs no source change to point at 1.0.13: CMake reads the release from RADIANCE_SRC's
   project(VERSION), requires the installed engine to carry it and every installed abi/arch header to
-  be byte-identical to RADIANCE_SRC's; the guard's KVA_RADIANCE_VERSION comes from the same variable.
+  be byte-identical to RADIANCE_SRC's; the guard's RIDGEFILL_RADIANCE_VERSION comes from the same variable.
   This branch does NOT build against 1.0.8 (MoeFP8::ncls is 1.0.10's).
 
 ## Host build and checks
 
 ```
-cmake -S <radiance-kva>/data/radiance-src-1.0.13 -B build-radiance-1.0.13-host -DRAD_WITH_HIP=OFF \
+cmake -S <radiance-ridgefill>/data/radiance-src-1.0.13 -B build-radiance-1.0.13-host -DRAD_WITH_HIP=OFF \
       -DRAD_WITH_FFMPEG=OFF -DRAD_BUILD_TESTS=OFF -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_INSTALL_PREFIX=$PWD/build-radiance-1.0.13-host/install      # ~12 min, -j4 nice 19
 cmake -S . -B build-host-1.0.13 -DCMAKE_PREFIX_PATH=$PWD/build-radiance-1.0.13-host/install \
-      -DRADIANCE_SRC=<radiance-kva>/data/radiance-src-1.0.13 -DRAD_WITH_HIP=OFF
+      -DRADIANCE_SRC=<radiance-ridgefill>/data/radiance-src-1.0.13 -DRAD_WITH_HIP=OFF
 ```
 Configure: "radiance 1.0.13: RADIANCE_SRC and .../bin/radiance agree"; headers identical.
 ctest -LE gpu **5/5**; arch_static **66 cases / 1,144,062 checks** (63 before + 3); adapter_core 5 / 115;
@@ -65,7 +65,7 @@ purity gate green; pytest tests **209 passed / 33 skipped**.
 ## G13 -- the engine gate on 1.0.13 (2026-10-05 22:05-22:13Z, boot 75e3e39b; evidence/rebase13/g13/session.log)
 
 Frozen home **c64153f** (`rebase-1.0.13` HEAD) built in `radiance-build:1.0.13` (host suite 5/5 in the image),
-served on `stilldeadcode/radiance:1.0.13`, int8 folder `data/projector-qwen38fn-int8`, RADIANCE_KVA_FINAL=off.
+served on `stilldeadcode/radiance:1.0.13`, int8 folder `data/projector-qwen38fn-int8`, RADIANCE_RIDGEFILL_FINAL=off.
 Predictions first (labbook seq 461-463), records 464-466, verdicts 467-469 -- all CONFIRMED.
 
 - **off ident = the 1.0.13 R3** (Stage E's evidence/r1013/ident-1013-boot1.txt; its three boots agree, and it is
@@ -96,7 +96,7 @@ Predictions first (labbook seq 461-463), records 464-466, verdicts 467-469 -- al
   deployment moves to 1.0.13's images (stilldeadcode/radiance:1.0.13; scripts/common.sh's RK_IMAGE default
   still names 1.0.8 for the running sessions -- change it at merge).
 - Not run: TP4 on an engine (this box has two cards; the mod4 path is held statically), MTP drafting on
-  1.0.13 (the history-pass change is held statically; RADIANCE_KVA_FINAL is off by default), TTFT on 1.0.13.
+  1.0.13 (the history-pass change is held statically; RADIANCE_RIDGEFILL_FINAL is off by default), TTFT on 1.0.13.
 
 ## The next release costs one command: scripts/update_radiance.sh + CI (orchestrator ~22:10Z, Dylan)
 

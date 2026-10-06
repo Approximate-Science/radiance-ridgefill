@@ -3,20 +3,20 @@
 Worker: account-B Opus 5.5, worktree `radiance-kva-wt-b`, branch `stage-c` (from stage-b 0fda876, main
 db0548e merged in at 14ccb67). radiance `140987f` (v1.0.8), read only. Deployed placement: projector in
 host memory (Dylan, 15:40Z; the VRAM placement is being removed on stage-e). Decisions in force: DD-A =
-(D-a) with the hazard counter on and the floor `kva.ckpt_floor` = 0 by default (Dylan decides T_ck from
+(D-a) with the hazard counter on and the floor `ridgefill.ckpt_floor` = 0 by default (Dylan decides T_ck from
 R65/R66).
 
 ## 1. What was built (code + static + mutants first)
 
 | commit | what |
 |---|---|
-| `23d0a40` | `RADIANCE_KVA_CKPT_FLOOR` (T_ck): a chunk that writes a checkpoint (`n_checkpoints`, keyed) keeps its last T_ck rows exact, rounded up to the tile (`kva_plan.h` bulk_end). `scripts/common.sh` `RK_CACHE_DIR`: fnserve.sh's cache flags (host tier 4 GiB, disk tier under the mounted dir) in place of `--no-prefix-cache`. `tools/turns.py`: append-only two-turn conversations (R62, R64) |
-| `b47f7f7` | kva.so `kva_hazard` (schema, host row, device row in `hazard.hip`, kernel tests): the branch-hazard count of PLAN-FIX §5.4 on the step's last sequence |
-| `45471f3` | arch: `kv_kva_meta` (LINEAR, one slot of two floats a sequence, bound to the first late delta-net layer so every checkpoint snapshots it), the op, a 4-byte host-mapped counter per rank, issue at the end of every pass that approximates (record) or still has tail ahead (count), rank-0 log when the counter moves (`kva_hazard.h`) |
-| `2b6ac05` | the log line in `tools/hazard_rate.py`'s contract: `kva: hazard <n> positions (total <m>)` |
+| `23d0a40` | `RADIANCE_RIDGEFILL_CKPT_FLOOR` (T_ck): a chunk that writes a checkpoint (`n_checkpoints`, keyed) keeps its last T_ck rows exact, rounded up to the tile (`ridgefill_plan.h` bulk_end). `scripts/common.sh` `RK_CACHE_DIR`: fnserve.sh's cache flags (host tier 4 GiB, disk tier under the mounted dir) in place of `--no-prefix-cache`. `tools/turns.py`: append-only two-turn conversations (R62, R64) |
+| `b47f7f7` | ridgefill.so `ridgefill_hazard` (schema, host row, device row in `hazard.hip`, kernel tests): the branch-hazard count of PLAN-FIX §5.4 on the step's last sequence |
+| `45471f3` | arch: `kv_ridgefill_meta` (LINEAR, one slot of two floats a sequence, bound to the first late delta-net layer so every checkpoint snapshots it), the op, a 4-byte host-mapped counter per rank, issue at the end of every pass that approximates (record) or still has tail ahead (count), rank-0 log when the counter moves (`ridgefill_hazard.h`) |
+| `2b6ac05` | the log line in `tools/hazard_rate.py`'s contract: `ridgefill: hazard <n> positions (total <m>)` |
 | `041ab13` | `tools/branch_send.py`: sends `tools/branch_corpus.py`'s triples (A, B, C) with records in hazard_rate's format |
 
-**The hazard rule (kva.h `kva_hazard_step`).** The pass's last sequence starts at P with q rows and
+**The hazard rule (ridgefill.h `ridgefill_hazard_step`).** The pass's last sequence starts at P with q rows and
 n_ahead more to come, so its exact tail starts at P + q + n_ahead − T: `before` = (T − n_ahead) − q of
 those tail positions lie before this pass, i.e. came from the prefix cache. Any of them at or below the
 slot's last approximated position was approximated by the request that wrote the snapshot: counted,
@@ -36,13 +36,13 @@ record-only pass, out-of-pool slot, refusal). Mutants (scratch copy, `evidence/s
 F1-F5 (floor) and H1-H8 (hazard wiring) all caught.
 
 ## 2. Session C1 (17:55-18:13Z; `evidence/stageC/session1.log`, `sessions/c1.sh`; home `data/home-041ab13`:
-## arch dabbe9f5…, kva.so d550da69…; projector in host memory; boot 75e3e39b…)
-- **kva.so device leg** (card 0000:13:00.0): 64 `kva_hazard` configurations device meta and count == host;
+## arch dabbe9f5…, ridgefill.so d550da69…; projector in host memory; boot 75e3e39b…)
+- **ridgefill.so device leg** (card 0000:13:00.0): 64 `ridgefill_hazard` configurations device meta and count == host;
   1,158 GPU checks, ctest gpu 1/1.
 - **R6/R7 green** at 041ab13: off ident = R3's six hashes.
 - **R62 GREEN** (`tools/turns.py`, 10 append-only conversations 8K-32K, cache servers): turn-2 `cache_n`
   is stock's in every conversation for quality AND speed (8,192 / 12,288 / ... / 32,768; 8,192 for the
-  9,216 one); 89 of each mode's 90 approximate steps wrote a checkpoint; `kva: hazard` lines: 0 (the
+  9,216 one); 89 of each mode's 90 approximate steps wrote a checkpoint; `ridgefill: hazard` lines: 0 (the
   append-only negative half of R68).
 - **R64 as written cannot hold, by construction** (not a plugin defect): quality with the cache vs
   quality without it give different turn-2 answers (8 of 8 non-empty differ; 2 are empty in every run).
@@ -98,11 +98,11 @@ approximates those positions -- so the two differ by design and identity is the 
 | 008 | 32,952 | 4,466 | 4,096 | 1,678 | 1,678 | 1,678 |
 
   The 18 A (producer) and C (append-only) requests: no tail overlap in the records, device count 0.
-  **T_ck = 512 (session C3, 19:35Z, same corpus and flags + `RADIANCE_KVA_CKPT_FLOOR=512`)**: every
+  **T_ck = 512 (session C3, 19:35Z, same corpus and flags + `RADIANCE_RIDGEFILL_CKPT_FLOOR=512`)**: every
   branch's device count is exactly its T_ck 0 count minus 512 -- 845 / 1,119 / 1,111 / 778 / 1,052 /
   1,198 / 1,260 / 1,195 / 1,166 = max(0, oracle − 512), R65's floor clause, on all 9. (hazard_rate.py
   reports DISAGREE there by design: its records-side superset cannot see the floor.)
-  Not measured: the greedy-answer agreement, and the negative control (zeroing kv_kva_meta after a
+  Not measured: the greedy-answer agreement, and the negative control (zeroing kv_ridgefill_meta after a
   restore needs a debug switch that is not built).
 - **R68 GREEN**: `tools/hazard_rate.py` (superset rule from `timings`) flags exactly the 9 B's and none of
   the A/C's on this corpus, and with unnamed lines paired in order (fix above) its per-request cross-check
@@ -114,11 +114,11 @@ approximates those positions -- so the two differ by design and identity is the 
 |---|---|---|
 | R62 | **green**: turn-2 `cache_n` = stock's, 10/10 conversations, quality and speed | C1 |
 | R63 | **not run** (snapshot/restore of the correction state at ≤ 1 ulp needs a capture of the pre-apply state after a restore; R62/R65 show restores working end to end) | -- |
-| R64 | **redefined** (each vs exact, cached ≤ no-cache); original form unsatisfiable by design (C1). **Not measured**: the KL-mode instrument (c4) cannot see the cache -- the engine forces the prefix cache off in KL mode (`core/engine_bringup.cpp:442-453`), both runs came out identical. Next instrument: `RADIANCE_KVA_DUMP_LOGITS` on cache / no-cache / exact HTTP servers, turn 2's generated tokens, per-token KL vs exact until the texts diverge (gate 1's tooling) | C1, C4 |
+| R64 | **redefined** (each vs exact, cached ≤ no-cache); original form unsatisfiable by design (C1). **Not measured**: the KL-mode instrument (c4) cannot see the cache -- the engine forces the prefix cache off in KL mode (`core/engine_bringup.cpp:442-453`), both runs came out identical. Next instrument: `RADIANCE_RIDGEFILL_DUMP_LOGITS` on cache / no-cache / exact HTTP servers, turn 2's generated tokens, per-token KL vs exact until the texts diverge (gate 1's tooling) | C1, C4 |
 | R65 | **green**: T_ck 0 on 9 real branches (device = oracle = records); T_ck 512: device = oracle − 512 on all 9. Answer agreement and the negative control **not run** | C2, C3 |
 | R66 | **CUT** by the orchestrator (GPU-time audit, 2026-10-05): "covered by R62 + E's held cost" -- R62 shows the cache resumes where stock does (cache_n = stock 10/10, both modes) and Stage E measured the held cost of the ON server; the c3b rerun was cancelled unrun. (History: C3's first attempt was refused by speed.sh's own check -- it numbers nonces from 1 per invocation, so with the cache on the measured prompts hit the warm-up's cache: 14,336 of 16,384 cached.) | C3; c3b.sh not run |
 | R68 | **green**: superset flags exactly the 9 branches, per-request AGREE with the device after the in-order pairing fix | C2 |
-| static | 56 arch cases / 680,943 checks, kernel host 851 + GPU 1,158 (incl. kva_hazard device == host); mutants F1-F5, H1-H8 caught | §1, C1 |
+| static | 56 arch cases / 680,943 checks, kernel host 851 + GPU 1,158 (incl. ridgefill_hazard device == host); mutants F1-F5, H1-H8 caught | §1, C1 |
 | R6/R7 | **green** at 041ab13 | C1 |
 
 ## 5. Session C4 (19:46-19:58Z) -- R64 (redefined) attempt: the instrument cannot see the cache
@@ -131,6 +131,6 @@ document past positions the reference holds"). R64 needs the HTTP instrument abo
 
 ## 6. State at the 20:50Z checkpoint (merge-readiness)
 stage-c merges cleanly into main (ff48939); host tests 3/3, arch_static 56 cases, kernel host 851,
-test_hazard_rate 11/11. Code: T_ck floor, cache profile, kva_hazard + wiring, tools (turns, branch_send,
+test_hazard_rate 11/11. Code: T_ck floor, cache profile, ridgefill_hazard + wiring, tools (turns, branch_send,
 turns_kld_corpus, hazard_rate pairing fix). Green: R62, R65 (T_ck 0 and 512, 9 real branches), R68,
 R6/R7, static + mutants. Not measured: R63, R64 (needs the HTTP/logits instrument). R66 cut (covered by R62 + E's held cost).

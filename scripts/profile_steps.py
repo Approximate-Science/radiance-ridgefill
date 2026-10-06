@@ -6,7 +6,7 @@
 The engine prints a CUMULATIVE per-op table every RADIANCE_PROFILE_EVERY steps per rank (radiance
 core/runtime/ctx.cpp dump_profile: calls, total ms, us/call, site, join, op, geometry, #index, first
 weight). Run with RADIANCE_PROFILE_EVERY=1 and the difference of two consecutive tables of one rank is
-the ops that step issued. Each op's layer is read off its first weight (blk.L.*, kva.proj.L.*, kva.st.L);
+the ops that step issued. Each op's layer is read off its first weight (blk.L.*, ridgefill.proj.L.*, ridgefill.st.L);
 an op without a weight takes the layer of the nearest declared op before it that has one.
 
 Prints, per rank and per step: the number of ops issued, and for layers >= --from-layer the op names
@@ -19,7 +19,7 @@ from collections import defaultdict
 
 ROW = re.compile(r"^\s+(\d+)\s+([\d.]+)\s+([\d.]+)\s+(host|dev)\s+(\S+)\s\s(\S+)\s\s(.*?)\s\s#(\d+)\s(\S+)\s*$")
 HEAD = re.compile(r"^per-op timing, rank (\d+)")
-LAYER = re.compile(r"^(?:blk|kva\.proj|kva\.projr|kva\.st|kva\.stswap|kva\.str)\.(\d+)\b")
+LAYER = re.compile(r"^(?:blk|ridgefill\.proj|ridgefill\.projr|ridgefill\.st|ridgefill\.stswap|ridgefill\.str)\.(\d+)\b")
 
 
 def parse(path):

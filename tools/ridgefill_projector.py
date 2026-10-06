@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Build the KVA projector folder: what a user downloads into `<model dir>/projector/` (PACKAGING.md §2, §3).
+"""Build the RidgeFill projector folder: what a user downloads into `<model dir>/projector/` (PACKAGING.md §2, §3).
 
-  kva_projector.py build --proj P --st RANK0.pt RANK1.pt --freq F --tokenizer DIR --container MODEL.rad \\
-                         --rad-info-v FILE --spec kva-marker-spec.json --out DIR
-  kva_projector.py int8 --from BF16_FOLDER --out DIR
-  kva_projector.py final --from FOLDER --proj P --out DIR
+  ridgefill_projector.py build --proj P --st RANK0.pt RANK1.pt --freq F --tokenizer DIR --container MODEL.rad \\
+                         --rad-info-v FILE --spec ridgefill-marker-spec.json --out DIR
+  ridgefill_projector.py int8 --from BF16_FOLDER --out DIR
+  ridgefill_projector.py final --from FOLDER --proj P --out DIR
 
 The model file is only READ (its metadata, tokenizer, chat template and a few KiB of base tensors); nothing is
 written to it. Files written (L = the projector's layers, S the lowest):
@@ -12,18 +12,18 @@ written to it. Files written (L = the projector's layers, S the lowest):
                           so a partial download fails by name)
   correction.safetensors  st.L [heads, V, K] f32 per delta-net layer (cat of the per-rank fits, rank 0's heads first)
   rowsel.safetensors      score / score_none / score_all [vocab] f32 (the class table and its two controls)
-  chat_template.jinja     the model's own template with the kva marker block in front (tools/kva_template.py merge)
+  chat_template.jinja     the model's own template with the ridgefill marker block in front (tools/ridgefill_template.py merge)
   README.md               the install flow (NOT in the manifest: documentation is never hashed, see is_doc)
-  kva.json                the manifest: layout, defaults, the model fingerprint, every other file's sha256
+  ridgefill.json                the manifest: layout, defaults, the model fingerprint, every other file's sha256
 
-THE FINGERPRINT (arch/kva_match.h reads it; Dylan's DD-K split):
+THE FINGERPRINT (arch/ridgefill_match.h reads it; Dylan's DD-K split):
   cannot run if different  -> arch_id, `meta` (the model's own metadata values, as the engine prints them),
                               `vocab_sha256` (each token's text, NUL, type byte in id order, then the merge table)
   warns if different       -> `encodings` (every non-expert late-layer weight, from `rad-info -v`), `anchors` (sha256
                               of the planes of the hyper-connection norms around the split), `name`
 The tensors are the bytes the container append carried (data/sidecar/kva-sidecar.safetensors): same readers.
 
-THE INT8 VARIANT (`int8`; Stage E, R79) is its own folder, selected with RADIANCE_KVA_PROJECTOR: every map quantised
+THE INT8 VARIANT (`int8`; Stage E, R79) is its own folder, selected with RADIANCE_RIDGEFILL_PROJECTOR: every map quantised
 offline to the encoding the container's own int8 trunk uses, i8*bf16[1x128] -- codes i8 [n_embd, stream_width]
 row-major and a bf16 scale per 128 columns of a row, value = code * scale, the scale absmax/127 rounded to bf16 and
 each code rounded half-to-even against the ROUNDED scale (libquant's rtn rule). proj8.L<L>.safetensors holds
@@ -47,8 +47,8 @@ from safetensors.torch import load_file, save_file
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "dev"))
-import kva_sidecar as S  # noqa: E402  (the source readers; the append itself is the retired route)
-import kva_template as T  # noqa: E402
+import ridgefill_sidecar as S  # noqa: E402  (the source readers; the append itself is the retired route)
+import ridgefill_template as T  # noqa: E402
 
 FORMAT = 1
 ADAPTER = "qwen4exp"
@@ -140,7 +140,7 @@ def rad_info_encodings(path, layers):
 
 
 def save(tensors, path):
-    save_file({k: v.contiguous() for k, v in tensors.items()}, str(path), metadata={"format": "kva-projector-1"})
+    save_file({k: v.contiguous() for k, v in tensors.items()}, str(path), metadata={"format": "ridgefill-projector-1"})
 
 
 def write_tensors(args, out):
@@ -152,9 +152,9 @@ def write_tensors(args, out):
     st = S.correction_tensors(Path(args.st[0]), Path(args.st[1]), split, "st", None)
     save(st, out / "correction.safetensors")
     rowsel, kept, n_tok = S.rowsel_tensors(args.tokenizer, Path(args.freq))
-    save({k.replace("kva.rowsel.", ""): v for k, v in rowsel.items()}, out / "rowsel.safetensors")
+    save({k.replace("ridgefill.rowsel.", ""): v for k, v in rowsel.items()}, out / "rowsel.safetensors")
     print(f"split {split}; {len(layers)} projector layers; {len(st)} correction layers; "
-          f"rowsel {kept} of {len(rowsel['kva.rowsel.score'])} rows kept ({n_tok} tokenizer ids)")
+          f"rowsel {kept} of {len(rowsel['ridgefill.rowsel.score'])} rows kept ({n_tok} tokenizer ids)")
     first = proj[f"proj.{split}.weight"]
     return split, layers, sorted(int(k.split(".")[1]) for k in st), first.shape, next(iter(st.values())).shape
 
@@ -184,32 +184,32 @@ def write_template(rad, args, out):
     base.write_text(rad.chat_template(), encoding="utf-8")
     try:
         if T.main(["merge", "--spec", args.spec, "--base", str(base), "--out", str(out / "chat_template.jinja")]):
-            raise SystemExit("kva_template.py merge failed")
+            raise SystemExit("ridgefill_template.py merge failed")
         return hashlib.sha256(base.read_bytes()).hexdigest()
     finally:
         base.unlink()
 
 
-README = """# KVA projector for {name}
+README = """# RidgeFill projector for {name}
 
-The fitted tensors the radiance KVA plugin reads. The model file stays exactly as published.
+The fitted tensors the radiance RidgeFill plugin reads. The model file stays exactly as published.
 
 1. Serve the stock model as you do today.
-2. Install the plugin: unpack it to e.g. /opt/kva (architectures/qwen4exp_fp8.so, kernels/kva.so).
+2. Install the plugin: unpack it to e.g. /opt/ridgefill (architectures/qwen4exp_fp8.so, kernels/ridgefill.so).
 3. Put this folder next to your model:  hf download <this repo> --local-dir <model dir>/projector
-4. Start radiance with  RADIANCE_HOME=/opt/kva:/opt/radiance/share/radiance  and RADIANCE_KVA=quality
+4. Start radiance with  RADIANCE_HOME=/opt/ridgefill:/opt/radiance/share/radiance  and RADIANCE_RIDGEFILL=quality
    (or speed); the mode is server-wide.
-5. Check the startup log: "KVA: projector <folder> ... matches <model>".
+5. Check the startup log: "RidgeFill: projector <folder> ... matches <model>".
 
-Docker: mount the model's DIRECTORY (not the single file), or set RADIANCE_KVA_PROJECTOR to this folder.
+Docker: mount the model's DIRECTORY (not the single file), or set RADIANCE_RIDGEFILL_PROJECTOR to this folder.
 The projector is streamed from host memory: it costs each card one one-layer staging slot, not the whole map.
 """
 
 
 def is_doc(name):
-    """Documentation is never listed in kva.json's files: a hub serves the repo's README.md as its model card, so the
+    """Documentation is never listed in ridgefill.json's files: a hub serves the repo's README.md as its model card, so the
     README a user downloads is not the one written here, and a hashed README would make the loader refuse a correct
-    folder (arch/kva_folder.h verifies exactly the listed files and ignores the rest)."""
+    folder (arch/ridgefill_folder.h verifies exactly the listed files and ignores the rest)."""
     return name.lower().endswith(".md")
 
 
@@ -238,10 +238,10 @@ def build(args):
         "format": FORMAT, "plugin_min_version": "0.3.0", "adapter": ADAPTER, "adapter_abi": 1,
         "model": model, "split": split, "stream": "hc", "stream_width": pshape[1], "block_in_width": pshape[0],
         "layers": {str(L): "full_attn" if types[L] == "full_attention" else "recurrent" for L in layers},
-        "tail": {"default": 2048, "min": 512, "table": [int(t) for t in table["kva_tail"]]},
-        "correction": {"kind": "gdn_terminal_state", "alpha_default": 1.0, "alpha_table": table["kva_alpha"],
+        "tail": {"default": 2048, "min": 512, "table": [int(t) for t in table["ridgefill_tail"]]},
+        "correction": {"kind": "gdn_terminal_state", "alpha_default": 1.0, "alpha_table": table["ridgefill_alpha"],
                        "heads": sshape[0], "sd": list(sshape[1:]), "layers": st_layers},
-        "rowsel": {"classes": "cap,mixed,piece", "share_default": 0.25, "share_table": table["kva_share"]},
+        "rowsel": {"classes": "cap,mixed,piece", "share_default": 0.25, "share_table": table["ridgefill_share"]},
         "projector": {"dtype": "bf16", "layout": "plain_nk",
                       "files": {str(L): f"proj.L{L}.safetensors" for L in layers}},
         "marker": {"spec": spec, "template_source_sha256": template_sha},
@@ -250,10 +250,10 @@ def build(args):
                    (("proj", args.proj), ("st0", args.st[0]), ("st1", args.st[1]), ("freq", args.freq),
                     ("tokenizer_json", Path(args.tokenizer) / "tokenizer.json"))}},
     }
-    files = sorted(p.name for p in out.iterdir() if p.is_file() and p.name != "kva.json")
+    files = sorted(p.name for p in out.iterdir() if p.is_file() and p.name != "ridgefill.json")
     manifest["files"] = hashed(out, files)
-    (out / "kva.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
-    total = sum((out / n).stat().st_size for n in files) + (out / "kva.json").stat().st_size
+    (out / "ridgefill.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
+    total = sum((out / n).stat().st_size for n in files) + (out / "ridgefill.json").stat().st_size
     print(f"wrote {out}: {len(files) + 1} files, {total} bytes ({total / 2**30:.3f} GiB); model {rad.name}, "
           f"vocab {model['vocab_sha256'][:12]}..., {len(model['encodings'])} encodings, {len(model['anchors'])} anchors")
 
@@ -274,7 +274,7 @@ def quantise_i8(w):
 
 def int8(args):
     src, out = Path(getattr(args, "from")), Path(args.out)
-    manifest = json.loads((src / "kva.json").read_text(encoding="utf-8"))
+    manifest = json.loads((src / "ridgefill.json").read_text(encoding="utf-8"))
     proj = manifest["projector"]
     if proj["dtype"] != "bf16":
         raise SystemExit(f"{src}: its projector is {proj['dtype']}; the int8 variant is made from a bf16 folder")
@@ -293,11 +293,11 @@ def int8(args):
     copy_docs(src, out)
     manifest["projector"] = {"dtype": "i8", "layout": "i8_row128", "encoding": "i8*bf16[1x128]",
                              "files": files, "source": {"folder": src.name,
-                                                        "kva_json_sha256": S.sha256_file(src / "kva.json")}}
+                                                        "ridgefill_json_sha256": S.sha256_file(src / "ridgefill.json")}}
     names = sorted(kept + list(files.values()))
     manifest["files"] = hashed(out, names)
-    (out / "kva.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
-    total = sum((out / n).stat().st_size for n in names) + (out / "kva.json").stat().st_size
+    (out / "ridgefill.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
+    total = sum((out / n).stat().st_size for n in names) + (out / "ridgefill.json").stat().st_size
     print(f"wrote {out}: {len(names) + 1} files, {total} bytes ({total / 2**30:.3f} GiB); {len(files)} maps i8*bf16[1x128], "
           f"worst |w - dequant| {worst:.4g} of a map's max |w|")
 
@@ -307,7 +307,7 @@ def final(args):
     w the stream width, from the source projector's `final` [w, w + 1] (bias last). The source must be the file the
     folder was fitted from (its sha256 against the manifest's fit.proj_sha256). Every other file is copied byte for byte."""
     src, out = Path(getattr(args, "from")), Path(args.out)
-    manifest = json.loads((src / "kva.json").read_text(encoding="utf-8"))
+    manifest = json.loads((src / "ridgefill.json").read_text(encoding="utf-8"))
     want = (manifest.get("fit") or {}).get("proj_sha256")
     got = S.sha256_file(args.proj)
     if want != got:
@@ -326,16 +326,16 @@ def final(args):
     save({"final.weight": t[:, :-1], "final.bias": t[:, -1]}, out / "final.safetensors")
     manifest["final"] = {"file": "final.safetensors", "dtype": "bf16", "source_sha256": got}
     manifest["files"] = hashed(out, list(manifest["files"]) + ["final.safetensors"])
-    (out / "kva.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
+    (out / "ridgefill.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
     print(f"wrote {out}: {src.name} + final.safetensors ({(out / 'final.safetensors').stat().st_size} bytes)")
 
 
 def reseal(args):
-    """Rewrite an existing folder's kva.json so it lists no documentation (is_doc), touching no other file: every listed
+    """Rewrite an existing folder's ridgefill.json so it lists no documentation (is_doc), touching no other file: every listed
     file that stays listed is first checked against the manifest's own hash (a changed weight is refused, never
     re-blessed), the fingerprint, anchors and every other field are kept as they are."""
     folder = Path(args.folder)
-    path = folder / "kva.json"
+    path = folder / "ridgefill.json"
     old = path.read_bytes()
     manifest = json.loads(old)
     for name, digest in manifest["files"].items():
@@ -348,7 +348,7 @@ def reseal(args):
     manifest["files"] = {n: d for n, d in manifest["files"].items() if not is_doc(n)}
     new = (json.dumps(manifest, indent=1) + "\n").encode()
     path.write_bytes(new)
-    print(f"resealed {folder}: kva.json {hashlib.sha256(old).hexdigest()} -> {hashlib.sha256(new).hexdigest()}; "
+    print(f"resealed {folder}: ridgefill.json {hashlib.sha256(old).hexdigest()} -> {hashlib.sha256(new).hexdigest()}; "
           f"no longer listed: {', '.join(dropped) or 'nothing'}; {len(manifest['files'])} files listed, none touched")
 
 
@@ -362,7 +362,7 @@ def main(argv=None):
     b.add_argument("--tokenizer", required=True, help="checkpoint dir with config.json + tokenizer.json")
     b.add_argument("--container", required=True, help="the served .rad (read only)")
     b.add_argument("--rad-info-v", required=True, help="saved `rad-info -v` output of that container")
-    b.add_argument("--spec", required=True, help="kva-marker-spec.json (tools/kva_template.py)")
+    b.add_argument("--spec", required=True, help="ridgefill-marker-spec.json (tools/ridgefill_template.py)")
     b.add_argument("--out", required=True, help="the folder to write (created)")
     q = sub.add_parser("int8", help="the int8 variant of a bf16 folder (its own folder)")
     q.add_argument("--from", required=True, help="a bf16 projector folder")
@@ -371,7 +371,7 @@ def main(argv=None):
     fm.add_argument("--from", required=True, help="a projector folder")
     fm.add_argument("--proj", required=True, help="the projector safetensors the folder was fitted from (holds `final`)")
     fm.add_argument("--out", required=True, help="the folder to write (created)")
-    rs = sub.add_parser("reseal", help="rewrite an existing folder's kva.json without documentation; no file touched")
+    rs = sub.add_parser("reseal", help="rewrite an existing folder's ridgefill.json without documentation; no file touched")
     rs.add_argument("--folder", required=True, help="a projector folder")
     args = ap.parse_args(argv)
     if args.command == "reseal":

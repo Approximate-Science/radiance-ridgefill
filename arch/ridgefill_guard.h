@@ -1,23 +1,23 @@
-/* kva_guard.h -- the engine-release guard (PLAN-FIX §6.6, DD-E, R83).
+/* ridgefill_guard.h -- the engine-release guard (PLAN-FIX §6.6, DD-E, R83).
  *
  * WHY. An adapter compiles its in-tree architecture source of ONE radiance release and shadows the
  * installed file of that name (its `so` stem), so an engine upgraded under it would run last release's
- * model against this release's core -- and the KVA paths lean on core behaviour no ABI number covers (the
+ * model against this release's core -- and the RidgeFill paths lean on core behaviour no ABI number covers (the
  * stager's release rule, stager.cpp:143-144). No ABI call says which release the engine is, so at
  * rad_plugin_open the plugin finds the object that defines rad_issue (dladdr) and requires exactly
  * one NUL-delimited copy of the release string it was built against (RAD_VERSION is compiled into
  * the core as one such string, core/CMakeLists.txt:25). On a mismatch it FORWARDS every export to
  * the engine's own in-tree <so>, found on $RADIANCE_HOME after this plugin's own home:
- * the engine then serves its current architecture with KVA off, which is stock -- loud, never
+ * the engine then serves its current architecture with RidgeFill off, which is stock -- loud, never
  * silent. With no in-tree file to forward to (e.g. the home was given only as --radiance-home,
  * which a plugin cannot see) the plugin DECLINES, and startup fails by name for want of a claimant
  * for the architecture (loader.cpp:425-436). Residual risk, named: a patched build that keeps the release
  * string; the engine's sha256 is logged so such a build is identifiable.
  */
-#ifndef KVA_GUARD_H
-#define KVA_GUARD_H
+#ifndef RIDGEFILL_GUARD_H
+#define RIDGEFILL_GUARD_H
 
-#include "kva_log.h"
+#include "ridgefill_log.h"
 
 #include <dlfcn.h>
 #include <limits.h>
@@ -30,11 +30,11 @@
 #include <string>
 #include <vector>
 
-#ifndef KVA_RADIANCE_VERSION
-#error "KVA_RADIANCE_VERSION (the radiance release this plugin is built against) is not defined; arch/CMakeLists.txt sets it from RADIANCE_SRC"
+#ifndef RIDGEFILL_RADIANCE_VERSION
+#error "RIDGEFILL_RADIANCE_VERSION (the radiance release this plugin is built against) is not defined; arch/CMakeLists.txt sets it from RADIANCE_SRC"
 #endif
 
-namespace kva {
+namespace ridgefill {
 
 using namespace rad::arch;
 
@@ -88,7 +88,7 @@ inline std::string releases_in(const char* path) {
 
 /* ---------------------------------------------------------------- SHA-256 (FIPS 180-4) */
 /* Its own, because the core may lean on nothing the engine image might not ship: the guard logs the
- * engine's hash so a patched build is identifiable, and kva_folder.h checks every projector file. */
+ * engine's hash so a patched build is identifiable, and ridgefill_folder.h checks every projector file. */
 
 inline void sha256_block(uint32_t h[8], const unsigned char* p) {
     static const uint32_t K[64] = {
@@ -207,11 +207,11 @@ inline bool take_forward(const std::string& path) {
     return true;
 }
 
-/* rad_plugin_open's body: RAD_OK to serve (as KVA, or forwarded to the in-tree `so`), RAD_E_UNSUPPORTED
+/* rad_plugin_open's body: RAD_OK to serve (as RidgeFill, or forwarded to the in-tree `so`), RAD_E_UNSUPPORTED
  * to decline. */
 inline int open_guard(const char* so) {
     const std::string engine = engine_object();
-    const int hits = count_version(engine.c_str(), KVA_RADIANCE_VERSION);
+    const int hits = count_version(engine.c_str(), RIDGEFILL_RADIANCE_VERSION);
     if (hits == 1) return RAD_OK;
     Dl_info me{};
     const std::string self = dladdr((void*)&open_guard, &me) && me.dli_fname
@@ -221,20 +221,20 @@ inline int open_guard(const char* so) {
     if (!shadow.empty() && take_forward(shadow)) {
         std::fprintf(stderr, "radiance: %s: WARNING: built against radiance %s, and the "
                              "engine %s (sha256 %s) carries release string(s) '%s' (%s %d times); "
-                             "forwarding to the engine's own architecture %s, KVA off\n", g_log_name,
-                     KVA_RADIANCE_VERSION, engine.c_str(), sha.c_str(), found.c_str(),
-                     KVA_RADIANCE_VERSION, hits, shadow.c_str());
+                             "forwarding to the engine's own architecture %s, RidgeFill off\n", g_log_name,
+                     RIDGEFILL_RADIANCE_VERSION, engine.c_str(), sha.c_str(), found.c_str(),
+                     RIDGEFILL_RADIANCE_VERSION, hits, shadow.c_str());
         return RAD_OK;
     }
     std::fprintf(stderr, "radiance: %s: built against radiance %s, and the engine %s "
                          "(sha256 %s) carries release string(s) '%s' (%s %d times); no in-tree "
                          "architectures/%s on $RADIANCE_HOME to forward to, so this "
                          "plugin declines (a home given only as --radiance-home is not visible to "
-                         "it)\n", g_log_name, KVA_RADIANCE_VERSION, engine.c_str(), sha.c_str(), found.c_str(),
-                 KVA_RADIANCE_VERSION, hits, so);
+                         "it)\n", g_log_name, RIDGEFILL_RADIANCE_VERSION, engine.c_str(), sha.c_str(), found.c_str(),
+                 RIDGEFILL_RADIANCE_VERSION, hits, so);
     return RAD_E_UNSUPPORTED;
 }
 
-}  /* namespace kva */
+}  /* namespace ridgefill */
 
-#endif /* KVA_GUARD_H */
+#endif /* RIDGEFILL_GUARD_H */

@@ -1,4 +1,4 @@
-# notes/investigate.md — why radiance's KVA numbers looked worse than tcc's (INVESTIGATE lane, 2026-10-04)
+# notes/investigate.md — why radiance's RidgeFill numbers looked worse than tcc's (INVESTIGATE lane, 2026-10-04)
 
 Question (Dylan): "How is it possible that it is this much worse? It's not strictly due to different measurements.
 Something else is happening." Governing metric: per-doc mean NLL delta vs the same engine's exact run, on the SAME

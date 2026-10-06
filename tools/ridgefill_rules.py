@@ -1,9 +1,9 @@
-"""The class56 row rule (KVA quality mode), transcribed so the tools run without the research repo.
+"""The class56 row rule (RidgeFill quality mode), transcribed so the tools run without the research repo.
 
 Source of truth: the research repo's fnlev/rules.py (classifier lines 48-71, row ranking 167-195) and
-kva/select.py (token_bytes, _byte_map, rarity). Transcribed, not imported: the sidecar tool must run on a
-machine that has only this repo. tests/test_kva_rules.py checks the transcription against the original when
-KVA_RESEARCH_ROOT points at a checkout.
+ridgefill/select.py (token_bytes, _byte_map, rarity). Transcribed, not imported: the sidecar tool must run on a
+machine that has only this repo. tests/test_ridgefill_rules.py checks the transcription against the original when
+RIDGEFILL_RESEARCH_ROOT points at a checkout.
 
 The rule, for one prompt window of ids:
   matches = rows whose token's coarse class is kept (cap, mixed, piece by default)
@@ -50,7 +50,7 @@ def coarse(cls):
 
 
 def _byte_map():
-    """kva/select.py _byte_map: GPT-2's printable-character -> byte map of byte-level BPE pieces."""
+    """ridgefill/select.py _byte_map: GPT-2's printable-character -> byte map of byte-level BPE pieces."""
     bs = list(range(ord("!"), ord("~") + 1)) + list(range(ord("¡"), ord("¬") + 1)) + list(range(ord("®"), ord("ÿ") + 1))
     cs = bs[:]
     n = 0
@@ -63,7 +63,7 @@ def _byte_map():
 
 
 def token_texts(tok):
-    """Text of every tokenizer id, None for added/special tokens (kva/select.py token_bytes, then
+    """Text of every tokenizer id, None for added/special tokens (ridgefill/select.py token_bytes, then
     fnlev/rules.py:86's utf-8 decode with errors="replace": a lone byte of a split character reads U+FFFD)."""
     inv = _byte_map()
     added = set(tok.added_tokens_decoder)
@@ -104,7 +104,7 @@ def load_logfreq(path):
     from safetensors.numpy import load_file
     table = load_file(str(path))
     if "logfreq" not in table:
-        raise SystemExit(f"{path}: no 'logfreq' tensor (keys {sorted(table)}); expected the KVA unigram table")
+        raise SystemExit(f"{path}: no 'logfreq' tensor (keys {sorted(table)}); expected the RidgeFill unigram table")
     return table["logfreq"]
 
 

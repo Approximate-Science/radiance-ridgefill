@@ -1,50 +1,50 @@
-/* kva_step.h -- the core's declare body and step: what a pass is, and the order its pieces run in.
+/* ridgefill_step.h -- the core's declare body and step: what a pass is, and the order its pieces run in.
  *
  * Model-free: everything the model owns -- its in-tree step, the exact layers, the embedding and the
- * logits, the debug captures that interleave with its blocks -- is a KvaAdapter hook, and every number
- * a fact. The adapter's own declare runs the in-tree declare and fills Kva::ad; its step forwards here.
+ * logits, the debug captures that interleave with its blocks -- is a RidgeFillAdapter hook, and every number
+ * a fact. The adapter's own declare runs the in-tree declare and fills RidgeFill::ad; its step forwards here.
  */
-#ifndef KVA_STEP_H
-#define KVA_STEP_H
+#ifndef RIDGEFILL_STEP_H
+#define RIDGEFILL_STEP_H
 
 #include <cstdlib>
 #include <string>
 #include <utility>
 
-namespace kva {
+namespace ridgefill {
 
 using namespace rad::arch;
 
 static_assert((int)MODE_OFF == PLAN_OFF && (int)MODE_PLUMB == PLAN_PLUMB && (int)MODE_SPEED == PLAN_SPEED &&
-              (int)MODE_QUALITY == PLAN_QUALITY, "kva_config.h's Mode and kva_plan.h's PlanMode share one order");
+              (int)MODE_QUALITY == PLAN_QUALITY, "ridgefill_config.h's Mode and ridgefill_plan.h's PlanMode share one order");
 
 /* ================================================================== declare */
 
-/* The container's kva.mode is not a switch (PLAN-FIX §6.5): said once, by the real declare of
- * rank 0, so an operator who converted with --set kva.mode=... learns why nothing changed. */
+/* The container's ridgefill.mode is not a switch (PLAN-FIX §6.5): said once, by the real declare of
+ * rank 0, so an operator who converted with --set ridgefill.mode=... learns why nothing changed. */
 static void note_meta_mode(const Config& c, const RadBuildCtx* ctx) {
     if (!c.meta_mode || ctx->shape_probe || ctx->rank != 0) return;
-    std::fprintf(stderr, "radiance: %s: the container's kva.mode=%s is ignored; the mode "
-                         "comes from RADIANCE_KVA only (now %s)\n", g_log_name, c.meta_mode, kModeNames[c.mode]);
+    std::fprintf(stderr, "radiance: %s: the container's ridgefill.mode=%s is ignored; the mode "
+                         "comes from RADIANCE_RIDGEFILL only (now %s)\n", g_log_name, c.meta_mode, kModeNames[c.mode]);
 }
 
-/* Everything KVA declares after the model's own graph, for the Kva whose `ad` the adapter just filled.
+/* Everything RidgeFill declares after the model's own graph, for the RidgeFill whose `ad` the adapter just filled.
  * `off` with no capture declares nothing at all: the in-tree graph, byte for byte (R6, R7). */
-static int core_declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* ctx, Kva& k) {
+static int core_declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildCtx* ctx, RidgeFill& k) {
     g_log_name = k.ad.log_name;   /* a test's declare runs without rad_plugin_open */
     RAD_ARCH_TRY(read_config(meta, &k.cfg, k.ad.min_tail, k.ad.default_tail));
     note_meta_mode(k.cfg, ctx);
-    for (auto [name, dir] : { std::pair<const char*, std::string*>{"RADIANCE_KVA_DUMP", &k.dump_dir},
-                              {"RADIANCE_KVA_CAPTURE", &k.capture_dir},
-                              {"RADIANCE_KVA_CAPTURE_STATE", &k.state_dir},
-                              {"RADIANCE_KVA_DUMP_LOGITS", &k.logits_dir} }) {
+    for (auto [name, dir] : { std::pair<const char*, std::string*>{"RADIANCE_RIDGEFILL_DUMP", &k.dump_dir},
+                              {"RADIANCE_RIDGEFILL_CAPTURE", &k.capture_dir},
+                              {"RADIANCE_RIDGEFILL_CAPTURE_STATE", &k.state_dir},
+                              {"RADIANCE_RIDGEFILL_DUMP_LOGITS", &k.logits_dir} }) {
         const char* v = std::getenv(name);
         *dir = v ? v : "";
     }
     /* The projector's fitting data comes from EXACT runs only (HANDOVER Stage 6.1). */
     if (!k.capture_dir.empty() && k.cfg.mode != MODE_OFF) {
-        std::fprintf(stderr, "radiance: %s: RADIANCE_KVA_CAPTURE records exact runs and the "
-                             "mode is %s; run it with RADIANCE_KVA=off\n", g_log_name, kModeNames[k.cfg.mode]);
+        std::fprintf(stderr, "radiance: %s: RADIANCE_RIDGEFILL_CAPTURE records exact runs and the "
+                             "mode is %s; run it with RADIANCE_RIDGEFILL=off\n", g_log_name, kModeNames[k.cfg.mode]);
         return RAD_E_INVAL;
     }
     const bool capturing = !k.capture_dir.empty() || !k.state_dir.empty();
@@ -67,20 +67,20 @@ static int core_declare(RadBuilder* b, const RadModelMeta* meta, const RadBuildC
 
 /* The stager lever needs `probe_depth` routed layers below S: the probes ride in layer S - probe_depth's
  * FFN (approximate_step). A dense model (no routed layer, probe_depth 0) never streams. */
-inline bool can_stream(const Kva& k) {
-    const KvaAdapter& a = k.ad;
+inline bool can_stream(const RidgeFill& k) {
+    const RidgeFillAdapter& a = k.ad;
     if (a.probe_depth <= 0 || k.split < a.probe_depth) return false;
     int64_t routed = 0;
     for (int64_t l = 0; l < k.split; ++l) routed += a.routed[(size_t)l] ? 1 : 0;
     return routed >= a.probe_depth;
 }
 
-/* WHAT THIS PASS IS: kva_plan.h's rule over this pass's keyed fields (radiance core/runtime/ctx.cpp:
+/* WHAT THIS PASS IS: ridgefill_plan.h's rule over this pass's keyed fields (radiance core/runtime/ctx.cpp:
  * 989-995) and the declare's config, so a replayed pass issues what a fresh one would (R15/R99).
  * The host never needs the last sequence's first row s (device data); it knows the bulk END b and a
  * lower bound s_lb. Media steps, encoder and draft passes and the last chunks of a prompt run stock;
  * KL mode too unless SCORE_BULK says the tail alone is scored. */
-static Pass derive(const Kva& k, const RadBatch* batch) {
+static Pass derive(const RidgeFill& k, const RadBatch* batch) {
     const Config& c = k.cfg;
     PlanIn in;
     in.mode = c.mode;   /* Mode and PlanMode share their order: off, plumb, speed, quality */
@@ -112,7 +112,7 @@ static Pass derive(const Kva& k, const RadBatch* batch) {
 
 /* Once a masked pass, ahead of the layers (PLAN-FIX §3.1): the device mask, the bounds, and the zero
  * expert offsets the stager probes read. It reads only the batch, so it may run this early. */
-static void mask_rows(RadCtx* c, const Kva& k, const RadBatch* batch, const Pass& p) {
+static void mask_rows(RadCtx* c, const RidgeFill& k, const RadBatch* batch, const Pass& p) {
     RAD_ISSUE_N(c, k.op_mask, p.b, praw(batch->cu_seqlens + batch->n_seq - 1, RAD_I32, 2),
                 praw(batch->token_ids, RAD_I32, p.b), praw(batch->positions, RAD_I32, p.b),
                 k.mask_scored ? k.score : RAD_NONE, brows(k.b_mask, batch->n_tok),
@@ -121,8 +121,8 @@ static void mask_rows(RadCtx* c, const Kva& k, const RadBatch* batch, const Pass
 
 /* After layer S-1: the layer-S stream of the bulk superset copied into h_S, which every projector
  * reads from here on (the stream's bulk rows become a stream nobody reads). */
-static void copy_stream(RadCtx* c, const Kva& k, const Pass& p) {
-    if (!k.op_cast || !k.b_hs) return;   /* int8 without the MTP map keeps no h_S (kva_layer.h project_masked) */
+static void copy_stream(RadCtx* c, const RidgeFill& k, const Pass& p) {
+    if (!k.op_cast || !k.b_hs) return;   /* int8 without the MTP map keeps no h_S (ridgefill_layer.h project_masked) */
     const int64_t wide = k.ad.wide, rows = p.b - p.s_lb;
     RAD_ISSUE_N(c, k.op_cast, rows, brow_slice(k.ad.buf_stream, p.s_lb, rows, wide),
                 brow_slice(k.b_hs, p.s_lb, rows, wide));
@@ -130,9 +130,9 @@ static void copy_stream(RadCtx* c, const Kva& k, const Pass& p) {
 
 /* AN APPROXIMATE PASS: the model's exact layers below S (one of them carrying the stager probes when
  * the pass streams), then the late layers on the pass's path, the final map, the model's epilogue. */
-static void approximate_step(RadCtx* c, const Kva& k, const RadBatch* batch, const Pass& p,
+static void approximate_step(RadCtx* c, const RidgeFill& k, const RadBatch* batch, const Pass& p,
                              StateDump* sd) {
-    const KvaAdapter& a = k.ad;
+    const RidgeFillAdapter& a = k.ad;
     const int rank = rad_rank(c);
     a.prologue(c, batch);
     if (k.op_ring) ring_copy(c, k, k.split);   /* layer S's map lands during layers 0 .. S-1 */
@@ -159,10 +159,10 @@ static void approximate_step(RadCtx* c, const Kva& k, const RadBatch* batch, con
 /* ONE LINE AN APPROXIMATE STEP, rank 0: scripts/grade.sh counts them against the bulk-chunk count
  * (R18/R57), which is what proves no bulk chunk silently ran exact; the fields are every keyed
  * number the decision read. */
-static void log_pass(const Kva& k, const RadBatch* batch, const Pass& p) {
+static void log_pass(const RidgeFill& k, const RadBatch* batch, const Pass& p) {
     int64_t D = 0, DT = 0;
     batch_split(batch, &D, &DT);
-    std::fprintf(stderr, "radiance: %s: kva: approximate step (%s, %lld tokens, %lld ahead, "
+    std::fprintf(stderr, "radiance: %s: ridgefill: approximate step (%s, %lld tokens, %lld ahead, "
                          "b %lld, s_lb %lld, D %lld, Pn %lld, ckpt %d, %s, stage %s%s)\n", g_log_name,
                  kModeNames[k.cfg.mode], (long long)batch->n_tok, (long long)batch->n_ahead,
                  (long long)p.b, (long long)p.s_lb, (long long)D, (long long)(batch->n_seq - D),
@@ -180,7 +180,7 @@ static bool single_prefill(const RadBatch* b) {
 /* A one-sequence step whose chunk does not end on the recurrent block's tile cannot be split
  * exactly; the scheduler never cuts one (derive's note), so this names a broken invariant rather than a
  * shape to serve. Forced splits are R47's debug arm and may be off the tile on purpose. */
-static bool misaligned(const Kva& k, const RadBatch* batch, const Pass& p) {
+static bool misaligned(const RidgeFill& k, const RadBatch* batch, const Pass& p) {
     int64_t D = 0, DT = 0;
     batch_split(batch, &D, &DT);
     return p.path != PATH_LEAN && batch->n_seq - D == 1 &&
@@ -190,8 +190,8 @@ static bool misaligned(const Kva& k, const RadBatch* batch, const Pass& p) {
 /* The step: the approximate pass, the capture, or the model's own step, then the instruments. Every
  * branch is decided from keyed fields and declare-time state (R15/R99). */
 static void core_step(RadCtx* c, const RadBatch* batch) {
-    const Kva& k = g_kva[rad_rank(c)];
-    const KvaAdapter& a = k.ad;
+    const RidgeFill& k = g_ridgefill[rad_rank(c)];
+    const RidgeFillAdapter& a = k.ad;
     const Pass p = derive(k, batch);
     const bool approx = p.path != PATH_STOCK;
     if (approx && misaligned(k, batch, p)) {
@@ -217,6 +217,6 @@ static void core_step(RadCtx* c, const RadBatch* batch) {
         dump_logits(c, k.logits_dir, batch, a.buf_logits, a.n_vocab, rad_rank(c));
 }
 
-}  /* namespace kva */
+}  /* namespace ridgefill */
 
-#endif /* KVA_STEP_H */
+#endif /* RIDGEFILL_STEP_H */

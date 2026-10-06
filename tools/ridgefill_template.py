@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""KVA chat-template marker snippet tool.
+"""RidgeFill chat-template marker snippet tool.
 
 Builds a Jinja snippet that, when merged in front of any chat template, makes
 the template render a fixed 64-token marker as the very first thing in the
 prompt — only when the request opts in via chat_template_kwargs
-(`"kva": "on"`, plus optional dials). The radiance KVA plugin detects and
+(`"ridgefill": "on"`, plus optional dials). The radiance RidgeFill plugin detects and
 erases the marker on the GPU. Requests without the kwarg must render
 byte-identically to the unmodified template.
 
@@ -37,8 +37,8 @@ from pathlib import Path
 # Marker comments the tool emits. `merge` refuses any base that already
 # contains one of these (idempotence); `strip` locates the merged block by
 # the pair. Keep the two strings non-overlapping prefixes of each other.
-MARKER_START = "{#- kva-marker v1"
-MARKER_END = "{#- kva-marker-end v1 #}"
+MARKER_START = "{#- ridgefill-marker v1"
+MARKER_END = "{#- ridgefill-marker-end v1 #}"
 
 # The GPU side of the plugin detects exactly this many marker tokens; a spec
 # that does not describe this many tokens cannot be used and is refused.
@@ -47,7 +47,7 @@ REQUIRED_LENGTH = 64
 # The only fixed-token pattern rule this tool knows how to generate.
 PATTERN_RULE = "alternate, starting with the first token"
 
-PROG = "kva_template"
+PROG = "ridgefill_template"
 
 
 class SpecError(Exception):
@@ -215,7 +215,7 @@ def _jinja_str(text: str) -> str:
 
 
 def _dial_lines(dial: dict) -> list[str]:
-    """Lines that resolve one dial kwarg into `_kva_tok_<offset>` and `_kva_ok_<offset>`.
+    """Lines that resolve one dial kwarg into `_ridgefill_tok_<offset>` and `_ridgefill_ok_<offset>`.
 
     Absent kwarg  -> default token, ok.
     Known value   -> table token, ok.
@@ -223,8 +223,8 @@ def _dial_lines(dial: dict) -> list[str]:
     """
     offset = dial["offset"]
     kwarg = dial["kwarg"]
-    tok_var = f"_kva_tok_{offset}"
-    ok_var = f"_kva_ok_{offset}"
+    tok_var = f"_ridgefill_tok_{offset}"
+    ok_var = f"_ridgefill_ok_{offset}"
     default_token = dial["table"][dial["default"]]
     lines = [
         f"{{%- set {tok_var} = {_jinja_str(default_token)} -%}}",
@@ -260,7 +260,7 @@ def build_block(spec: dict) -> str:
     switch_on = spec["switch"]["on_value"]
 
     # Walk every offset once: consecutive fixed tokens are fused into one
-    # string literal, dial offsets become `_kva_tok_<offset>` variables.
+    # string literal, dial offsets become `_ridgefill_tok_<offset>` variables.
     parts: list[str] = []  # expression chunks joined with ~
     literal: list[str] = []
     for offset in range(length):
@@ -268,7 +268,7 @@ def build_block(spec: dict) -> str:
             if literal:
                 parts.append(_jinja_str("".join(literal)))
                 literal = []
-            parts.append(f"_kva_tok_{offset}")
+            parts.append(f"_ridgefill_tok_{offset}")
         elif p_lo <= offset <= p_hi:
             literal.append(p_toks[(offset - p_lo) % 2])
         elif offset == end_offset:
@@ -283,10 +283,10 @@ def build_block(spec: dict) -> str:
     meta = [f"length={length}", f"switch={switch_kwarg}", f"switch_value={switch_on}"]
     if spec["dials"]:
         meta.append("dials=" + ",".join(dial["kwarg"] for dial in spec["dials"]))
-    comment = "{#- kva-marker v1 " + " ".join(meta) + " -#}"
+    comment = "{#- ridgefill-marker v1 " + " ".join(meta) + " -#}"
 
     conditions = [f"{switch_kwarg} is defined", f"{switch_kwarg} == {_jinja_str(switch_on)}"]
-    conditions += [f"_kva_ok_{dial['offset']}" for dial in spec["dials"]]
+    conditions += [f"_ridgefill_ok_{dial['offset']}" for dial in spec["dials"]]
 
     gate = (
         "{%- if " + " and ".join(conditions) + " -%}"
@@ -342,11 +342,11 @@ def cmd_merge(args: argparse.Namespace) -> int:
     block = build_block(load_spec(args.spec)).encode("utf-8")
     base = _read_bytes(args.base)
     if MARKER_START.encode("utf-8") in base or MARKER_END.encode("utf-8") in base:
-        return _error(f"{args.base}: already contains a kva marker block; refusing to merge again")
+        return _error(f"{args.base}: already contains a ridgefill marker block; refusing to merge again")
     if Path(args.out).resolve() == Path(args.base).resolve():
         return _error(f"{args.out}: output would overwrite the base template {args.base}")
     _write_bytes(args.out, block + base)
-    print(f"merged: {args.out} = {len(block)}-byte kva block + {args.base} ({len(base)} bytes, unchanged)")
+    print(f"merged: {args.out} = {len(block)}-byte ridgefill block + {args.base} ({len(base)} bytes, unchanged)")
     return 0
 
 
@@ -355,7 +355,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     base = _read_bytes(args.base)
     merged = _read_bytes(args.merged)
     if merged == block + base:
-        print(f"OK: {args.merged} is the {len(block)}-byte kva block for spec {args.spec} "
+        print(f"OK: {args.merged} is the {len(block)}-byte ridgefill block for spec {args.spec} "
               f"followed by {args.base} ({len(base)} bytes)")
         return 0
     if len(merged) >= len(block) and merged[: len(block)] == block:
@@ -365,10 +365,10 @@ def cmd_check(args: argparse.Namespace) -> int:
         if len(rest) != len(base):
             reason += f" (lengths {len(rest)} vs {len(base)})"
     elif len(merged) < len(block) and merged == block[: len(merged)]:
-        reason = f"file ends after {len(merged)} bytes; the kva block for spec {args.spec} is {len(block)} bytes"
+        reason = f"file ends after {len(merged)} bytes; the ridgefill block for spec {args.spec} is {len(block)} bytes"
     else:
         n = _first_diff(merged[: len(block)], block)
-        reason = f"kva marker block does not match spec {args.spec} at byte {n}"
+        reason = f"ridgefill marker block does not match spec {args.spec} at byte {n}"
     return _error(f"{args.merged}: {reason}")
 
 
@@ -377,14 +377,14 @@ def cmd_strip(args: argparse.Namespace) -> int:
     end_marker = MARKER_END.encode("utf-8")
     idx = merged.find(end_marker)
     if idx < 0:
-        return _error(f"{args.merged}: no kva marker block to strip ({MARKER_END} not found)")
+        return _error(f"{args.merged}: no ridgefill marker block to strip ({MARKER_END} not found)")
     block = merged[: idx + len(end_marker)]
     if not block.startswith(MARKER_START.encode("utf-8")):
-        return _error(f"{args.merged}: kva marker end found but the leading marker comment is missing or corrupt")
+        return _error(f"{args.merged}: ridgefill marker end found but the leading marker comment is missing or corrupt")
     if Path(args.out).resolve() == Path(args.merged).resolve():
         return _error(f"{args.out}: output would overwrite {args.merged}")
     _write_bytes(args.out, merged[idx + len(end_marker):])
-    print(f"stripped: {args.out} = {args.merged} minus {len(block)}-byte kva block")
+    print(f"stripped: {args.out} = {args.merged} minus {len(block)}-byte ridgefill block")
     return 0
 
 
@@ -395,7 +395,7 @@ def cmd_strip(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog=PROG,
-        description="Build, merge, verify and strip the KVA chat-template marker snippet.",
+        description="Build, merge, verify and strip the RidgeFill chat-template marker snippet.",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

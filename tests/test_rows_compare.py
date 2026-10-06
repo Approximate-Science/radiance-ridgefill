@@ -1,4 +1,4 @@
-"""tools/rows_compare.py helpers, and the R33 fixture against a built sidecar (KVA_SIDECAR; SKIPPED without it).
+"""tools/rows_compare.py helpers, and the R33 fixture against a built sidecar (RIDGEFILL_SIDECAR; SKIPPED without it).
 Run: python -m pytest tests/
 """
 import hashlib
@@ -12,7 +12,7 @@ import pytest
 from safetensors import safe_open
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
-import kva_rules as R  # noqa: E402
+import ridgefill_rules as R  # noqa: E402
 import rows_compare as C  # noqa: E402
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "rowsel_quick9.json"
@@ -62,10 +62,10 @@ def test_fixture_has_a_half_to_even_rounding_case():
     assert any(doc["matches"] % 4 == 2 and doc["k"] == doc["matches"] // 4 for doc in fixture["docs"])
 
 
-@pytest.mark.skipif(not os.environ.get("KVA_SIDECAR"), reason="needs KVA_SIDECAR (a built kva-sidecar.safetensors)")
+@pytest.mark.skipif(not os.environ.get("RIDGEFILL_SIDECAR"), reason="needs RIDGEFILL_SIDECAR (a built ridgefill-sidecar.safetensors)")
 def test_fixture_matches_the_sidecar_score_table():
     fixture = json.loads(FIXTURE.read_text())
-    with safe_open(os.environ["KVA_SIDECAR"], "np") as f:
+    with safe_open(os.environ["RIDGEFILL_SIDECAR"], "np") as f:
         score = np.ascontiguousarray(f.get_tensor(fixture["score_tensor"]), dtype="<f4")
     assert hashlib.sha256(score.tobytes()).hexdigest() == fixture["score_sha256"]
     assert score[fixture["kept_ids"]].tolist() == fixture["kept_scores"]

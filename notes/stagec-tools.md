@@ -15,7 +15,7 @@ projected late-K/V by the producer — the hazard, bounded by `min(N1−N2, T−
 measures it with 20 (doc, long question, short question) triples and the device hazard
 counter (PLAN-FIX §5.4); R68 cross-checks the counter against a log-side instrument over
 response `timings`. These tools are those two instruments; the **engine-side** counter and its
-`kva_hazard_read` plumbing are another worker's, and this file does not design them.
+`ridgefill_hazard_read` plumbing are another worker's, and this file does not design them.
 
 Engine facts these tools rely on (all verified in the tree):
 
@@ -98,11 +98,11 @@ checkpoint, carrying the device hazard counter. **The contract is the named cons
 
 ```python
 HAZARD_LOG_RE = re.compile(
-    r"\bkva:\s+hazard\b(?:\s+request\s+(?P<request>\S+))?\s+(?P<positions>\d+)\s+positions\b")
+    r"\bridgefill:\s+hazard\b(?:\s+request\s+(?P<request>\S+))?\s+(?P<positions>\d+)\s+positions\b")
 ```
 
-i.e. `kva: hazard <positions> positions` or `kva: hazard request <id> <positions> positions`
-(extra line text is ignored; a `kva` line the regex does not match is reported as unparsed,
+i.e. `ridgefill: hazard <positions> positions` or `ridgefill: hazard request <id> <positions> positions`
+(extra line text is ignored; a `ridgefill` line the regex does not match is reported as unparsed,
 never dropped; unnamed lines count toward the total only). `--require-match` exits 1 when
 the two instruments disagree. On the branch corpus they must agree per request (the counter
 equals `min(N1−N2, T−(N2−P))`, which the construction makes equal to the records-side
@@ -124,7 +124,7 @@ overlap); on append-only traffic the plugin must report 0 and the flag must stay
 
 ## Caveats
 
-- `--tail` is the plugin's `kva.tail` (T). The defaults match the protocol (2048/2048); the
+- `--tail` is the plugin's `ridgefill.tail` (T). The defaults match the protocol (2048/2048); the
   two knobs are kept separate because `--checkpoint-interval` below `max_tok` is the
   documented operator route (R84).
 - The predicted counts are the **cache-side superset**; whether an overlapped position was

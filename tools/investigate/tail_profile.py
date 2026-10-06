@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Where in the exact tail the KVA loss sits on radiance: mean NLL delta vs exact by tail position bucket
+"""Where in the exact tail the RidgeFill loss sits on radiance: mean NLL delta vs exact by tail position bucket
 (512-token quarters of the 2,047 scored rows), per arm, over the 9 quick docs or the 6 docs tcc matches.
 Row i of a doc predicts token score_from + i + 1, so quarter q covers tokens P+1+512q .. P+512(q+1). Read-only."""
 import json, os, sys

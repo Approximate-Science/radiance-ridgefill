@@ -3,13 +3,13 @@
 
   mask_rule.py --dump DIR --sidecar F [--lengths 9216,10000,...] [--chunk 2048] [--tail 2048] [--tile 64]
 
-DIR holds the RADIANCE_KVA_DUMP files of a quality-mode run of one-sequence prompts (prefix cache off, no
+DIR holds the RADIANCE_RIDGEFILL_DUMP files of a quality-mode run of one-sequence prompts (prefix cache off, no
 decoders): mask.jsonl and rows.jsonl, one line per masked approximate chunk, in step order. For each prompt
 (a chunk_start of 0 begins one) the rule is recomputed from N alone:
 
   chunks [p, p + min(chunk, N - p)), n_ahead = min(N - end, chunk);
   b = n_tok if n_ahead >= T else n_tok - ceil_tile(T - n_ahead); approximated iff n_ahead > 0 and b > 0;
-  mask = 0 on [b, n_tok); on [0, b) the class rule (tools/kva_rules.select_rows over ids[0:b] with the
+  mask = 0 on [b, n_tok); on [0, b) the class rule (tools/ridgefill_rules.select_rows over ids[0:b] with the
   sidecar's score table and share); bounds = {0, b, b, n_tok}.
 
 N is each prompt's entry of --lengths, in send order (a capped n_ahead makes N unrecoverable from the dump:
@@ -23,7 +23,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "tools"))
-import kva_rules as R  # noqa: E402
+import ridgefill_rules as R  # noqa: E402
 from safetensors import safe_open  # noqa: E402
 
 
@@ -81,15 +81,15 @@ def check_prompt(group, n, score, share, args):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--dump", required=True)
-    ap.add_argument("--sidecar", required=True, help="the sidecar safetensors holding kva.rowsel.score")
+    ap.add_argument("--sidecar", required=True, help="the sidecar safetensors holding ridgefill.rowsel.score")
     ap.add_argument("--lengths", required=True, help="comma-separated prompt lengths, in the order the run sent them")
     ap.add_argument("--chunk", type=int, default=2048)
     ap.add_argument("--tail", type=int, default=2048)
     ap.add_argument("--tile", type=int, default=64)
     args = ap.parse_args(argv)
     with safe_open(args.sidecar, "np") as f:
-        score = f.get_tensor("kva.rowsel.score")
-        share = float((f.metadata() or {})["kva.rowsel.share"])
+        score = f.get_tensor("ridgefill.rowsel.score")
+        share = float((f.metadata() or {})["ridgefill.rowsel.share"])
     read = lambda name: [json.loads(x) for x in (Path(args.dump) / name).read_text().splitlines() if x.strip()]
     lengths = [int(x) for x in args.lengths.split(",") if x]
     groups = prompts(read("mask.jsonl"), read("rows.jsonl"))

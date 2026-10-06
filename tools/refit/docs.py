@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import kva_research  # noqa: E402
+import ridgefill_research  # noqa: E402
 
 MIN_PROMPTS = 13        # R43: the shipped +st fit's prompt count
 MIN_CHUNK_ENDS = 50     # R43: chunk ends per late GDN layer
@@ -47,7 +47,7 @@ def chunk_ends(n_tokens, tail, chunk):
 
 def fncap2_order(plans_dir):
     """{name: (index, text)} in FN-CAP2's capture order: plan-train's calibration documents, then the held ones."""
-    from kva import data as kd
+    from ridgefill import data as kd
     train = [x for x in json.loads((kd.INPUTS / "plan-train.json").read_text()) if x["kind"] == "calib"]
     held = kd.calib_docs("held")
     if len(train) != 99 or len(held) != 5:
@@ -81,7 +81,7 @@ def train_items(plans_dir, excluded):
 
 
 def held_items(plans_dir):
-    from kva import data as kd
+    from ridgefill import data as kd
     from qfn.steps import chat_text
     order = fncap2_order(plans_dir)
     items = []
@@ -93,7 +93,7 @@ def held_items(plans_dir):
 
 def sterm_items(plans_dir, encode, tail, chunk, extra_tokens):
     """[(source, name, format, text, cut)]: plan-sterm minus exclusions, then b2 impact documents cut to extra_tokens."""
-    from kva import data as kd
+    from ridgefill import data as kd
     items = [("sterm", d["name"], "raw", d["text"], None) for d in kd.calib_docs("sterm")]
     ends = sum(chunk_ends(len(encode(t)), tail, chunk) for *_, t, _ in items)
     extra = (d for d in json.loads((plans_dir / "PLAN-b2.json").read_text())
@@ -125,7 +125,7 @@ def write_set(out, name, items, encode, max_prompt, tail, chunk):
 
 
 def cmd_build(a):
-    kva_research.root()
+    ridgefill_research.root()
     from tokenizers import Tokenizer
     tok = Tokenizer.from_file(a.tokenizer)
     encode = lambda text: tok.encode(text, add_special_tokens=False).ids  # noqa: E731
@@ -157,8 +157,8 @@ def cmd_build(a):
 
 def cmd_overlap(a):
     """Every held and sterm text against the suite (and the locked set) with FN-BIGCAP's own 50-gram check."""
-    kva_research.root()
-    from kva import data as kd
+    ridgefill_research.root()
+    from ridgefill import data as kd
     from qfn import bigcap_overlap as ov
     prompts = Path(a.prompts)
     keys = {r["key"] for s in ("held", "sterm") for r in map(json.loads, open(prompts / f"{s}.jsonl"))}

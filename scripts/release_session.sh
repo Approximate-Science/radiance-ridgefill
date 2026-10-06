@@ -24,9 +24,9 @@
 #      (tools/mtp_accept.py: 16K prompt, 256 greedy tokens, 3 reps) on stock and quality
 #   4  needle (tools/needle.py): one corpus, built once, run on round a's three servers; compare with McNemar
 #   5  R64 redefined (tools/turn2.py): turn 2 with the prefix cache vs --no-prefix-cache vs exact (mode off),
-#      logits captured over HTTP (RADIANCE_KVA_DUMP_LOGITS), compared by tools/logit_compare.py
+#      logits captured over HTTP (RADIANCE_RIDGEFILL_DUMP_LOGITS), compared by tools/logit_compare.py
 # The plugin and projector every server uses are the EXTRACTED PACKAGES (what a user installs), the projector found by
-# discovery beside the model (no RADIANCE_KVA_PROJECTOR).
+# discovery beside the model (no RADIANCE_RIDGEFILL_PROJECTOR).
 set -u
 W=$(CDPATH= cd "$(dirname "$0")/.." && pwd)
 cd "$W" || exit 1
@@ -88,14 +88,14 @@ log "RELEASE start $(date -u +%FT%TZ) boot $(cat /proc/sys/kernel/random/boot_id
 # 0 + 1 ------------------------------------------------------------------------------------------------
 X=$E/extract-$RK_RELEASE_VERSION
 if has package; then
-if [ -f "$D/home-$SHORT/kernels/kva.so" ] && [ -f "$E/frozen_home-$SHORT.out" ]; then
+if [ -f "$D/home-$SHORT/kernels/ridgefill.so" ] && [ -f "$E/frozen_home-$SHORT.out" ]; then
   log "home $SHORT: reused ($(grep 'tests passed' "$E/frozen_home-$SHORT.out"))"
 else
   scripts/frozen_home.sh "$SHORT" > "$E/frozen_home-$SHORT.out" 2>&1 ||
     { log "frozen home FAILED: $(grep -E 'FAIL|error' "$E/frozen_home-$SHORT.out" | head -5 | tr '\n' '|')"; exit 2; }
   log "home $SHORT: $(grep 'tests passed' "$E/frozen_home-$SHORT.out")"
 fi
-python3 tools/package.py --home "$D/home-$SHORT" --projector "$D/projector-qwen38fn-int8" --out "$RK_RELEASE_DIST" \
+python3 tools/package.py --home "$D/home-$SHORT" --projector "$D/projector-ridgefill-qwen38fn-int8" --out "$RK_RELEASE_DIST" \
   --version "$RK_RELEASE_VERSION" --commit "$COMMIT" --radiance-version "$RK_RADIANCE_VERSION" > "$E/package-$RK_RELEASE_VERSION.out" 2>&1 ||
   { log "package FAILED: $(tail -3 "$E/package-$RK_RELEASE_VERSION.out" | tr '\n' '|')"; exit 2; }
 (cd "$RK_RELEASE_DIST" && sha256sum -c SHA256SUMS) > "$E/dist-sums.txt" 2>&1 || { log "dist SHA256SUMS FAILED"; exit 2; }
@@ -106,7 +106,7 @@ log "dist: $(cd "$RK_RELEASE_DIST" && ls -1 | tr '\n' ' '); every SHA256SUMS ver
 cat "$RK_RELEASE_DIST/SHA256SUMS" | tee -a "$E/session.log"
 fi
 [ -d "$X" ] || { log "no extracted packages for version $RK_RELEASE_VERSION ($X): run the package part"; exit 2; }
-PLUGIN=$(ls -d "$X"/radiance-kva-*/ | head -1); PROJ=$(ls -d "$X"/projector-qwen3.8-flash-next-*/ | head -1)
+PLUGIN=$(ls -d "$X"/radiance-ridgefill-*/ | head -1); PROJ=$(ls -d "$X"/ridgefill-projector-qwen3.8-flash-next-*/ | head -1)
 export RK_PLUGIN_HOME=${PLUGIN%/}
 MOUNT="-v ${PROJ%/}:/models/projector:ro"   # the extracted projector beside the model, as a user lays it out
 
@@ -146,13 +146,13 @@ arm() {   # label mode: serve, warm, time, decode (stock/quality), the needle on
     python3 tools/settle.py --out "$E/warm-$label.json" --docs "$RK_DOCS" --cycles 3 --lengths "2048 16384 32768" > "$E/warm-$label.txt" 2>&1
     RK_LENGTHS="16384 32768" RK_REPS=7 scripts/speed.sh "$label" > "$E/speed-$label.out" 2>&1 || log "$label: speed.sh FAILED"
     [ "$mode" = speed ] || python3 tools/mtp_accept.py --docs "$RK_DOCS" --reps 3 --out "$E/decode-$label.json" > "$E/decode-$label.txt" 2>&1
-    log "== $label ($mode; $q) $(docker logs "radiance-kva-$mode" 2>&1 | grep -m1 -oE 'I\[0\] mover: [0-9]+ slab slots')"
+    log "== $label ($mode; $q) $(docker logs "radiance-ridgefill-$mode" 2>&1 | grep -m1 -oE 'I\[0\] mover: [0-9]+ slab slots')"
     sed 's/^/    warm /' "$E/warm-$label.txt" | tee -a "$E/session.log"
     log "    $(grep -E 'median' "$E/speed-$label.out" | tr -s ' ' | tr '\n' '|')"
     [ -f "$E/decode-$label.txt" ] && log "    decode: $(tail -1 "$E/decode-$label.txt"); $(grep -o 'decode [0-9.]* ms/tok' "$E/decode-$label.txt" | tr '\n' ' ')"
     has needle && [ "${label##*-}" = "${RK_RELEASE_NEEDLE_ROUND:-b}" ] && needle_on "$mode"
   else log "== $label: serve FAILED -- $(tail -2 "$E/serve-$label.out" | tr '\n' '|')"; fi
-  docker logs "radiance-kva-$mode" > "$E/$label.serve.log" 2>&1
+  docker logs "radiance-ridgefill-$mode" > "$E/$label.serve.log" 2>&1
   scripts/stop.sh > /dev/null 2>&1; drop_cache; klog
 }
 if has headline; then
@@ -178,12 +178,12 @@ r64() {   # label mode extra-flags
     f=$(echo "$f" | sed -e 's/ --prefix-cache-host-mib [0-9]*//' -e 's| --prefix-cache-dir [^ ]*||' -e 's/ --prefix-cache-disk-mib [0-9]*//') ;;
   esac
   if env RK_FLAGS="$f $extra" RK_DOCKER_EXTRA="$MOUNT -v $R/dump-$label:/dump" \
-       RADIANCE_KVA_DUMP_LOGITS=/dump scripts/serve.sh "$mode" --profile-ops > "$R/serve-$label.out" 2>&1; then
+       RADIANCE_RIDGEFILL_DUMP_LOGITS=/dump scripts/serve.sh "$mode" --profile-ops > "$R/serve-$label.out" 2>&1; then
     [ -f "$R/conv.json" ] || python3 tools/turn2.py build --docs "$RK_DOCS" --out "$R/conv.json" > "$R/build.out" 2>&1
     python3 tools/turn2.py run --conv "$R/conv.json" --dump "$R/dump-$label" --out "$R/manifest-$label.json" > "$R/run-$label.out" 2>&1
     log "R64 $label: $(tr '\n' '|' < "$R/run-$label.out")"
   else log "R64 $label: serve FAILED"; fi
-  docker logs "radiance-kva-$mode" > "$R/$label.serve.log" 2>&1; scripts/stop.sh > /dev/null 2>&1; drop_cache; klog
+  docker logs "radiance-ridgefill-$mode" > "$R/$label.serve.log" 2>&1; scripts/stop.sh > /dev/null 2>&1; drop_cache; klog
 }
 r64 exact off ""
 r64 cache quality ""

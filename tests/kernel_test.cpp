@@ -1,11 +1,11 @@
-/* kernel_test.cpp -- the kva kernel library, seen the way the engine sees it: dlopen'd, its rows
+/* kernel_test.cpp -- the ridgefill kernel library, seen the way the engine sees it: dlopen'd, its rows
  * found by op and domain, called through RadArgs with the operands in schema order.
  *
- *   kernel_test <path/to/kva.so> host [lib.so ...]   cases that need no card (host rows, the oracles)
- *   kernel_test <path/to/kva.so> gpu  [lib.so ...]   device rows against the host rows (needs a ROCm device)
+ *   kernel_test <path/to/ridgefill.so> host [lib.so ...]   cases that need no card (host rows, the oracles)
+ *   kernel_test <path/to/ridgefill.so> gpu  [lib.so ...]   device rows against the host rows (needs a ROCm device)
  *
  * The trailing libraries are loaded FIRST, as the engine's loader has every plugin mapped before it
- * reads kva.so's rows: libr4d and libref, whose gemm_nt_bias rows kva_gemm_nt_bias forwards to
+ * reads ridgefill.so's rows: libr4d and libref, whose gemm_nt_bias rows ridgefill_gemm_nt_bias forwards to
  * (kernels/forward.cpp). Without them that op has no row, which one case checks.
  *
  * A case that cannot run prints SKIP and its reason and asserts nothing. The binary exits 77
@@ -25,7 +25,7 @@
 #include <string>
 #include <vector>
 
-#ifdef KVA_TEST_HIP
+#ifdef RIDGEFILL_TEST_HIP
 #include <hip/hip_runtime_api.h>
 #endif
 
@@ -183,7 +183,7 @@ static int run_host(const RadKernelInfo* row, std::vector<Buf*> opds, const std:
     return launch(row, t, p, nullptr);
 }
 
-#ifdef KVA_TEST_HIP
+#ifdef RIDGEFILL_TEST_HIP
 static bool hip_ok(hipError_t e, const char* what) {
     if (e == hipSuccess) return true;
     fail_at(__FILE__, __LINE__, std::string(what) + ": " + hipGetErrorString(e));
@@ -243,7 +243,7 @@ static bool have_device() {
  * Returns false (having printed SKIP) when this build or machine cannot run the group. */
 static bool group_runnable() {
     if (g_group != "gpu") return true;
-#ifdef KVA_TEST_HIP
+#ifdef RIDGEFILL_TEST_HIP
     if (have_device()) return true;
     skip("no ROCm device visible");
 #else
@@ -253,7 +253,7 @@ static bool group_runnable() {
 }
 
 static int run_group(const RadKernelInfo* row, std::vector<Buf*> opds, const std::vector<RadParam>& p) {
-#ifdef KVA_TEST_HIP
+#ifdef RIDGEFILL_TEST_HIP
     if (row->domain == RAD_DOMAIN_DEVICE) return run_device(row, opds, p);
 #endif
     return run_host(row, opds, p);
@@ -292,12 +292,12 @@ static Buf from_desc(const RadOpdDesc& d, int64_t prev_extent, int64_t m, Rng& r
 
 /* The geometry each op is described and exercised at in the generic cases. */
 static std::vector<RadParam> described_params(const char* op) {
-    if (!std::strcmp(op, "kva_mask"))
+    if (!std::strcmp(op, "ridgefill_mask"))
         return { pint("M", 64), pf64("share", 0.25), pint("seed", 7), pstr("mode", "class") };
-    if (!std::strcmp(op, "kva_select")) return { pint("M", 37) };
-    if (!std::strcmp(op, "kva_drop_rows")) return { pint("M", 37), pint("top_k", 5) };
-    if (!std::strcmp(op, "kva_rho_update")) return { pint("M", 48), pint("n_head", 4) };
-    if (!std::strcmp(op, "kva_state_read"))
+    if (!std::strcmp(op, "ridgefill_select")) return { pint("M", 37) };
+    if (!std::strcmp(op, "ridgefill_drop_rows")) return { pint("M", 37), pint("top_k", 5) };
+    if (!std::strcmp(op, "ridgefill_rho_update")) return { pint("M", 48), pint("n_head", 4) };
+    if (!std::strcmp(op, "ridgefill_state_read"))
         return { pint("M", 3), pint("n_head", 2), pint("sd0", 8), pint("sd1", 8) };
     return { pint("M", 3), pstr("mode", "apply"), pf64("alpha", 1.0), pint("n_head", 2),
              pint("sd0", 8), pint("sd1", 8) };
@@ -323,8 +323,8 @@ static bool described_operands(const RadKernelInfo* row, const std::vector<RadPa
     return true;
 }
 
-static const char* const kOps[] = { "kva_mask", "kva_select", "kva_drop_rows", "kva_rho_update",
-                                    "kva_state_correct", "kva_state_read", "kva_hazard" };
+static const char* const kOps[] = { "ridgefill_mask", "ridgefill_select", "ridgefill_drop_rows", "ridgefill_rho_update",
+                                    "ridgefill_state_correct", "ridgefill_state_read", "ridgefill_hazard" };
 
 /* Rows whose launch is still a stub (R8). Emptied as each row was implemented (all six were stubs
  * at the Stage 1 commit, 43bfeda); with none left the case skips and says R8 is retired. */
@@ -372,7 +372,7 @@ TEST(stub_refuses, "both") {
         const std::vector<RadParam> p = described_params(op);
         REQUIRE(described_operands(row, p, store, opds));
         const int rc = run_group(row, opds, p);
-        std::fprintf(stderr, "  kernel %s (kva, %s domain) refused op '%s': %s\n", row->name,
+        std::fprintf(stderr, "  kernel %s (ridgefill, %s domain) refused op '%s': %s\n", row->name,
                      row->domain == RAD_DOMAIN_HOST ? "host" : "device", op, rad_strerror(rc));
         CHECK_EQ(rc, RAD_E_UNSUPPORTED);
     }
@@ -419,7 +419,7 @@ TEST(params_carry_no_role, "both") {
 
 static const int32_t kSentinel = 0x5A5A5A5A;
 
-/* One kva_mask call. token_ids is `ids` (so b is its extent), the mask has n rows, cu_last is
+/* One ridgefill_mask call. token_ids is `ids` (so b is its extent), the mask has n rows, cu_last is
  * {s, e}; row i's position is first_pos + i, laid out component-major [components, b] when
  * components > 1 (row 0 the index, the rest junk). A null table passes `score` absent. */
 struct MaskCall {
@@ -482,7 +482,7 @@ static bool mask_shaped(const MaskOut& o, int32_t s, int32_t end, int32_t e) {
     return o.bounds == std::vector<int32_t>{ s, end, end, e };
 }
 
-/* kva_select's operands: sources filled with a pattern, destinations with a sentinel byte, so a
+/* ridgefill_select's operands: sources filled with a pattern, destinations with a sentinel byte, so a
  * byte the op should not write shows. A pair whose source is an empty Buf is passed absent. */
 struct SelectRun { Buf mask, xs, qs, ss, x, q, s; };
 
@@ -498,7 +498,7 @@ static int run_select(const RadKernelInfo* row, SelectRun& k) {
                      { pint("M", k.mask.t.shape[0]) });
 }
 
-/* After kva_select: every destination byte is its source's on rows i < n with mask[i] == 1 inside
+/* After ridgefill_select: every destination byte is its source's on rows i < n with mask[i] == 1 inside
  * the row width, and what it was before everywhere else (padding, rows past n, other mask values). */
 static bool selected_exactly(const Buf& src, const Buf& before, const Buf& after,
                              const std::vector<int32_t>& mask) {
@@ -524,7 +524,7 @@ static int run_drop(const RadKernelInfo* row, Buf& mask, Buf& ids, long long top
     return run_group(row, { &mask, &ids }, { pint("M", mask.t.shape[0]), pint("top_k", top_k) });
 }
 
-/* After kva_drop_rows: -1 exactly on columns < top_k of rows i < n with mask[i] == 1, every other
+/* After ridgefill_drop_rows: -1 exactly on columns < top_k of rows i < n with mask[i] == 1, every other
  * element (columns >= top_k, padding, rows past n) as before. */
 static bool dropped_exactly(const Buf& before, const Buf& after, const std::vector<int32_t>& mask,
                             int64_t top_k) {
@@ -545,7 +545,7 @@ struct RhoRun {
     std::vector<int32_t> mask;
     std::vector<float> a_log, dt_bias;
     std::vector<float> nd;           /* [slots, heads, 2] (N, D); updated in place by run_rho */
-    std::vector<int32_t> bounds;     /* kva_mask's bounds operand; empty = absent */
+    std::vector<int32_t> bounds;     /* ridgefill_mask's bounds operand; empty = absent */
 };
 
 /* `bounds_as` replaces c.bounds by an arbitrary operand (the refusal cases). */
@@ -593,7 +593,7 @@ static RhoRun random_rho(Rng& r, int64_t n, int64_t heads, double exact_share, b
     return c;
 }
 
-/* Rows [s, n) of a case alone: what kva_rho_update with bounds {s, ..} must equal. */
+/* Rows [s, n) of a case alone: what ridgefill_rho_update with bounds {s, ..} must equal. */
 static RhoRun rho_slice(const RhoRun& c, int64_t s) {
     RhoRun out = c;
     out.n = c.n - s;
@@ -644,7 +644,7 @@ static CorrectRun correct_operands(int64_t slots, int64_t heads, int64_t sd0, in
     return k;
 }
 
-/* `bounds` is kva_mask's bounds operand; empty = absent. */
+/* `bounds` is ridgefill_mask's bounds operand; empty = absent. */
 static int run_correct(const RadKernelInfo* row, CorrectRun& k, const char* mode, double alpha,
                        bool with_nd, const std::vector<int32_t>& bounds = {}) {
     Buf b = make(RAD_I32, { (int64_t)bounds.size() });
@@ -656,7 +656,7 @@ static int run_correct(const RadKernelInfo* row, CorrectRun& k, const char* mode
                        pint("n_head", k.heads), pint("sd0", k.sd0), pint("sd1", k.sd1) });
 }
 
-/* kva_state_read on k.state through `index`; `out` starts as a sentinel so an unwritten element
+/* ridgefill_state_read on k.state through `index`; `out` starts as a sentinel so an unwritten element
  * shows. Returns the launch status. */
 static int run_state_read(const RadKernelInfo* row, CorrectRun& k, Buf& index, Buf& out) {
     out = make(RAD_F32, { index.t.shape[0], k.heads, k.sd0, k.sd1 });
@@ -678,7 +678,7 @@ static int64_t st_at(const CorrectRun& k, int64_t s, int64_t h, int64_t i, int64
  * the table and k at .5; the rows outside it carry the table's best id, so a row that ranked from
  * row 0 instead of s, or past b', would keep them. */
 TEST(mask_class_semantics, "host") {
-    const RadKernelInfo* row = find_row("kva_mask", RAD_DOMAIN_HOST);
+    const RadKernelInfo* row = find_row("ridgefill_mask", RAD_DOMAIN_HOST);
     REQUIRE(row != nullptr);
     const std::vector<float> table = { 5.0f, 3.0f, -INFINITY, 5.0f, 1.0f, NAN, INFINITY, 2.0f };
     MaskCall c;
@@ -707,7 +707,7 @@ TEST(mask_class_semantics, "host") {
 /* The optional `zeros` output is written 0 on every element, whatever the window -- the stager
  * probes' expert offsets (notes/impl.md) -- and its absence changes nothing else. */
 TEST(mask_writes_zeros_when_asked, "host") {
-    const RadKernelInfo* row = find_row("kva_mask", RAD_DOMAIN_HOST);
+    const RadKernelInfo* row = find_row("ridgefill_mask", RAD_DOMAIN_HOST);
     REQUIRE(row != nullptr);
     MaskCall c;
     c.ids = std::vector<int32_t>(64, 3);
@@ -723,7 +723,7 @@ TEST(mask_writes_zeros_when_asked, "host") {
 /* b' = min(max(b, s), e): a bulk end before s is an empty window, one past e stops at e; an empty
  * last sequence (s == e) and s == b are empty windows; none writes 1 exactly on W, all writes 0. */
 TEST(mask_window_clamping, "host") {
-    const RadKernelInfo* row = find_row("kva_mask", RAD_DOMAIN_HOST);
+    const RadKernelInfo* row = find_row("ridgefill_mask", RAD_DOMAIN_HOST);
     REQUIRE(row != nullptr);
     struct Win { int64_t b, n; int32_t s, e, end; } wins[] = {
         { 3, 10, 5, 9, 5 },     /* b < s: empty, bounds {5, 5, 5, 9} */
@@ -755,7 +755,7 @@ TEST(mask_window_clamping, "host") {
     }
 }
 
-/* One kva_hazard call on a 4-slot meta pool; `meta` in and out, the count accumulated. The last
+/* One ridgefill_hazard call on a 4-slot meta pool; `meta` in and out, the count accumulated. The last
  * sequence is [s, e) of the step; positions are first_pos + row. bounds absent when b <= 0. */
 struct HazardCall {
     int32_t s = 0, e = 64, first_pos = 0, slot = 1;
@@ -790,7 +790,7 @@ static HazardOut run_hazard(const RadKernelInfo* row, const HazardCall& c) {
  * before its own tail (0). A pass with bounds records its last bulk position; without the span it
  * counts nothing; a slot outside the pool is left alone; cu_last out of order is refused. */
 TEST(hazard_semantics, "host") {
-    const RadKernelInfo* row = find_row("kva_hazard", RAD_DOMAIN_HOST);
+    const RadKernelInfo* row = find_row("ridgefill_hazard", RAD_DOMAIN_HOST);
     REQUIRE(row != nullptr);
     HazardCall c;
     c.s = 0; c.e = 904; c.first_pos = 4096; c.span = 2048; c.m0 = 4096;   /* final chunk, n_ahead 0 */
@@ -821,7 +821,7 @@ TEST(hazard_semantics, "host") {
     CHECK_EQ(run_hazard(row, bad).rc, RAD_E_INVAL);
 }
 
-/* transcribed from kva.h's kva_row_hash, to pin the random rule's key (seed, absolute position). */
+/* transcribed from ridgefill.h's ridgefill_row_hash, to pin the random rule's key (seed, absolute position). */
 static uint32_t test_mix32(uint32_t x) {
     x ^= x >> 16; x *= 0x7feb352dU; x ^= x >> 15; x *= 0x846ca68bU; x ^= x >> 16;
     return x;
@@ -837,7 +837,7 @@ static uint32_t test_row_hash(long long seed, uint32_t position) {
  * same rows; another seed or other positions -> other rows; [3, b] positions read like [b]; class
  * mode does not read positions. */
 TEST(mask_random_semantics, "host") {
-    const RadKernelInfo* row = find_row("kva_mask", RAD_DOMAIN_HOST);
+    const RadKernelInfo* row = find_row("ridgefill_mask", RAD_DOMAIN_HOST);
     REQUIRE(row != nullptr);
     std::vector<float> table(64, -INFINITY);
     for (int i = 0; i < 64; i += 2) table[(size_t)i] = (float)(i % 7);
@@ -870,7 +870,7 @@ TEST(mask_random_semantics, "host") {
 
 /* cu_last out of order is refused by the host row (the device row's fail-safe is a gpu case). */
 TEST(mask_refuses_bad_window, "host") {
-    const RadKernelInfo* row = find_row("kva_mask", RAD_DOMAIN_HOST);
+    const RadKernelInfo* row = find_row("ridgefill_mask", RAD_DOMAIN_HOST);
     REQUIRE(row != nullptr);
     MaskCall c;
     c.ids.assign(8, 0);
@@ -887,9 +887,9 @@ TEST(mask_refuses_bad_window, "host") {
 /* Refusals by name; the parse is shared with the device row. */
 TEST(refuses_bad_operands, "both") {
     if (!group_runnable()) return;
-    const RadKernelInfo* mk = find_row("kva_mask", group_domain());
-    const RadKernelInfo* rh = find_row("kva_rho_update", group_domain());
-    const RadKernelInfo* sc = find_row("kva_state_correct", group_domain());
+    const RadKernelInfo* mk = find_row("ridgefill_mask", group_domain());
+    const RadKernelInfo* rh = find_row("ridgefill_rho_update", group_domain());
+    const RadKernelInfo* sc = find_row("ridgefill_state_correct", group_domain());
     REQUIRE(mk && rh && sc);
     const std::vector<float> table = { 1.0f, 2.0f };
     MaskCall mc;
@@ -947,7 +947,7 @@ TEST(refuses_bad_operands, "both") {
              RAD_E_INVAL);                                  /* ND without its index */
     CHECK_EQ(run_group(sc, { &k.state, nullptr, &k.applied, &k.aidx, &k.c, nullptr, nullptr }, cp),
              RAD_E_INVAL);
-    const RadKernelInfo* sr = find_row("kva_state_read", group_domain());
+    const RadKernelInfo* sr = find_row("ridgefill_state_read", group_domain());
     REQUIRE(sr != nullptr);
     const std::vector<RadParam> rp = { pint("M", 1), pint("n_head", 2), pint("sd0", 4), pint("sd1", 4) };
     std::vector<RadParam> rp_heads = rp;
@@ -958,7 +958,7 @@ TEST(refuses_bad_operands, "both") {
     CHECK_EQ(run_group(sr, { &k.state, &k.sidx, &out16 }, rp), RAD_E_DTYPE);
     CHECK_EQ(run_group(sr, { &k.state, nullptr, &out }, rp), RAD_E_INVAL);
     CHECK_EQ(run_group(sr, { &k.state, &k.sidx, &out }, rp_heads), RAD_E_SHAPE);
-    /* The optional bounds operand of kva_rho_update and kva_state_correct. */
+    /* The optional bounds operand of ridgefill_rho_update and ridgefill_state_correct. */
     Buf bounds1 = make(RAD_I32, { 1 }), bounds_f32 = make(RAD_F32, { 4 });
     Buf bounds_gap = make(RAD_I32, { 2 }, { 2 });
     const std::vector<Buf*> sc_base = { &k.state, &k.sidx, &k.applied, &k.aidx, &k.c, nullptr, nullptr };
@@ -979,7 +979,7 @@ TEST(refuses_bad_operands, "both") {
 /* A straight copy of each sequence's slot through the padded strides; a negative slot and one past
  * the pool read zeros; two sequences may read one slot; the state is left alone. */
 TEST(state_read_semantics, "host") {
-    const RadKernelInfo* row = find_row("kva_state_read", RAD_DOMAIN_HOST);
+    const RadKernelInfo* row = find_row("ridgefill_state_read", RAD_DOMAIN_HOST);
     REQUIRE(row != nullptr);
     CorrectRun k = correct_operands(4, 2, 2, 3, { 0 }, 3);
     for (int64_t s = 0; s < 4; ++s) for (int64_t h = 0; h < 2; ++h) for (int64_t e = 0; e < 6; ++e)
@@ -997,7 +997,7 @@ TEST(state_read_semantics, "host") {
  * depths -- and a second sequence whose applied slot is outside its pool, which is skipped. A row
  * that addressed any pool through another pool's index changes a slot this case checks. */
 TEST(state_correct_separate_slots, "host") {
-    const RadKernelInfo* row = find_row("kva_state_correct", RAD_DOMAIN_HOST);
+    const RadKernelInfo* row = find_row("ridgefill_state_correct", RAD_DOMAIN_HOST);
     REQUIRE(row != nullptr);
     CorrectRun k = correct_operands(6, 1, 2, 2, { 3, 4 }, 1);
     k.applied = make(RAD_F32, { 4, 1, 1, 1 });
@@ -1024,7 +1024,7 @@ TEST(state_correct_separate_slots, "host") {
 }
 
 TEST(state_correct_semantics, "host") {
-    const RadKernelInfo* row = find_row("kva_state_correct", RAD_DOMAIN_HOST);
+    const RadKernelInfo* row = find_row("ridgefill_state_correct", RAD_DOMAIN_HOST);
     REQUIRE(row != nullptr);
     /* Sequences on slots 1, none, 0; slot 2 is nobody's. Values are short binary fractions, so
      * every expected value below is exact and computed in double. */
@@ -1068,7 +1068,7 @@ TEST(state_correct_semantics, "host") {
 }
 
 TEST(rho_semantics, "host") {
-    const RadKernelInfo* row = find_row("kva_rho_update", RAD_DOMAIN_HOST);
+    const RadKernelInfo* row = find_row("ridgefill_rho_update", RAD_DOMAIN_HOST);
     REQUIRE(row != nullptr);
     Rng r{ 11 };
     /* No decay (exp(-1000) is 0, so e = 1): D counts rows, N counts approximated rows. */
@@ -1113,7 +1113,7 @@ TEST(rho_semantics, "host") {
 /* N <= D always (each step is monotone in its inputs and mask <= 1), so rho in [0, 1] before any
  * clamp. Checked raw over random gates and masks. */
 TEST(rho_in_unit_interval, "host") {
-    const RadKernelInfo* row = find_row("kva_rho_update", RAD_DOMAIN_HOST);
+    const RadKernelInfo* row = find_row("ridgefill_rho_update", RAD_DOMAIN_HOST);
     REQUIRE(row != nullptr);
     Rng r{ 21 };
     for (int trial = 0; trial < 20; ++trial) {
@@ -1126,12 +1126,12 @@ TEST(rho_in_unit_interval, "host") {
     }
 }
 
-/* kva_select copies exactly the mask==1 rows of a bf16 x, int8 q and f32 s pair -- padded row
+/* ridgefill_select copies exactly the mask==1 rows of a bf16 x, int8 q and f32 s pair -- padded row
  * pitches that differ between source and destination, destinations with more rows than n, mask
  * values other than 0 and 1 -- and no other byte; the sources are left alone; absent q and s
  * pairs leave x's copy unchanged. */
 TEST(select_copies_masked_rows, "host") {
-    const RadKernelInfo* row = find_row("kva_select", RAD_DOMAIN_HOST);
+    const RadKernelInfo* row = find_row("ridgefill_select", RAD_DOMAIN_HOST);
     REQUIRE(row != nullptr);
     const std::vector<int32_t> mask = { 1, 0, 1, 1, 2, 0, -1, 1, 0 };   /* only 1 copies */
     const int64_t n = (int64_t)mask.size();
@@ -1155,11 +1155,11 @@ TEST(select_copies_masked_rows, "host") {
     CHECK(x_only.x.bytes == k.x.bytes);
 }
 
-/* kva_drop_rows writes -1 on exactly the top_k first columns of the mask==1 rows (a padded pitch,
+/* ridgefill_drop_rows writes -1 on exactly the top_k first columns of the mask==1 rows (a padded pitch,
  * columns past top_k, a row past n, mask values other than 0 and 1 all untouched); top_k 0 writes
  * nothing; top_k equal to the width is accepted. */
 TEST(drop_rows_semantics, "host") {
-    const RadKernelInfo* row = find_row("kva_drop_rows", RAD_DOMAIN_HOST);
+    const RadKernelInfo* row = find_row("ridgefill_drop_rows", RAD_DOMAIN_HOST);
     REQUIRE(row != nullptr);
     const std::vector<int32_t> mask = { 1, 0, 1, 2, -1, 1 };
     Buf m = mask_buf(mask), ids = make(RAD_I32, { 7, 8 }, { 10, 1 });
@@ -1178,8 +1178,8 @@ TEST(drop_rows_semantics, "host") {
 /* Refusals of the two row-copy ops, by name; the parse is shared with the device rows. */
 TEST(select_drop_refuse_bad_operands, "both") {
     if (!group_runnable()) return;
-    const RadKernelInfo* sl = find_row("kva_select", group_domain());
-    const RadKernelInfo* dr = find_row("kva_drop_rows", group_domain());
+    const RadKernelInfo* sl = find_row("ridgefill_select", group_domain());
+    const RadKernelInfo* dr = find_row("ridgefill_drop_rows", group_domain());
     REQUIRE(sl && dr);
     Buf m = mask_buf({ 1, 0, 1 }), m_f32 = make(RAD_F32, { 3 });
     Buf x = make(RAD_BF16, { 3, 4 }), x_f32 = make(RAD_F32, { 3, 4 }), x_wide = make(RAD_BF16, { 3, 5 });
@@ -1214,11 +1214,11 @@ TEST(select_drop_refuse_bad_operands, "both") {
     CHECK_EQ(run_drop(dr, m, ids_gap, 2), RAD_E_STRIDE);
 }
 
-/* kva_rho_update with bounds {s, ..} equals the op without bounds on rows [s, n) alone, bit for
+/* ridgefill_rho_update with bounds {s, ..} equals the op without bounds on rows [s, n) alone, bit for
  * bit, with N and D carried in from an earlier chunk; bounds[0] clamps into [0, n] (below 0: every
  * row; at or past n: N and D written back untouched). */
 TEST(rho_bounds_semantics, "host") {
-    const RadKernelInfo* row = find_row("kva_rho_update", RAD_DOMAIN_HOST);
+    const RadKernelInfo* row = find_row("ridgefill_rho_update", RAD_DOMAIN_HOST);
     REQUIRE(row != nullptr);
     Rng r{ 71 };
     RhoRun base = random_rho(r, 40, 3, 0.3, true);
@@ -1244,10 +1244,10 @@ TEST(rho_bounds_semantics, "host") {
     }
 }
 
-/* kva_state_correct with bounds: an empty bulk (bounds[1] <= bounds[0]) changes no byte of state
+/* ridgefill_state_correct with bounds: an empty bulk (bounds[1] <= bounds[0]) changes no byte of state
  * or applied in either mode; a non-empty one is exactly the op without bounds. */
 TEST(state_correct_bounds, "host") {
-    const RadKernelInfo* row = find_row("kva_state_correct", RAD_DOMAIN_HOST);
+    const RadKernelInfo* row = find_row("ridgefill_state_correct", RAD_DOMAIN_HOST);
     REQUIRE(row != nullptr);
     Rng r{ 81 };
     CorrectRun k = correct_operands(3, 2, 2, 3, { 1, -1, 0 }, 3);
@@ -1288,12 +1288,12 @@ static bool read_list(FILE* f, const char* name, std::vector<float>& v) {
 }
 
 static bool load_rho_fixture(RhoFixture& fx) {
-    const char* path = std::getenv("KVA_RHO_FIXTURE");
+    const char* path = std::getenv("RIDGEFILL_RHO_FIXTURE");
     FILE* f = path ? std::fopen(path, "r") : nullptr;
     if (!f) return false;
     long long heads = 0, chunks = 0, seed = 0;
     int version = 0;
-    bool ok = std::fscanf(f, "kva-rho-fixture %d heads %lld chunks %lld seed %lld", &version, &heads,
+    bool ok = std::fscanf(f, "ridgefill-rho-fixture %d heads %lld chunks %lld seed %lld", &version, &heads,
                           &chunks, &seed) == 4 && version == 1;
     fx.heads = heads;
     ok = ok && read_list(f, "A_log", fx.base.a_log) && read_list(f, "dt_bias", fx.base.dt_bias);
@@ -1316,8 +1316,8 @@ static bool load_rho_fixture(RhoFixture& fx) {
 TEST(rho_matches_numpy_reference, "both") {
     if (!group_runnable()) return;
     RhoFixture fx;
-    if (!load_rho_fixture(fx)) { skip("KVA_RHO_FIXTURE unset or unreadable (tests/rho_ref.py writes it)"); return; }
-    const RadKernelInfo* row = find_row("kva_rho_update", group_domain());
+    if (!load_rho_fixture(fx)) { skip("RIDGEFILL_RHO_FIXTURE unset or unreadable (tests/rho_ref.py writes it)"); return; }
+    const RadKernelInfo* row = find_row("ridgefill_rho_update", group_domain());
     REQUIRE(row != nullptr);
     std::vector<float> nd((size_t)(4 * fx.heads * 2), 0.0f);
     double worst_rho = 0, worst_rel = 0;
@@ -1399,24 +1399,24 @@ static std::vector<int32_t> ints(const Json* j) {
     return v;
 }
 
-/* R33: kva_mask in class mode over window [0, 2048) of each quick doc keeps exactly fnlev.rules'
- * rows (the SIDECAR lane's tools/rows_compare.py fixture, format kva-rowsel-fixture-1); and the
+/* R33: ridgefill_mask in class mode over window [0, 2048) of each quick doc keeps exactly fnlev.rules'
+ * rows (the SIDECAR lane's tools/rows_compare.py fixture, format ridgefill-rowsel-fixture-1); and the
  * same 2048 ids placed at rows [64, 2112) of a 2112-row step (cu_last {64, 2112}, the rows before
  * them the table's best id) keep those rows + 64, with every row before 64 left at 0. */
 TEST(mask_matches_fnlev_rules, "both") {
     if (!group_runnable()) return;
-    const char* path = std::getenv("KVA_ROWSEL_FIXTURE");
+    const char* path = std::getenv("RIDGEFILL_ROWSEL_FIXTURE");
     FILE* f = path ? std::fopen(path, "rb") : nullptr;
-    if (!f) { skip("KVA_ROWSEL_FIXTURE unset or absent (SIDECAR lane: tools/rows_compare.py fixture)"); return; }
+    if (!f) { skip("RIDGEFILL_ROWSEL_FIXTURE unset or absent (SIDECAR lane: tools/rows_compare.py fixture)"); return; }
     std::string body;
     char chunk[65536];
     for (size_t got; (got = std::fread(chunk, 1, sizeof chunk, f)) > 0;) body.append(chunk, got);
     std::fclose(f);
     JsonReader rd{ body.c_str() };
     const Json fx = rd.value();
-    REQUIRE(rd.ok && fx.get("format") && fx.get("format")->str == "kva-rowsel-fixture-1");
-    const RadKernelInfo* row = find_row("kva_mask", group_domain());
-    const RadKernelInfo* host = find_row("kva_mask", RAD_DOMAIN_HOST);
+    REQUIRE(rd.ok && fx.get("format") && fx.get("format")->str == "ridgefill-rowsel-fixture-1");
+    const RadKernelInfo* row = find_row("ridgefill_mask", group_domain());
+    const RadKernelInfo* host = find_row("ridgefill_mask", RAD_DOMAIN_HOST);
     REQUIRE(row && host && fx.get("vocab") && fx.get("kept_ids") && fx.get("kept_scores") &&
             fx.get("docs") && fx.get("share"));
     std::vector<float> table((size_t)fx.get("vocab")->num, -INFINITY);
@@ -1456,7 +1456,7 @@ TEST(mask_matches_fnlev_rules, "both") {
 /* ================================================================== per-rank extents (TP1 / TP2 / TP4)
  * The correction, the state read and the decay sums are per value head, and tensor parallelism hands
  * rank r the contiguous heads [r * H/W, (r + 1) * H/W) (the delta net's own split; the folder's st.L is
- * sliced the same way, kva_projector.h plan_rank). So a rank's row at its extent -- 24 heads at TP2, 12
+ * sliced the same way, ridgefill_projector.h plan_rank). So a rank's row at its extent -- 24 heads at TP2, 12
  * at TP4 -- must compute, byte for byte, the slice of what the row computes over all 48 heads at TP1.
  * The host rows here; the device rows against them at each extent are the "gpu" cases above. */
 
@@ -1491,9 +1491,9 @@ static int64_t heads_differ(const CorrectRun& full, const CorrectRun& part, int6
 }
 
 TEST(each_ranks_heads_compute_their_slice_of_tp1, "host") {
-    const RadKernelInfo* corr = find_row("kva_state_correct", RAD_DOMAIN_HOST);
-    const RadKernelInfo* read = find_row("kva_state_read", RAD_DOMAIN_HOST);
-    const RadKernelInfo* rho = find_row("kva_rho_update", RAD_DOMAIN_HOST);
+    const RadKernelInfo* corr = find_row("ridgefill_state_correct", RAD_DOMAIN_HOST);
+    const RadKernelInfo* read = find_row("ridgefill_state_read", RAD_DOMAIN_HOST);
+    const RadKernelInfo* rho = find_row("ridgefill_rho_update", RAD_DOMAIN_HOST);
     REQUIRE(corr && read && rho);
     const int64_t H = 48, D = 128;   /* the model's value heads and state width */
     Rng r{ 4848 };
@@ -1610,13 +1610,13 @@ static void state_correct_device_vs_host(const RadKernelInfo* dev, const RadKern
 /* At every rank count's per-rank extent: TP1's 48 value heads, TP2's 24, TP4's 12. */
 TEST(state_correct_device_matches_host, "gpu") {
     if (!group_runnable()) return;
-    const RadKernelInfo* dev = find_row("kva_state_correct", RAD_DOMAIN_DEVICE);
-    const RadKernelInfo* host = find_row("kva_state_correct", RAD_DOMAIN_HOST);
+    const RadKernelInfo* dev = find_row("ridgefill_state_correct", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("ridgefill_state_correct", RAD_DOMAIN_HOST);
     REQUIRE(dev && host);
     for (int64_t heads : { 48, 24, 12 }) state_correct_device_vs_host(dev, host, heads);
 }
 
-/* kva_state_read, device vs host: model-sized heads at padded strides, a negative slot, a slot past
+/* ridgefill_state_read, device vs host: model-sized heads at padded strides, a negative slot, a slot past
  * the pool and a repeated slot; the outputs agree to the bit and the out-of-pool rows are zeros. */
 static void state_read_device_vs_host(const RadKernelInfo* dev, const RadKernelInfo* host, int64_t heads) {
     Rng r{ (uint64_t)(61 + heads) };
@@ -1638,8 +1638,8 @@ static void state_read_device_vs_host(const RadKernelInfo* dev, const RadKernelI
 
 TEST(state_read_device_matches_host, "gpu") {
     if (!group_runnable()) return;
-    const RadKernelInfo* dev = find_row("kva_state_read", RAD_DOMAIN_DEVICE);
-    const RadKernelInfo* host = find_row("kva_state_read", RAD_DOMAIN_HOST);
+    const RadKernelInfo* dev = find_row("ridgefill_state_read", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("ridgefill_state_read", RAD_DOMAIN_HOST);
     REQUIRE(dev && host);
     for (int64_t heads : { 48, 24, 12 }) state_read_device_vs_host(dev, host, heads);
 }
@@ -1648,7 +1648,7 @@ TEST(state_read_device_matches_host, "gpu") {
  * budget: whole step, a window inside, b before s (empty), b past e. */
 static MaskCall random_window(Rng& r, int64_t n, int layout) {
     MaskCall c;
-    const int64_t limit = 8192;   /* KVA_MASK_MAX_ROWS: b above it is a refused geometry */
+    const int64_t limit = 8192;   /* RIDGEFILL_MASK_MAX_ROWS: b above it is a refused geometry */
     int64_t s = layout == 0 ? 0 : r.below(n / 2 + 1), e = n, b = std::min(n, limit);
     if (layout == 1) b = s + r.below(std::max<int64_t>(std::min(e, limit) - s, 0) + 1);
     if (layout >= 2) e = s + r.below(n - s + 1);
@@ -1660,13 +1660,13 @@ static MaskCall random_window(Rng& r, int64_t n, int layout) {
     return c;
 }
 
-/* kva_mask's device leg: device == host on mask and bounds, byte for byte, over random windows
+/* ridgefill_mask's device leg: device == host on mask and bounds, byte for byte, over random windows
  * (s > 0, b before s, b past e, tails), every mode, heavy ties, ids outside the table, n up to
  * past the LDS budget (the mask is not bounded by it, only b is). */
 TEST(mask_device_matches_host, "gpu") {
     if (!group_runnable()) return;
-    const RadKernelInfo* dev = find_row("kva_mask", RAD_DOMAIN_DEVICE);
-    const RadKernelInfo* host = find_row("kva_mask", RAD_DOMAIN_HOST);
+    const RadKernelInfo* dev = find_row("ridgefill_mask", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("ridgefill_mask", RAD_DOMAIN_HOST);
     REQUIRE(dev && host);
     Rng r{ 41 };
     std::vector<float> table(1000);
@@ -1701,12 +1701,12 @@ TEST(mask_device_matches_host, "gpu") {
                  runs, windows, shifted);
 }
 
-/* kva_hazard's device leg: device == host on meta and count over branch, continuation and record
+/* ridgefill_hazard's device leg: device == host on meta and count over branch, continuation and record
  * shapes. */
 TEST(hazard_device_matches_host, "gpu") {
     if (!group_runnable()) return;
-    const RadKernelInfo* dev = find_row("kva_hazard", RAD_DOMAIN_DEVICE);
-    const RadKernelInfo* host = find_row("kva_hazard", RAD_DOMAIN_HOST);
+    const RadKernelInfo* dev = find_row("ridgefill_hazard", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("ridgefill_hazard", RAD_DOMAIN_HOST);
     REQUIRE(dev && host);
     Rng r{ 7 };
     int runs = 0;
@@ -1728,8 +1728,8 @@ TEST(hazard_device_matches_host, "gpu") {
  * 0, bounds {s, s, s, e} clamped; a bulk end past the LDS budget is refused at launch. */
 TEST(mask_device_fail_safe, "gpu") {
     if (!group_runnable()) return;
-    const RadKernelInfo* dev = find_row("kva_mask", RAD_DOMAIN_DEVICE);
-    const RadKernelInfo* host = find_row("kva_mask", RAD_DOMAIN_HOST);
+    const RadKernelInfo* dev = find_row("ridgefill_mask", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("ridgefill_mask", RAD_DOMAIN_HOST);
     REQUIRE(dev && host);
     const std::vector<float> table(8, 1.0f);
     struct Bad { int32_t s, e; std::vector<int32_t> bounds; } bads[] = {
@@ -1754,8 +1754,8 @@ TEST(mask_device_fail_safe, "gpu") {
  * buffer, carried over two chunks); rho within 1e-5, N and D reported. */
 TEST(rho_device_matches_host, "gpu") {
     if (!group_runnable()) return;
-    const RadKernelInfo* dev = find_row("kva_rho_update", RAD_DOMAIN_DEVICE);
-    const RadKernelInfo* host = find_row("kva_rho_update", RAD_DOMAIN_HOST);
+    const RadKernelInfo* dev = find_row("ridgefill_rho_update", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("ridgefill_rho_update", RAD_DOMAIN_HOST);
     REQUIRE(dev && host);
     Rng r{ 51 };
     double worst_rho = 0, worst_rel = 0;
@@ -1782,13 +1782,13 @@ TEST(rho_device_matches_host, "gpu") {
     CHECK(worst_rho <= 1e-5);
 }
 
-/* kva_rho_update with bounds on the device: equal to the device row run on the slice [s, n) bit
+/* ridgefill_rho_update with bounds on the device: equal to the device row run on the slice [s, n) bit
  * for bit (same kernel, same arithmetic), and to the host row within the rho tolerance (expf and
  * log1pf are the device library's, not the host's, so host vs device is not bitwise for rho). */
 TEST(rho_bounds_device_matches_host, "gpu") {
     if (!group_runnable()) return;
-    const RadKernelInfo* dev = find_row("kva_rho_update", RAD_DOMAIN_DEVICE);
-    const RadKernelInfo* host = find_row("kva_rho_update", RAD_DOMAIN_HOST);
+    const RadKernelInfo* dev = find_row("ridgefill_rho_update", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("ridgefill_rho_update", RAD_DOMAIN_HOST);
     REQUIRE(dev && host);
     Rng r{ 91 };
     RhoRun base = random_rho(r, 2048, 24, 0.1, true);
@@ -1812,12 +1812,12 @@ TEST(rho_bounds_device_matches_host, "gpu") {
     CHECK(worst_rho <= 1e-5);
 }
 
-/* kva_state_correct with bounds on the device: host and device agree to the byte for absent,
+/* ridgefill_state_correct with bounds on the device: host and device agree to the byte for absent,
  * empty, inverted and non-empty bounds in both modes, and an empty bulk leaves every byte alone. */
 TEST(state_correct_bounds_device_matches_host, "gpu") {
     if (!group_runnable()) return;
-    const RadKernelInfo* dev = find_row("kva_state_correct", RAD_DOMAIN_DEVICE);
-    const RadKernelInfo* host = find_row("kva_state_correct", RAD_DOMAIN_HOST);
+    const RadKernelInfo* dev = find_row("ridgefill_state_correct", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("ridgefill_state_correct", RAD_DOMAIN_HOST);
     REQUIRE(dev && host);
     Rng r{ 101 };
     CorrectRun k = correct_operands(6, 24, 128, 128, { 4, -1, 1, 5 }, 8);
@@ -1846,13 +1846,13 @@ TEST(state_correct_bounds_device_matches_host, "gpu") {
     std::fprintf(stderr, "  %d runs (undo/apply x absent/empty/inverted/non-empty bounds): device == host bytewise\n", runs);
 }
 
-/* kva_select's device leg: device == host on every destination byte, over random masks (a few
+/* ridgefill_select's device leg: device == host on every destination byte, over random masks (a few
  * non-0/1 values), padded pitches, rows past n, every copy word (16-byte bf16 rows, odd-width
  * int8 / E4M3 codes, 3-wide f32 scales) and absent q / s pairs; and exactly the mask==1 rows. */
 TEST(select_device_matches_host, "gpu") {
     if (!group_runnable()) return;
-    const RadKernelInfo* dev = find_row("kva_select", RAD_DOMAIN_DEVICE);
-    const RadKernelInfo* host = find_row("kva_select", RAD_DOMAIN_HOST);
+    const RadKernelInfo* dev = find_row("ridgefill_select", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("ridgefill_select", RAD_DOMAIN_HOST);
     REQUIRE(dev && host);
     Rng r{ 111 };
     int runs = 0;
@@ -1883,12 +1883,12 @@ TEST(select_device_matches_host, "gpu") {
     std::fprintf(stderr, "  %d configurations, %zu destination bytes: device == host bytewise\n", runs, bytes);
 }
 
-/* kva_drop_rows' device leg: device == host on every ids element over random masks, top_k from 0
+/* ridgefill_drop_rows' device leg: device == host on every ids element over random masks, top_k from 0
  * to past a workgroup's width, padded pitches, rows past n. */
 TEST(drop_rows_device_matches_host, "gpu") {
     if (!group_runnable()) return;
-    const RadKernelInfo* dev = find_row("kva_drop_rows", RAD_DOMAIN_DEVICE);
-    const RadKernelInfo* host = find_row("kva_drop_rows", RAD_DOMAIN_HOST);
+    const RadKernelInfo* dev = find_row("ridgefill_drop_rows", RAD_DOMAIN_DEVICE);
+    const RadKernelInfo* host = find_row("ridgefill_drop_rows", RAD_DOMAIN_HOST);
     REQUIRE(dev && host);
     Rng r{ 121 };
     int runs = 0;
@@ -1908,7 +1908,7 @@ TEST(drop_rows_device_matches_host, "gpu") {
     std::fprintf(stderr, "  %d configurations: device ids == host bytewise\n", runs);
 }
 
-/* ================================================================== kva_gemm_nt_bias (R140)
+/* ================================================================== ridgefill_gemm_nt_bias (R140)
  * The forwarded rows: present exactly when their source library is loaded, carrying the source
  * row's hooks, and writing the bytes gemm_nt_bias writes with the weight as a plain input. */
 
@@ -1928,20 +1928,20 @@ static const RadKernelInfo* source_gemm(const char* plugin, int domain) {
 static const char* gemm_source() { return g_group == "gpu" ? "libr4d" : "libref"; }
 
 TEST(gemm_forward_offers_no_row_without_its_source, "host") {
-    if (!g_preloaded.empty()) { skip("source libraries preloaded; the kva_kernels_alone run checks this"); return; }
-    CHECK(find_schema("kva_gemm_nt_bias") != nullptr);
-    CHECK(find_row("kva_gemm_nt_bias", RAD_DOMAIN_HOST) == nullptr);
-    CHECK(find_row("kva_gemm_nt_bias", RAD_DOMAIN_DEVICE) == nullptr);
-    CHECK(find_schema("kva_gemm_nt_q") != nullptr);
-    CHECK(find_row("kva_gemm_nt_q", RAD_DOMAIN_HOST) == nullptr);
-    CHECK(find_row("kva_gemm_nt_q", RAD_DOMAIN_DEVICE) == nullptr);
+    if (!g_preloaded.empty()) { skip("source libraries preloaded; the ridgefill_kernels_alone run checks this"); return; }
+    CHECK(find_schema("ridgefill_gemm_nt_bias") != nullptr);
+    CHECK(find_row("ridgefill_gemm_nt_bias", RAD_DOMAIN_HOST) == nullptr);
+    CHECK(find_row("ridgefill_gemm_nt_bias", RAD_DOMAIN_DEVICE) == nullptr);
+    CHECK(find_schema("ridgefill_gemm_nt_q") != nullptr);
+    CHECK(find_row("ridgefill_gemm_nt_q", RAD_DOMAIN_HOST) == nullptr);
+    CHECK(find_row("ridgefill_gemm_nt_q", RAD_DOMAIN_DEVICE) == nullptr);
 }
 
 TEST(gemm_forward_is_the_source_row, "both") {
     if (!group_runnable()) return;
     const RadKernelInfo* src = source_gemm(gemm_source(), group_domain());
     if (!src) { skip("the source library is not preloaded"); return; }
-    const RadKernelInfo* row = find_row("kva_gemm_nt_bias", group_domain());
+    const RadKernelInfo* row = find_row("ridgefill_gemm_nt_bias", group_domain());
     REQUIRE(row != nullptr);
     CHECK(row->launch == src->launch && row->describe == src->describe);
     CHECK(row->init == src->init && row->fini == src->fini && row->scratch == src->scratch);
@@ -1971,7 +1971,7 @@ TEST(gemm_forward_matches_its_source_bytewise, "both") {
     if (!group_runnable()) return;
     const RadKernelInfo* src = source_gemm(gemm_source(), group_domain());
     if (!src) { skip("the source library is not preloaded"); return; }
-    const RadKernelInfo* fwd = find_row("kva_gemm_nt_bias", group_domain());
+    const RadKernelInfo* fwd = find_row("ridgefill_gemm_nt_bias", group_domain());
     REQUIRE(fwd != nullptr);
     /* The projector's own shape on the card (N 2560, K 10240); a small one for the naive host row. */
     const bool gpu = g_group == "gpu";
@@ -1987,7 +1987,7 @@ TEST(gemm_forward_matches_its_source_bytewise, "both") {
                  (long long)N, (long long)K, bytes, gemm_source());
 }
 
-/* ================================================================== kva_gemm_nt_q (R79's int8 projector)
+/* ================================================================== ridgefill_gemm_nt_q (R79's int8 projector)
  * libr4d's int8 gemm_nt_q device rows (dtype i8a8), forwarded with their layout hooks: every one of
  * them, and nothing else; and on the card the forwarded rows, fed planes stored by their own
  * relayout hook, compute what libref's gemm_nt_q computes from the canonical planes. */
@@ -2015,7 +2015,7 @@ static std::vector<const RadKernelInfo*> source_i8_rows(const char* plugin) {
 static std::vector<const RadKernelInfo*> forwarded_i8_rows() {
     std::vector<const RadKernelInfo*> out;
     for (int i = 0; i < g_kernel_count(); ++i)
-        if (!std::strcmp(g_kernel_at(i)->op, "kva_gemm_nt_q")) out.push_back(g_kernel_at(i));
+        if (!std::strcmp(g_kernel_at(i)->op, "ridgefill_gemm_nt_q")) out.push_back(g_kernel_at(i));
     return out;
 }
 
@@ -2126,7 +2126,7 @@ TEST(int8_forward_on_stored_planes_matches_libref_on_canonical_ones, "gpu") {
 
 int main(int argc, char** argv) {
     if (argc < 3 || (std::strcmp(argv[2], "host") && std::strcmp(argv[2], "gpu"))) {
-        std::fprintf(stderr, "usage: %s <kva.so> host|gpu [source.so ...]\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <ridgefill.so> host|gpu [source.so ...]\n", argv[0]);
         return 2;
     }
     g_group = argv[2];

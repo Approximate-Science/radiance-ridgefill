@@ -1,12 +1,12 @@
-/* kva_int8.h -- the int8 projector (Stage E, R79): the folder's canonical int8 planes turned into
+/* ridgefill_int8.h -- the int8 projector (Stage E, R79): the folder's canonical int8 planes turned into
  * the stored form the engine's own int8 GEMM reads, once per rank at load.
  *
  * THE FILE IS CANONICAL, THE CARD IS NOT. An int8 folder holds each map in the encoding the
- * container's int8 trunk uses, i8*bf16[1x128] (tools/kva_projector.py int8): codes i8 [n, wide]
+ * container's int8 trunk uses, i8*bf16[1x128] (tools/ridgefill_projector.py int8): codes i8 [n, wide]
  * row-major and a bf16 scale per 128 columns of a row. The GEMM that reads them is libr4d's int8
  * gemm_nt_q, which wants its own arrangement (fragment-order codes, tile-major scales) and says so
- * through its layout/relayout hooks (abi/rad_abi.h:154-201). kva.so forwards those rows as
- * kva_gemm_nt_q WITH their hooks (kernels/forward.cpp); this file finds them in the loaded kva.so
+ * through its layout/relayout hooks (abi/rad_abi.h:154-201). ridgefill.so forwards those rows as
+ * ridgefill_gemm_nt_q WITH their hooks (kernels/forward.cpp); this file finds them in the loaded ridgefill.so
  * and runs relayout on the folder's planes before the upload. So the folder never carries a
  * library's layout, and a libr4d that changes its arrangement changes it here too.
  *
@@ -14,8 +14,8 @@
  * engine picks for a step's M); rows that disagree, or no row at all, refuse the int8 folder by
  * name and the engine serves stock.
  */
-#ifndef KVA_INT8_H
-#define KVA_INT8_H
+#ifndef RIDGEFILL_INT8_H
+#define RIDGEFILL_INT8_H
 
 #include <dlfcn.h>
 #include <link.h>
@@ -23,37 +23,37 @@
 #include <string>
 #include <vector>
 
-namespace kva {
+namespace ridgefill {
 
 using namespace rad::arch;
 
 /* The int8 encoding's scale group (i8*bf16[1x128]): libr4d's int8 rows and quant_act_i8g read 128. */
 constexpr int64_t kI8Group = 128;
 
-/* Tests hand the rows in here instead of a loaded kva.so (tests/arch_static_test.cpp). */
+/* Tests hand the rows in here instead of a loaded ridgefill.so (tests/arch_static_test.cpp). */
 static const std::vector<const RadKernelInfo*>* g_i8_rows_for_test = nullptr;
 
-/* kva.so's kva_gemm_nt_q rows that carry a relayout, from the library behind `h`. */
-inline void kva_rows_of(void* h, std::vector<const RadKernelInfo*>* out) {
+/* ridgefill.so's ridgefill_gemm_nt_q rows that carry a relayout, from the library behind `h`. */
+inline void ridgefill_rows_of(void* h, std::vector<const RadKernelInfo*>* out) {
     auto info = (const RadPluginInfo* (*)(void))dlsym(h, "rad_plugin_info");
     auto count = (int (*)(void))dlsym(h, "rad_kernel_count");
     auto at = (const RadKernelInfo* (*)(int))dlsym(h, "rad_kernel_at");
     const RadPluginInfo* p = info ? info() : nullptr;
-    if (!p || !p->name || std::strcmp(p->name, "kva") || !count || !at) return;
+    if (!p || !p->name || std::strcmp(p->name, "ridgefill") || !count || !at) return;
     for (int i = 0; i < count(); ++i) {
         const RadKernelInfo* k = at(i);
-        if (k && k->op && !std::strcmp(k->op, "kva_gemm_nt_q") && k->layout && k->relayout) out->push_back(k);
+        if (k && k->op && !std::strcmp(k->op, "ridgefill_gemm_nt_q") && k->layout && k->relayout) out->push_back(k);
     }
 }
 
-/* dl_iterate_phdr's visitor: kva.so is already loaded by the engine (RTLD_NOLOAD finds it without loading
- * a second copy), and the first loaded object whose plugin info names "kva" answers. */
-inline int visit_kva(struct dl_phdr_info* info, size_t, void* out) {
+/* dl_iterate_phdr's visitor: ridgefill.so is already loaded by the engine (RTLD_NOLOAD finds it without loading
+ * a second copy), and the first loaded object whose plugin info names "ridgefill" answers. */
+inline int visit_ridgefill(struct dl_phdr_info* info, size_t, void* out) {
     auto* rows = (std::vector<const RadKernelInfo*>*)out;
     if (!info->dlpi_name || !info->dlpi_name[0] || !rows->empty()) return 0;
     void* h = dlopen(info->dlpi_name, RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
     if (!h) return 0;
-    kva_rows_of(h, rows);
+    ridgefill_rows_of(h, rows);
     if (rows->empty()) dlclose(h);   /* kept open otherwise: the row pointers live in it */
     return 0;
 }
@@ -62,7 +62,7 @@ inline int visit_kva(struct dl_phdr_info* info, size_t, void* out) {
 inline std::vector<const RadKernelInfo*> i8_rows() {
     if (g_i8_rows_for_test) return *g_i8_rows_for_test;
     std::vector<const RadKernelInfo*> rows;
-    dl_iterate_phdr(visit_kva, &rows);
+    dl_iterate_phdr(visit_ridgefill, &rows);
     return rows;
 }
 
@@ -104,7 +104,7 @@ inline RadLayout stored_layout(const std::vector<const RadKernelInfo*>& rows, co
 inline bool relayout_i8(const std::vector<const RadKernelInfo*>& rows, int64_t n, int64_t k,
                         const void* codes, const void* scale, I8Stored* out, std::string* why) {
     if (rows.empty()) {
-        *why = "no kernel library offers the int8 GEMM (kva_gemm_nt_q: kva.so forwards libr4d's int8 "
+        *why = "no kernel library offers the int8 GEMM (ridgefill_gemm_nt_q: ridgefill.so forwards libr4d's int8 "
                "gemm_nt_q rows only when libr4d is loaded)";
         return false;
     }
@@ -127,6 +127,6 @@ inline bool relayout_i8(const std::vector<const RadKernelInfo*>& rows, int64_t n
     return true;
 }
 
-}  /* namespace kva */
+}  /* namespace ridgefill */
 
-#endif /* KVA_INT8_H */
+#endif /* RIDGEFILL_INT8_H */

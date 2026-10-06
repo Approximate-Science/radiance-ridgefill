@@ -2,7 +2,7 @@
 """mask_pn2.py -- R58': on every dumped masked step with two (or more) prefill entries, the earlier
 sequences' rows are all exact.
 
-Reads <dump>/mask.jsonl (RADIANCE_KVA_DUMP, arch/kva_dump.h): per masked step the device mask (one
+Reads <dump>/mask.jsonl (RADIANCE_RIDGEFILL_DUMP, arch/ridgefill_dump.h): per masked step the device mask (one
 character a row, '1' = approximated) and bounds {s, b', b', e} of the LAST sequence. A step whose
 prefill count n_seq - n_seq_decode is >= 2 must have no '1' before s (the decoders' rows and every
 earlier prefill's rows), and no '1' at or past b'.

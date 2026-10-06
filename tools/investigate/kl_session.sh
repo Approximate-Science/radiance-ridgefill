@@ -32,8 +32,8 @@ session() {
     fi
     for arm in "$@"; do
         name=${arm%%:*} alpha=${arm#*:}
-        RADIANCE_KVA_ALPHA=$alpha RADIANCE_KVA_PROJ=shipped RADIANCE_KVA_ST=shipped
-        export RADIANCE_KVA_ALPHA RADIANCE_KVA_PROJ RADIANCE_KVA_ST
+        RADIANCE_RIDGEFILL_ALPHA=$alpha RADIANCE_RIDGEFILL_PROJ=shipped RADIANCE_RIDGEFILL_ST=shipped
+        export RADIANCE_RIDGEFILL_ALPHA RADIANCE_RIDGEFILL_PROJ RADIANCE_RIDGEFILL_ST
         echo "arm $name: speed, alpha $alpha"
         "$repo/scripts/grade.sh" speed "$ref" "$prefix-$name.json" || return 1
         kernel_clean "after $name" || return 1

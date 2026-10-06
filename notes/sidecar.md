@@ -39,7 +39,7 @@ st/kva-big-s24-his-s24.rank1.pt: OK
 ## 2. Sidecar build (Stage 2 step 1)
 
 ```
-$ tools/kva_sidecar.py build --proj ~/AI-Work/kva/qfn/proj/kva-big-s24.safetensors \
+$ tools/ridgefill_sidecar.py build --proj ~/AI-Work/kva/qfn/proj/kva-big-s24.safetensors \
     --st .../st/kva-big-s24-his-s24.rank0.pt .../rank1.pt \
     --freq ~/AI-Work/kva/pred/tcc-qwen38-flash-next-mxfp4-fp8-gptq-freq.safetensors \
     --tokenizer <models-boot>/tcc-qwen38-flash-next-mxfp4-fp8-gptq --out data/sidecar
@@ -58,44 +58,44 @@ Tensors (names are the CHECKPOINT tensor names the ARCH lane name-maps; identity
 
 | name | shape / dtype | count | source |
 |---|---|---|---|
-| `kva.proj.L.weight` | [2560, 10240] bf16 | 24 (L 24..47) | `layer.L[:, :10240]` |
-| `kva.proj.L.bias` | [2560] bf16 | 24 | `layer.L[:, 10240]` |
-| `kva.st.L` | [48, 128, 128] f32 | 18 | `cat(rank0.sum/count, rank1.sum/count)`, rank 0's heads first |
-| `kva.stswap.L` | [48, 128, 128] f32 | 18 | halves swapped (R24 negative control) |
-| `kva.rowsel.score` | [248320] f32 | 1 | −logfreq if class ∈ {cap, mixed, piece}, else −inf |
-| `kva.rowsel.score_none` | [248320] f32 | 1 | all −inf (R41) |
-| `kva.rowsel.score_all` | [248320] f32 | 1 | all 0: every id a match, ties by position (R35 all-rows) |
+| `ridgefill.proj.L.weight` | [2560, 10240] bf16 | 24 (L 24..47) | `layer.L[:, :10240]` |
+| `ridgefill.proj.L.bias` | [2560] bf16 | 24 | `layer.L[:, 10240]` |
+| `ridgefill.st.L` | [48, 128, 128] f32 | 18 | `cat(rank0.sum/count, rank1.sum/count)`, rank 0's heads first |
+| `ridgefill.stswap.L` | [48, 128, 128] f32 | 18 | halves swapped (R24 negative control) |
+| `ridgefill.rowsel.score` | [248320] f32 | 1 | −logfreq if class ∈ {cap, mixed, piece}, else −inf |
+| `ridgefill.rowsel.score_none` | [248320] f32 | 1 | all −inf (R41) |
+| `ridgefill.rowsel.score_all` | [248320] f32 | 1 | all 0: every id a match, ties by position (R35 all-rows) |
 
 Header metadata (also in `rad-convert-set.txt`):
 ```
-kva.format=kva-sidecar-1
-kva.rowsel.classes=cap,mixed,piece
-kva.rowsel.share=0.25
-kva.split=24
-kva.src.config.sha256=238b0a0024b5cfb7ebc1df0c8d122c01c1b24e0843b2c9395740eabc43637e91
-kva.src.freq.sha256=4f1b719a59fdaa6ddfc7e06502b817c5a96e6a00bca060136d110e672059f97a
-kva.src.proj.sha256=c9db6064eb275d3166df8139239959dfdeb64f2778707a2f42215164999cb9cd
-kva.src.st0.sha256=38e4b550dfc1419922feccb59f75f758be7e8f2468c84b51a30712914b0b5dd3
-kva.src.st1.sha256=af517cf760f7baef3f514c48ec4ab36d31effa444641cd6a0f87fdae2e384a18
-kva.src.tokenizer_config.sha256=b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27
-kva.src.tokenizer_json.sha256=0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3
+ridgefill.format=ridgefill-sidecar-1
+ridgefill.rowsel.classes=cap,mixed,piece
+ridgefill.rowsel.share=0.25
+ridgefill.split=24
+ridgefill.src.config.sha256=238b0a0024b5cfb7ebc1df0c8d122c01c1b24e0843b2c9395740eabc43637e91
+ridgefill.src.freq.sha256=4f1b719a59fdaa6ddfc7e06502b817c5a96e6a00bca060136d110e672059f97a
+ridgefill.src.proj.sha256=c9db6064eb275d3166df8139239959dfdeb64f2778707a2f42215164999cb9cd
+ridgefill.src.st0.sha256=38e4b550dfc1419922feccb59f75f758be7e8f2468c84b51a30712914b0b5dd3
+ridgefill.src.st1.sha256=af517cf760f7baef3f514c48ec4ab36d31effa444641cd6a0f87fdae2e384a18
+ridgefill.src.tokenizer_config.sha256=b11349aafa7cdc6a320767cf7ceb29ed82f7eda5d65e8e0819e76f0ce947bf27
+ridgefill.src.tokenizer_json.sha256=0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3
 ```
 (`config` = the tokenizer dir's config.json, read only for the vocab size.)
 
 Independent check against the source files (one-off script, not the tool's code path): all 24
-`kva.proj.L.weight/.bias` equal the source slices; all 18 `kva.st.L`/`kva.stswap.L` equal the rank halves in
+`ridgefill.proj.L.weight/.bias` equal the source slices; all 18 `ridgefill.st.L`/`ridgefill.stswap.L` equal the rank halves in
 the stated order; `score` keeps 167,288 ids, none of the 33 specials nor the 243 padding rows; kept scores in
 [6.540, 14.149]; `score_none` all −inf; `score_all` all 0.
 
 `verify` (R13 against the sidecar's own header; the container form waits for the append):
 ```
-$ tools/kva_sidecar.py verify data/sidecar/kva-sidecar.safetensors --proj … --st … … --freq … --tokenizer …
-OK        kva.src.config.sha256 238b0a00…   (7 hashes OK)
-          kva.format = kva-sidecar-1 / kva.split = 24 / kva.rowsel.share = 0.25 / kva.rowsel.classes = cap,mixed,piece
+$ tools/ridgefill_sidecar.py verify data/sidecar/kva-sidecar.safetensors --proj … --st … … --freq … --tokenizer …
+OK        ridgefill.src.config.sha256 238b0a00…   (7 hashes OK)
+          ridgefill.format = ridgefill-sidecar-1 / ridgefill.split = 24 / ridgefill.rowsel.share = 0.25 / ridgefill.rowsel.classes = cap,mixed,piece
 verify data/sidecar/kva-sidecar.safetensors: PASS
 ```
 For the container: `rad-info --meta <rad> > evidence/stage2/rad-info-meta.txt` inside `radiance-build`, then
-`tools/kva_sidecar.py verify evidence/stage2/rad-info-meta.txt <same source flags>` (a `.rad` target also works
+`tools/ridgefill_sidecar.py verify evidence/stage2/rad-info-meta.txt <same source flags>` (a `.rad` target also works
 when `--rad-info` names a rad-info runnable on the host path).
 
 **Bug found and fixed, with its regression test**: the first two builds of the same inputs had different
@@ -106,7 +106,7 @@ rewrites the header with sorted metadata, same length, in place
 ## 3. Tests
 
 `python -m pytest tests/` (no env): **44 passed, 3 skipped** (the three need real data). With
-`KVA_SIDECAR=data/sidecar/kva-sidecar.safetensors KVA_TOKENIZER=<checkpoint dir> KVA_RESEARCH_ROOT=<research repo>`:
+`RIDGEFILL_SIDECAR=data/sidecar/kva-sidecar.safetensors RIDGEFILL_TOKENIZER=<checkpoint dir> RIDGEFILL_RESEARCH_ROOT=<research repo>`:
 **47 passed**. Covered: projector weight/bias split, bf16 kept, `final` not converted, st = sum/count with
 rank-0 heads first, swap variant, score = rarity for kept classes and −inf for dropped classes / specials /
 padding, score_none / score_all, metadata hashes, index, set file, verify pass and fail (rank files swapped),
@@ -120,12 +120,12 @@ the sidecar table.
 
 ## 4. R33 fixture — `tests/fixtures/rowsel_quick9.json` (format defined here; notes/kernels.md did not exist)
 
-The KERNELS lane already points ctest at it (`KVA_ROWSEL_FIXTURE`, kernels/CMakeLists.txt) and their schema
+The KERNELS lane already points ctest at it (`RIDGEFILL_ROWSEL_FIXTURE`, kernels/CMakeLists.txt) and their schema
 text says `k = rint(share * matches), half to even` — consistent. One-line JSON, 131 KB:
 
 ```
-{"format": "kva-rowsel-fixture-1", "window": 2048, "share": 0.25, "classes": ["cap","mixed","piece"],
- "score_tensor": "kva.rowsel.score", "score_sha256": "<sha256 of the full f32 LE score table>",
+{"format": "ridgefill-rowsel-fixture-1", "window": 2048, "share": 0.25, "classes": ["cap","mixed","piece"],
+ "score_tensor": "ridgefill.rowsel.score", "score_sha256": "<sha256 of the full f32 LE score table>",
  "vocab": 248320, "kept_ids": [1757 ids, ascending], "kept_scores": [their f32 scores],
  "ppl": "ppl.jsonl", "ppl_sha256": "1ed15cb2…", "rule": "…",
  "docs": [{"doc": "ppl/8k/0", "token_ids": [2048 ids], "matches": 475, "k": 119,
@@ -133,10 +133,10 @@ text says `k = rint(share * matches), half to even` — consistent. One-line JSO
 ```
 - Score table for the test: a [vocab] f32 array of −inf with `kept_ids` set to `kept_scores` (every id the
   windows use that is not listed is −inf). This makes the host test self-contained (no 1.3 GB file in CI);
-  `score_sha256` lets a test with `KVA_SIDECAR` confirm the full table is the one the fixture came from.
+  `score_sha256` lets a test with `RIDGEFILL_SIDECAR` confirm the full table is the one the fixture came from.
   (Deviation from "ids + rows only": +~45 KB, so R33's host part runs in a fresh clone.)
 - `rows` are fnlev.rules' own output (`Rules.rows({"rule":"class56","share":0.25,"classes":[…]}, ids, 2048,
-  doc)`); the generator refuses if the sidecar table + `kva_rules.select_rows` disagree (they agree on all 9).
+  doc)`); the generator refuses if the sidecar table + `ridgefill_rules.select_rows` disagree (they agree on all 9).
 - `random_count` = k (count-matched control; the device hash's rows are its own, R33 checks count + determinism).
 - Per doc (matches → k): 475→119, 404→101, 312→78, 507→127, **578→144 (144.5, half-to-even; `roundf` gives
   145)**, 559→140, 497→124, 376→94, 405→101. k ≤ 144 < cap 512, so no truncation case here.
@@ -168,7 +168,7 @@ counts.
 
 ## 6. R39 — engine dump format and `tools/rows_compare.py`
 
-Dump the ARCH lane should write (`RADIANCE_KVA_DUMP=<dir>` → `<dir>/rows.jsonl`), one line per approximate chunk:
+Dump the ARCH lane should write (`RADIANCE_RIDGEFILL_DUMP=<dir>` → `<dir>/rows.jsonl`), one line per approximate chunk:
 ```
 {"chunk_start": <absolute position of the chunk's first row>, "n_tok": <rows>,
  "rows_idx": [chunk-relative selected rows, ascending; -1 padding allowed, dropped by the reader],
@@ -231,9 +231,9 @@ wrote data/stub: 131 header-only shards (335.3 GiB apparent), extra tensors {'kv
 13 s. **Disk: 23 MB real, 336 GB apparent** (sparse; anything that copies it must use `--sparse`/reflinks, or it
 expands to 336 GB). Every non-safetensors file of the repo downloaded as is (configs, tokenizer, vocab, merges,
 chat template, index, README, LICENSE). Each shard = its real header (two HTTP range reads; header + data
-length checked against the repo's file size) + a hole. The index gains the 87 `kva.*` names →
+length checked against the repo's file size) + a hole. The index gains the 87 `ridgefill.*` names →
 `kva-sidecar.safetensors`, a relative symlink to `../sidecar/kva-sidecar.safetensors` (resolves inside the
-`/kva` mount). Revision pinned in `data/stub/stub-manifest.json` with every header's sha256.
+`/ridgefill` mount). Revision pinned in `data/stub/stub-manifest.json` with every header's sha256.
 
 ### 7.2 Checks (evidence/stage2/)
 - **Container sha256** (orchestrator, `evidence/stage0/container.sha256`): `0af5e962…4d20` = the published LFS
@@ -258,44 +258,44 @@ length checked against the repo's file size) + a hole. The index gains the 87 `k
   weight being WRITTEN, never for one reused in place. BUT the recipe file says `calib=$CALIB` and an unset
   variable is refused at parse (`core/format/recipe.cpp:37-56`), so the run sets `CALIB=calib/w4nl-calib` —
   the literal the container recorded, so the options string (`options_text`, sorted) matches. No empty dir made.
-- **R13 negative control**: `kva_sidecar.py verify evidence/stage2/rad-info-meta.txt …` on the pristine
+- **R13 negative control**: `ridgefill_sidecar.py verify evidence/stage2/rad-info-meta.txt …` on the pristine
   container → `FAIL (11 problem(s))` (7 hashes + 4 keys MISSING), exit 1 (`verify-pre-append.txt`).
 
 ### 7.3 Plugin home used (`home/`)
-`ls home/*`: only the arch `.so` was installed (by the ARCH lane); `kva.so` was missing. Built + installed both
+`ls home/*`: only the arch `.so` was installed (by the ARCH lane); `ridgefill.so` was missing. Built + installed both
 from **committed `fc90feb`** (`git archive HEAD` into `build-sidecar-hip/src`, sources unedited) inside
 `radiance-build`: configure says `radiance 1.0.8: RADIANCE_SRC and /stage/opt/radiance/bin/radiance agree`,
-`device rows ON, GPU targets 'gfx1201', installs into /kva/home`; log `build-sidecar-hip/build.log`.
-`home/architectures/qwen4exp_fp8.so` sha256 `eb6396a9…`, `home/kernels/kva.so` `73229f27…`; both `.comment`
-Ubuntu GCC 14.2 + AMD clang 22 (roc-7.2.4), i.e. the radiance-build toolchain, HIP configured. kva.so is the
+`device rows ON, GPU targets 'gfx1201', installs into /ridgefill/home`; log `build-sidecar-hip/build.log`.
+`home/architectures/qwen4exp_fp8.so` sha256 `eb6396a9…`, `home/kernels/ridgefill.so` `73229f27…`; both `.comment`
+Ubuntu GCC 14.2 + AMD clang 22 (roc-7.2.4), i.e. the radiance-build toolchain, HIP configured. ridgefill.so is the
 KERNELS lane's committed Stage 1 (device rows refuse; no device code object yet: "0 fat binaries, gfx1201
 host"). The KERNELS/ARCH lanes will reinstall newer builds over these; the plan only needs the declare.
 
 ### 7.4 `--plan-only -v` — RUN, exit 0 (`evidence/stage2/plan-only.log`, 51,732 lines, 4.5 s, no GPU)
 ```
-docker run --rm -e RADIANCE_KVA_DECLARE=all -e CALIB=calib/w4nl-calib \
-  -v "$(readlink -f ~/models/rad)":/models:ro -v ~/projects/inference/radiance-kva:/kva:ro \
-  radiance-build /stage/opt/radiance/bin/rad-convert /kva/data/stub \
+docker run --rm -e RADIANCE_RIDGEFILL_DECLARE=all -e CALIB=calib/w4nl-calib \
+  -v "$(readlink -f ~/models/rad)":/models:ro -v ~/projects/inference/radiance-kva:/ridgefill:ro \
+  radiance-build /stage/opt/radiance/bin/rad-convert /ridgefill/data/stub \
     --reuse /models/qwen3.8-next-flash-fp8-iq4r-moe.rad --in-place \
     --recipe /models/qwen4exp-w4nl64-i8-hc8m.recipe \
-    --home /kva/home:/stage/opt/radiance/share/radiance \
-    $(sed 's/^/--set /' data/sidecar/rad-convert-set.txt | tr '\n' ' ') --set kva.mode=quality --set kva.tail=2048 \
+    --home /ridgefill/home:/stage/opt/radiance/share/radiance \
+    $(sed 's/^/--set /' data/sidecar/rad-convert-set.txt | tr '\n' ' ') --set ridgefill.mode=quality --set ridgefill.tail=2048 \
     --plan-only -v > evidence/stage2/plan-only.log 2>&1
 ```
 Key lines:
 ```
-I source   /kva/data/stub (1745 tensors)
+I source   /ridgefill/data/stub (1745 tensors)
 I arch     qwen4exp
 I device: built with HIP but no device is visible -- using the host backend
-D loader.cpp:488  plugin 0: kva 0.1.0 (/kva/home/kernels/kva.so) -- 6 kernels, 3 schemas, 0 fat binaries, gfx1201 host
-I plugin /stage/opt/radiance/share/radiance/architectures/qwen4exp_fp8.so is shadowed by /kva/home/architectures/qwen4exp_fp8.so, which comes first on the search path
-D loader.cpp:488  plugin 4: qwen4exp_kva 0.1.0 (/kva/home/architectures/qwen4exp_fp8.so) -- 0 kernels, 0 schemas, 0 fat binaries, portable
+D loader.cpp:488  plugin 0: ridgefill 0.1.0 (/ridgefill/home/kernels/ridgefill.so) -- 6 kernels, 3 schemas, 0 fat binaries, gfx1201 host
+I plugin /stage/opt/radiance/share/radiance/architectures/qwen4exp_fp8.so is shadowed by /ridgefill/home/architectures/qwen4exp_fp8.so, which comes first on the search path
+D loader.cpp:488  plugin 4: qwen4exp_ridgefill 0.1.0 (/ridgefill/home/architectures/qwen4exp_fp8.so) -- 0 kernels, 0 schemas, 0 fat binaries, portable
 I recipe   26 rule(s)
 D rad_builder.cpp:1532  declare: 0 device band(s) and 265 host band(s) resolved to nothing; run with --debug-graph for the full list
 I plan     51576 weight(s): 50603 quantised by the recipe, 973 kept as the checkpoint holds them
-D rad_convert.cpp:659    kva.proj.24.weight      bf16    50.00 MiB  as is
-D rad_convert.cpp:659    kva.st.24               f32      3.00 MiB  as is
-D rad_convert.cpp:659    kva.rowsel.score        f32    970.00 KiB  as is
+D rad_convert.cpp:659    ridgefill.proj.24.weight      bf16    50.00 MiB  as is
+D rad_convert.cpp:659    ridgefill.st.24               f32      3.00 MiB  as is
+D rad_convert.cpp:659    ridgefill.rowsel.score        f32    970.00 KiB  as is
 I --plan-only: about 114.74 GiB would be written; nothing was written to /models/qwen3.8-next-flash-fp8-iq4r-moe.rad.
 ```
 51,576 = 51,489 (container entries, `rad-info.txt`) + 87. "About 114.74 GiB" counts every planned weight; the
@@ -303,10 +303,10 @@ real append writes 1.28 GiB of new weights + ~19 MB of new tables. The 265 unres
 device-only ops on a GPU-less run (no dead op, else exit 1); the container's original convert had the same view.
 The `/models` mount was read-only, so this run could not have written.
 
-**`-e RADIANCE_KVA_DECLARE=all` is on every rad-convert command here** (ARCH lane, notes/arch.md §4): under it
-the plugin (committed `arch/qwen4exp_kva.cpp` `decl_every_copy`) declares, all optional, `kva.proj.L.{weight,bias}`
-and `kva.projr.L.{weight,bias}` for every layer, `kva.st.L` / `kva.stswap.L` / `kva.str.L` for every delta-net
-layer, and `kva.rowsel.score`, `score_none`, `score_all`. The shipped shard's 87 tensors are a subset (so
+**`-e RADIANCE_RIDGEFILL_DECLARE=all` is on every rad-convert command here** (ARCH lane, notes/arch.md §4): under it
+the plugin (committed `arch/qwen4exp_ridgefill.cpp` `decl_every_copy`) declares, all optional, `ridgefill.proj.L.{weight,bias}`
+and `ridgefill.projr.L.{weight,bias}` for every layer, `ridgefill.st.L` / `ridgefill.stswap.L` / `ridgefill.str.L` for every delta-net
+layer, and `ridgefill.rowsel.score`, `score_none`, `score_all`. The shipped shard's 87 tensors are a subset (so
 `score_all` stays); absent optional names (projr, str, layers < 24) are skipped by the planner. The gate below
 proves the match: every one of the 87 was planned (`expected_missing 0`), nothing else new.
 
@@ -314,7 +314,7 @@ proves the match: every one of the 87 was planned (`expected_missing 0`), nothin
 ```
 $ tools/plan_diff.py --plan evidence/stage2/plan-only.log --container evidence/stage2/rad-info-v.txt \
       --expect-new data/sidecar/kva-sidecar.safetensors --out evidence/stage2/plan-diff.json
-new                  87  kva.proj.24.bias, kva.proj.24.weight, kva.proj.25.bias, ...
+new                  87  ridgefill.proj.24.bias, ridgefill.proj.24.weight, ridgefill.proj.25.bias, ...
 dropped               0
 changed               0
 unexpected_new        0
@@ -337,13 +337,13 @@ container and **cannot see an engine running in another container**; (2) `sha256
 either changed since — `data/sidecar/kva-sidecar.safetensors` sha256 `05c4e088…`).
 ```
 cd ~/projects/inference/radiance-kva
-docker run --rm -e RADIANCE_KVA_DECLARE=all -e CALIB=calib/w4nl-calib \
-  -v "$(readlink -f ~/models/rad)":/models -v ~/projects/inference/radiance-kva:/kva:ro \
-  radiance-build /stage/opt/radiance/bin/rad-convert /kva/data/stub \
+docker run --rm -e RADIANCE_RIDGEFILL_DECLARE=all -e CALIB=calib/w4nl-calib \
+  -v "$(readlink -f ~/models/rad)":/models -v ~/projects/inference/radiance-kva:/ridgefill:ro \
+  radiance-build /stage/opt/radiance/bin/rad-convert /ridgefill/data/stub \
     --reuse /models/qwen3.8-next-flash-fp8-iq4r-moe.rad --in-place \
     --recipe /models/qwen4exp-w4nl64-i8-hc8m.recipe \
-    --home /kva/home:/stage/opt/radiance/share/radiance \
-    $(sed 's/^/--set /' data/sidecar/rad-convert-set.txt | tr '\n' ' ') --set kva.mode=quality --set kva.tail=2048 \
+    --home /ridgefill/home:/stage/opt/radiance/share/radiance \
+    $(sed 's/^/--set /' data/sidecar/rad-convert-set.txt | tr '\n' ' ') --set ridgefill.mode=quality --set ridgefill.tail=2048 \
     -v > evidence/stage2/append.log 2>&1; echo "exit $?"
 ```
 (Identical to §7.4 minus `--plan-only` and with `/models` writable.) Expect the last lines:
@@ -355,19 +355,19 @@ After it (evidence/stage2/, `-after` suffix):
    --container evidence/stage2/rad-info-v-after.txt` (no `--expect-new`) must PASS: the container holds exactly
    the plan (51,576, none new, none dropped, none changed).
 2. `rad-info --meta` → `rad-info-meta-after.txt`; `diff` with `rad-info-meta.txt` must show only the 13 added
-   `kva.*` keys (11 from the set file + `kva.mode`, `kva.tail`); then `tools/kva_sidecar.py verify
+   `ridgefill.*` keys (11 from the set file + `ridgefill.mode`, `ridgefill.tail`); then `tools/ridgefill_sidecar.py verify
    evidence/stage2/rad-info-meta-after.txt <the build's source flags>` must PASS (R13).
 3. `rad-info --recipe` → must equal `rad-info-recipe.txt` (diff empty). The header's "created by" gains
    "; extended in place by rad-convert … from data/stub" (expected).
-4. R12: `rad-info -v` lists `kva.proj.24.weight … kva.st.46`; R7 again with `RADIANCE_KVA=off`.
-Note `kva.mode=quality` becomes the container's default: until the plugin implements quality mode, every serve
-with the KVA home must set `RADIANCE_KVA=off|speed|plumb` explicitly (the plugin refuses unimplemented modes at
+4. R12: `rad-info -v` lists `ridgefill.proj.24.weight … ridgefill.st.46`; R7 again with `RADIANCE_RIDGEFILL=off`.
+Note `ridgefill.mode=quality` becomes the container's default: until the plugin implements quality mode, every serve
+with the RidgeFill home must set `RADIANCE_RIDGEFILL=off|speed|plumb` explicitly (the plugin refuses unimplemented modes at
 declare — loud, not silent). A later append can re-set it (see the next note).
 
-**Every later append (Stage 6 refit) must re-pass ALL kva `--set` keys** — the shipped set file, the refit set
-file, `kva.mode`, `kva.tail` — because only `radiance.*` keys carry over from the old header
+**Every later append (Stage 6 refit) must re-pass ALL ridgefill `--set` keys** — the shipped set file, the refit set
+file, `ridgefill.mode`, `ridgefill.tail` — because only `radiance.*` keys carry over from the old header
 (`rad_convert.cpp:403-416`) and the new meta is the stub's config + this run's `--set`s. Rebuild the stub with
-both `--extra` shards, `-e RADIANCE_KVA_DECLARE=all`, and gate with `--expect-new` = the refit shard.
+both `--extra` shards, `-e RADIANCE_RIDGEFILL_DECLARE=all`, and gate with `--expect-new` = the refit shard.
 
 ### 7.7 Restoring the pristine container from `.pre-append`
 What it holds (`core/format/radfile.cpp:1318-1338`): the old `RadFileHeader` byte for byte (248 B,
@@ -394,11 +394,11 @@ last); the file is just longer: `truncate -s 121969901568 "$RAD"` and check the 
 
 ## 8. Decisions and their cost
 
-- **Controls in one container** (orchestrator): `kva.stswap.*` + `score_none` + `score_all` = 54 MiB + 2 MiB
+- **Controls in one container** (orchestrator): `ridgefill.stswap.*` + `score_none` + `score_all` = 54 MiB + 2 MiB
   more on disk. ARCH lane: declare the swap/none/all variants only when an env/meta switch selects them,
-  otherwise they cost VRAM on every run (`kva.st*` RAD_SHARD_ROW: 27 MiB per rank for the swap set).
+  otherwise they cost VRAM on every run (`ridgefill.st*` RAD_SHARD_ROW: 27 MiB per rank for the swap set).
 - **`score_all` added** (not in the brief's list; HANDOVER Stage 2.1 names `--all-rows`, R35 needs an all-kept
-  table): 970 KiB. With `RADIANCE_KVA_ROWSEL=all` the op ignores scores anyway; this table makes the R35 run
+  table): 970 KiB. With `RADIANCE_RIDGEFILL_ROWSEL=all` the op ignores scores anyway; this table makes the R35 run
   exercise the class path with every row a match.
 - **Transcribed, not imported** rules: the tool runs without the research repo; cost = a duplicated 25 lines,
   guarded by the whole-vocab equality test and by the fixture generator's refusal on any disagreement.
@@ -413,7 +413,7 @@ last); the file is just longer: `truncate -s 121969901568 "$RAD"` and check the 
 Rejected arms: none (nothing measured on the engine in this lane).
 
 ## 9. Open for other lanes / the orchestrator
-- ARCH: name-map `kva.*` identically (logical = checkpoint name); dump format §6; gate controls behind switches.
-- KERNELS: fixture §4 (self-contained table; optional `KVA_SIDECAR` cross-check against `score_sha256`).
+- ARCH: name-map `ridgefill.*` identically (logical = checkpoint name); dump format §6; gate controls behind switches.
+- KERNELS: fixture §4 (self-contained table; optional `RIDGEFILL_SIDECAR` cross-check against `score_sha256`).
 - Orchestrator: Q12 (§7) decides how Stage 2.3 can run at all; R18 count = 67; KL report must show 2,047
   scored positions per doc.

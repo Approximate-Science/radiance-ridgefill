@@ -1,31 +1,31 @@
 #!/usr/bin/env python3
-"""package.py -- build the radiance-kva release distribution (PACKAGING.md §0-§5).
+"""package.py -- build the radiance-ridgefill release distribution (PACKAGING.md §0-§5).
 
   package.py --home <frozen plugin home> --projector <projector folder> \
                --out <dist dir> --version <x.y.z> --commit <git sha> \
-               [--with-template --template-spec <kva-marker-spec.json> \
+               [--with-template --template-spec <ridgefill-marker-spec.json> \
                 --base-template <model chat template>] \
                [--radiance-version <x.y.z>] [--gpu-targets gfx....] [--abi-version <x.y.z>]
 
-This release selects the mode server-wide only (RADIANCE_KVA=off|quality|speed): the
-per-request "kva" kwarg is PARKED for a future update (notes/future/per-request.md), so
+This release selects the mode server-wide only (RADIANCE_RIDGEFILL=off|quality|speed): the
+per-request "ridgefill" kwarg is PARKED for a future update (notes/future/per-request.md), so
 the chat-template package is NOT built by default -- its code path stays behind an explicit
 --with-template (which also requires --template-spec and --base-template).
 
 Produces, under --out:
-  radiance-kva-<version>/        architectures/qwen4exp_fp8.so, kernels/kva.so, README.md
+  radiance-ridgefill-<version>/        architectures/qwen4exp_fp8.so, kernels/ridgefill.so, README.md
                                  (docs/release/PLUGIN-README.md), LICENSE (the repo's), VERSION.json,
                                  SHA256SUMS
-  projector-qwen3.8-flash-next-<dtype>/  an exact copy of the projector folder's listed files
-                                 (its kva.json hashes verified BEFORE copying; a mismatch refuses
+  ridgefill-projector-qwen3.8-flash-next-<dtype>/  an exact copy of the projector folder's listed files
+                                 (its ridgefill.json hashes verified BEFORE copying; a mismatch refuses
                                  by name), named after the dtype its own manifest carries in
                                  projector.dtype -- bf16 or the int8 folder
-                                 tools/kva_projector.py int8 builds, never hard-coded -- with
+                                 tools/ridgefill_projector.py int8 builds, never hard-coded -- with
                                  README.md = docs/release/PROJECTOR-MODEL-CARD.md (the hub's model
-                                 card: documentation is never in kva.json, and a manifest that
+                                 card: documentation is never in ridgefill.json, and a manifest that
                                  lists any is refused -- reseal it) + LICENSE (the repo's) + SHA256SUMS
-  kva-chat-template/             ONLY with --with-template: kva_template.py, the marker spec,
-                                 a pre-merged template (kva_template.py merge of
+  ridgefill-chat-template/             ONLY with --with-template: ridgefill_template.py, the marker spec,
+                                 a pre-merged template (ridgefill_template.py merge of
                                  --base-template), a README, LICENSE (the repo's), SHA256SUMS
   <each>.tar.gz                  a tarball of each directory, byte-deterministic (sorted names,
                                  fixed mtime/uid/gid, gzip mtime 0): two runs give identical bytes
@@ -35,9 +35,9 @@ Every file is written mode 0644. Refuses by name on any missing input; writes no
 outside --out (and refuses an --out that overlaps an input). Standard library only.
 
 The frozen home is what scripts/frozen_home.sh built; the projector folder is what
-tools/kva_projector.py built (bf16, or the int8 folder `tools/kva_projector.py int8 --from
-<bf16 folder> --out <dir>` builds); the merge runs the very tools/kva_template.py that
-ships inside the kva-chat-template package. The projector is always streamed from host
+tools/ridgefill_projector.py built (bf16, or the int8 folder `tools/ridgefill_projector.py int8 --from
+<bf16 folder> --out <dir>` builds); the merge runs the very tools/ridgefill_template.py that
+ships inside the ridgefill-chat-template package. The projector is always streamed from host
 RAM: the old VRAM-placement switches are gone from the plugin (retired, refused at
 startup), so nothing here mentions them either.
 """
@@ -56,38 +56,38 @@ from pathlib import Path
 
 PROG = "package"
 
-PLUGIN_NAME = "radiance-kva"
-PROJECTOR_BASENAME = "projector-qwen3.8-flash-next"
-TEMPLATE_DIRNAME = "kva-chat-template"
+PLUGIN_NAME = "radiance-ridgefill"
+PROJECTOR_BASENAME = "ridgefill-projector-qwen3.8-flash-next"
+TEMPLATE_DIRNAME = "ridgefill-chat-template"
 ARCH_SO = "architectures/qwen4exp_fp8.so"
-KERNEL_SO = "kernels/kva.so"
+KERNEL_SO = "kernels/ridgefill.so"
 
 VERSION_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 COMMIT_RE = re.compile(r"[0-9a-f]{7,40}")
 GFX_RE = re.compile(rb"gfx[0-9a-z]+")
 DTYPE_RE = re.compile(r"[a-z0-9][a-z0-9_-]*")
 
-TEMPLATE_README = """# KVA chat template -- per-request KVA for radiance
+TEMPLATE_README = """# RidgeFill chat template -- per-request RidgeFill for radiance
 
 PARKED for a future update (notes/future/per-request.md): this release selects the mode
-server-wide only (RADIANCE_KVA=off|quality|speed), so this package is NOT built by
+server-wide only (RADIANCE_RIDGEFILL=off|quality|speed), so this package is NOT built by
 default (tools/package.py builds it only with --with-template). A server that never
 points --override-chat-template at a merged template is unaffected by it.
 
-For a radiance server serving Qwen3.8-Flash-Next with the radiance-kva plugin installed
+For a radiance server serving Qwen3.8-Flash-Next with the radiance-ridgefill plugin installed
 and a matching projector folder loaded. Everything the marker does (tokens, ids, dials,
-the switch kwarg) is read from {spec_name}; kva_template.py holds no marker constants.
+the switch kwarg) is read from {spec_name}; ridgefill_template.py holds no marker constants.
 
 ## Serve the model's own template (what most users want)
 
-`chat_template.jinja` here is the model's chat template with the kva marker block merged
+`chat_template.jinja` here is the model's chat template with the ridgefill marker block merged
 in front (its base bytes are appended completely unchanged). Point radiance at it:
 
     radiance ... --override-chat-template /path/to/chat_template.jinja
 
 A request opts in per request:
 
-    "chat_template_kwargs": {{"kva": "on"}}        dials: kva_share / kva_alpha / kva_tail
+    "chat_template_kwargs": {{"ridgefill": "on"}}        dials: ridgefill_share / ridgefill_alpha / ridgefill_tail
 
 Without the kwarg every request renders byte-identically to the unmodified template and
 runs stock.
@@ -96,13 +96,13 @@ runs stock.
 
 Merge the marker into it; your template's bytes stay unchanged:
 
-    python3 kva_template.py merge --spec {spec_name} --base your-template.jinja --out your-template.kva.jinja
-    radiance ... --override-chat-template /path/to/your-template.kva.jinja
+    python3 ridgefill_template.py merge --spec {spec_name} --base your-template.jinja --out your-template.ridgefill.jinja
+    radiance ... --override-chat-template /path/to/your-template.ridgefill.jinja
 
 Verify a merged file byte for byte, or remove the block again:
 
-    python3 kva_template.py check --spec {spec_name} --base your-template.jinja --merged your-template.kva.jinja
-    python3 kva_template.py strip --merged your-template.kva.jinja --out your-template.jinja
+    python3 ridgefill_template.py check --spec {spec_name} --base your-template.jinja --merged your-template.ridgefill.jinja
+    python3 ridgefill_template.py strip --merged your-template.ridgefill.jinja --out your-template.jinja
 
 ## Docker
 
@@ -114,12 +114,12 @@ pass the container-side path:
 
 ## Caveats
 
-- Only point --override-chat-template at a merged template when the radiance-kva plugin
+- Only point --override-chat-template at a merged template when the radiance-ridgefill plugin
   is installed AND a usable projector folder is loaded: without the plugin the marker
   renders into the prompt unerased and those requests degrade (the plugin's startup
   guard refuses this combination by name).
-- Without the template every request runs stock; server-wide KVA needs
-  RADIANCE_KVA=quality or RADIANCE_KVA=speed instead.
+- Without the template every request runs stock; server-wide RidgeFill needs
+  RADIANCE_RIDGEFILL=quality or RADIANCE_RIDGEFILL=speed instead.
 """
 
 
@@ -153,7 +153,7 @@ def require_file(path: Path, what: str) -> Path:
 def version_strings_in(data: bytes) -> list[str]:
     """Every NUL-delimited string in *data* that is exactly d.d.d.
 
-    KVA_RADIANCE_VERSION (arch/CMakeLists.txt) compiles the radiance release into the arch
+    RIDGEFILL_RADIANCE_VERSION (arch/CMakeLists.txt) compiles the radiance release into the arch
     plugin as one such string -- the same strings CMake's release check reads in the engine
     binary (repo CMakeLists.txt). Version tags like GLIBCXX_3.4.32 do not match: the whole
     NUL-delimited string must be the bare release number.
@@ -183,13 +183,13 @@ def read_radiance_version(arch_so: Path, override: str | None) -> tuple[str, str
                 f"{arch_so}: {candidates}")
         if candidates:
             return override, (f"--radiance-version argument; also embedded in {ARCH_SO} "
-                               f"(KVA_RADIANCE_VERSION, arch/CMakeLists.txt)")
+                               f"(RIDGEFILL_RADIANCE_VERSION, arch/CMakeLists.txt)")
         return override, "--radiance-version argument (no NUL-delimited d.d.d string found in the .so)"
     if len(candidates) == 1:
         return candidates[0], (f"the NUL-delimited release string embedded in {ARCH_SO} "
-                               "(KVA_RADIANCE_VERSION, set by arch/CMakeLists.txt from RADIANCE_SRC)")
+                               "(RIDGEFILL_RADIANCE_VERSION, set by arch/CMakeLists.txt from RADIANCE_SRC)")
     if not candidates:
-        die(f"no NUL-delimited d.d.d release string found in {arch_so} (KVA_RADIANCE_VERSION); "
+        die(f"no NUL-delimited d.d.d release string found in {arch_so} (RIDGEFILL_RADIANCE_VERSION); "
             "pass --radiance-version to record it")
     die(f"{arch_so} carries several release strings {candidates}; pass --radiance-version "
         "to pick the radiance release this plugin was built against")
@@ -215,13 +215,13 @@ def read_gpu_targets(archives: list[Path], override: str | None) -> tuple[list[s
 # ------------------------------------------------------------------ the projector folder
 
 def verify_projector(projector: Path) -> dict:
-    """Check the projector folder against its kva.json BEFORE anything is copied.
+    """Check the projector folder against its ridgefill.json BEFORE anything is copied.
 
-    Refuses by name on: a missing kva.json, a manifest without a files map, a listed file
+    Refuses by name on: a missing ridgefill.json, a manifest without a files map, a listed file
     that is missing or hashes differently, a file on disk the manifest does not list, and
     anything in the folder that is not a regular file.
     """
-    manifest_path = require_file(projector / "kva.json", f"the projector manifest of {projector}")
+    manifest_path = require_file(projector / "ridgefill.json", f"the projector manifest of {projector}")
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -238,9 +238,9 @@ def verify_projector(projector: Path) -> dict:
     if listed_docs:
         die(f"the projector manifest {manifest_path} lists documentation ({', '.join(listed_docs)}): a hub serves the "
             f"repo's README.md as its model card, so a hashed README is refused on a user's machine; run "
-            f"tools/kva_projector.py reseal --folder {projector} first")
-    # documentation is never listed (tools/kva_projector.py is_doc): the projector package's README.md is the model card
-    extra = sorted(set(on_disk) - set(files) - {"kva.json"} - {n for n in on_disk if n.lower().endswith(".md")})
+            f"tools/ridgefill_projector.py reseal --folder {projector} first")
+    # documentation is never listed (tools/ridgefill_projector.py is_doc): the projector package's README.md is the model card
+    extra = sorted(set(on_disk) - set(files) - {"ridgefill.json"} - {n for n in on_disk if n.lower().endswith(".md")})
     if extra:
         die(f"the projector manifest {manifest_path} does not list: {', '.join(extra)}")
     for name in sorted(files):
@@ -260,15 +260,15 @@ def verify_projector(projector: Path) -> dict:
 def projector_dtype(manifest: dict, manifest_path: Path) -> str:
     """The dtype the manifest itself carries in projector.dtype (bf16, int8, ...).
 
-    It names the package (projector-qwen3.8-flash-next-<dtype>): the shipped folder may be
-    the int8 one tools/kva_projector.py int8 builds, so nothing here may hard-code bf16.
+    It names the package (ridgefill-projector-qwen3.8-flash-next-<dtype>): the shipped folder may be
+    the int8 one tools/ridgefill_projector.py int8 builds, so nothing here may hard-code bf16.
     Refuses by name on a manifest without the field or a dtype that is not a simple,
     directory-safe name.
     """
     projector = manifest.get("projector")
     if not isinstance(projector, dict):
         die(f"{manifest_path}: the manifest has no 'projector' map (its dtype field names "
-            "the package: projector-qwen3.8-flash-next-<dtype>)")
+            "the package: ridgefill-projector-qwen3.8-flash-next-<dtype>)")
     dtype = projector.get("dtype")
     if not isinstance(dtype, str) or not DTYPE_RE.fullmatch(dtype):
         die(f"{manifest_path}: projector.dtype is not a dtype name (lowercase letters, digits, "
@@ -366,18 +366,18 @@ def overlap(out: Path, other: Path, name: str) -> None:
 
 
 def merge_template(tool: Path, spec: Path, base: Path, out: Path) -> None:
-    """chat_template.jinja = the kva block + base, via the very tool that ships in the box."""
+    """chat_template.jinja = the ridgefill block + base, via the very tool that ships in the box."""
     merged = out / "chat_template.jinja"
     run = [sys.executable, str(tool), "merge", "--spec", str(spec), "--base", str(base),
            "--out", str(merged)]
     result = subprocess.run(run, capture_output=True, text=True)
     if result.returncode != 0:
-        die(f"kva_template.py merge failed ({result.stderr.strip()})")
+        die(f"ridgefill_template.py merge failed ({result.stderr.strip()})")
     check = subprocess.run([sys.executable, str(tool), "check", "--spec", str(spec),
                             "--base", str(base), "--merged", str(merged)],
                            capture_output=True, text=True)
     if check.returncode != 0:
-        die(f"kva_template.py check refused the merged template: {check.stderr.strip()}")
+        die(f"ridgefill_template.py check refused the merged template: {check.stderr.strip()}")
     merged.chmod(0o644)
 
 
@@ -385,15 +385,15 @@ def package(args: argparse.Namespace) -> int:
     repo = Path(__file__).resolve().parent.parent
 
     # ---- the chat-template package is not built by default this release (per-request
-    #      KVA is parked, notes/future/per-request.md); --with-template opts in
+    #      RidgeFill is parked, notes/future/per-request.md); --with-template opts in
     if args.with_template and not args.template_spec:
-        die("--with-template needs --template-spec (kva-marker-spec.json)")
+        die("--with-template needs --template-spec (ridgefill-marker-spec.json)")
     if args.with_template and not args.base_template:
         die("--with-template needs --base-template (the model's own chat template)")
     if (args.template_spec or args.base_template) and not args.with_template:
         die("--template-spec/--base-template only mean something with --with-template "
             "(the chat-template package is not built by default this release: per-request "
-            "KVA is parked, notes/future/per-request.md)")
+            "RidgeFill is parked, notes/future/per-request.md)")
 
     # ---- every input, checked and named before anything is written
     home = require_dir(Path(args.home), "--home (the frozen plugin home)")
@@ -401,19 +401,19 @@ def package(args: argparse.Namespace) -> int:
     kernel_so = require_file(home / KERNEL_SO, f"the kernel library of {home}")
     projector = require_dir(Path(args.projector), "--projector (the projector folder)")
     manifest = verify_projector(projector)      # hashes verified BEFORE any copying
-    manifest_path = projector / "kva.json"
+    manifest_path = projector / "ridgefill.json"
     dtype = projector_dtype(manifest, manifest_path)
     projector_dirname = f"{PROJECTOR_BASENAME}-{dtype}"
     spec = base = None
     if args.with_template:
         spec = require_file(Path(args.template_spec),
-                            "--template-spec (kva-marker-spec.json)")
+                            "--template-spec (ridgefill-marker-spec.json)")
         base = require_file(Path(args.base_template),
                             "--base-template (the model's chat template)")
     readme = require_file(repo / "docs" / "release" / "PLUGIN-README.md", "the plugin package's README")
     card = require_file(repo / "docs" / "release" / "PROJECTOR-MODEL-CARD.md", "the projector model card")
     license_ = require_file(repo / "LICENSE", "the repo LICENSE")
-    template_tool = require_file(repo / "tools" / "kva_template.py", "the template tool")
+    template_tool = require_file(repo / "tools" / "ridgefill_template.py", "the template tool")
 
     if not VERSION_RE.fullmatch(args.version):
         die(f"--version must be x.y.z, got {args.version!r}")
@@ -447,7 +447,7 @@ def package(args: argparse.Namespace) -> int:
     plugin_dir = out / f"{PLUGIN_NAME}-{args.version}"
     projector_dir = out / projector_dirname
 
-    # ---- radiance-kva-<version>/ : the plugin home plus its provenance
+    # ---- radiance-ridgefill-<version>/ : the plugin home plus its provenance
     (plugin_dir / "architectures").mkdir(parents=True)
     (plugin_dir / "kernels").mkdir()
     copy_file(arch_so, plugin_dir / ARCH_SO)
@@ -459,9 +459,9 @@ def package(args: argparse.Namespace) -> int:
                                   gpu_targets, gpu_source, args.abi_version, abi_source))
     write_sums(plugin_dir)
 
-    # ---- projector-qwen3.8-flash-next-<dtype>/ : the exact folder (whatever dtype its own
+    # ---- ridgefill-projector-qwen3.8-flash-next-<dtype>/ : the exact folder (whatever dtype its own
     #      manifest carries), hashes already verified, plus the repo's LICENSE (the loader
-    #      only hashes the files kva.json lists; an extra file beside them changes nothing
+    #      only hashes the files ridgefill.json lists; an extra file beside them changes nothing
     #      on the load path)
     projector_dir.mkdir()
     for path in sorted(projector.iterdir()):
@@ -471,14 +471,14 @@ def package(args: argparse.Namespace) -> int:
     copy_file(license_, projector_dir / "LICENSE")
     write_sums(projector_dir)
 
-    # ---- kva-chat-template/ : ONLY with --with-template (parked by default). The tool,
+    # ---- ridgefill-chat-template/ : ONLY with --with-template (parked by default). The tool,
     #      the spec, a pre-merged template, a README, and the repo's LICENSE (every
     #      package ships under the repo's terms)
     template_dir = None
     if args.with_template:
         template_dir = out / TEMPLATE_DIRNAME
         template_dir.mkdir()
-        copy_file(template_tool, template_dir / "kva_template.py")
+        copy_file(template_tool, template_dir / "ridgefill_template.py")
         copy_file(spec, template_dir / spec.name)
         merge_template(template_tool, spec, base, template_dir)
         write_text(template_dir / "README.md", TEMPLATE_README.format(spec_name=spec.name))
@@ -504,7 +504,7 @@ def package(args: argparse.Namespace) -> int:
     print(f"  {projector_dirname}/ ({len(list(projector_dir.iterdir()))} files, dtype {dtype}, "
           "manifest verified, LICENSE added)")
     if template_dir is not None:
-        print(f"  {TEMPLATE_DIRNAME}/ (kva_template.py, {spec.name}, chat_template.jinja, "
+        print(f"  {TEMPLATE_DIRNAME}/ (ridgefill_template.py, {spec.name}, chat_template.jinja, "
               "README.md, LICENSE)")
     print(f"  {len(tarballs)} deterministic tarballs + SHA256SUMS; {n_files} files total")
     return 0
@@ -513,24 +513,24 @@ def package(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog=PROG,
-        description="Build the radiance-kva release distribution (plugins, projector folder, "
+        description="Build the radiance-ridgefill release distribution (plugins, projector folder, "
                     "deterministic tarballs; the chat-template package only with "
                     "--with-template).")
     parser.add_argument("--home", required=True,
                         help="the frozen plugin home (scripts/frozen_home.sh output: "
                              f"{ARCH_SO} and {KERNEL_SO})")
     parser.add_argument("--projector", required=True,
-                        help="the projector folder (tools/kva_projector.py build output -- "
-                             "bf16, or the int8 folder `kva_projector.py int8` builds -- with "
-                             "its kva.json manifest; the package is named after the dtype the "
+                        help="the projector folder (tools/ridgefill_projector.py build output -- "
+                             "bf16, or the int8 folder `ridgefill_projector.py int8` builds -- with "
+                             "its ridgefill.json manifest; the package is named after the dtype the "
                              "manifest carries)")
     parser.add_argument("--with-template", action="store_true",
-                        help="also build the kva-chat-template package (NOT built by default: "
-                             "per-request KVA is parked for a future update, "
+                        help="also build the ridgefill-chat-template package (NOT built by default: "
+                             "per-request RidgeFill is parked for a future update, "
                              "notes/future/per-request.md; needs --template-spec and "
                              "--base-template)")
     parser.add_argument("--template-spec",
-                        help="kva-marker-spec.json (tools/kva_template.py's spec); required "
+                        help="ridgefill-marker-spec.json (tools/ridgefill_template.py's spec); required "
                              "with --with-template")
     parser.add_argument("--base-template",
                         help="the model's own chat template (the pre-merged template's base); "
@@ -540,7 +540,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--version", required=True, help="the plugin version, x.y.z")
     parser.add_argument("--commit", required=True, help="the git commit the home was built from")
     parser.add_argument("--radiance-version", help="the radiance release the plugin was built "
-                        "against; by default read from the arch .so (KVA_RADIANCE_VERSION)")
+                        "against; by default read from the arch .so (RIDGEFILL_RADIANCE_VERSION)")
     parser.add_argument("--gpu-targets", help="comma-separated GPU targets (e.g. gfx1201); by "
                         "default extracted from the packaged .so files")
     parser.add_argument("--abi-version", help="the radiance ABI version the plugin was linked "

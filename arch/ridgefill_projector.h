@@ -1,8 +1,8 @@
-/* kva_projector.h -- the projector folder for Qwen4-Exp: loaded once per process, checked against
+/* ridgefill_projector.h -- the projector folder for Qwen4-Exp: loaded once per process, checked against
  * the model, uploaded per rank at the rank's real declare, and handed to the issue sites as RAW
  * operands (PACKAGING.md §0, REFUTATION-3 §2.1, §2.4, §4).
  *
- * NOTHING COMES FROM THE CONTAINER. A container that still holds appended kva.* weights is served
+ * NOTHING COMES FROM THE CONTAINER. A container that still holds appended ridgefill.* weights is served
  * exactly as a stock one: none of them is declared, so none is placed.
  *
  * MEMORY. Each rank's real declare runs on its own thread with its card bound (radiance
@@ -10,29 +10,29 @@
  * block a rank (the allocation is not portable, core/device/hip.cpp:300-306), outside the VRAM
  * budget, holding each late layer's map as one row block, this rank's correction heads and the row
  * table; ONE VRAM slot of one block (50 MiB bf16, 25.4 MiB int8) takes each layer in turn, copied on
- * the second lane after the previous layer's GEMM (the staging ring, kva_layer.h). The slot is the
+ * the second lane after the previous layer's GEMM (the staging ring, ridgefill_layer.h). The slot is the
  * plugin's only rad_dev_alloc; plan() subtracts it as already held (core/mem/vram_budget.cpp:76-91), and
  * every request pays it in resident experts, so it is kept to one block (notes/stagee.md §12-§14).
  * Sizing declares and tools allocate nothing. Freed at rad_plugin_close.
  *
  * THE INT8 VARIANT (a folder whose manifest says "projector": {"dtype": "i8"}, R79): codes and a
  * scale per 128 columns of a row instead of the bf16 map -- 0.51x the bytes on the link and in the
- * slots -- relaid out at load into the engine's own int8 GEMM's stored form (kva_int8.h) and read by
- * kva_gemm_nt_q from the slot.
+ * slots -- relaid out at load into the engine's own int8 GEMM's stored form (ridgefill_int8.h) and read by
+ * ridgefill_gemm_nt_q from the slot.
  *
  * WHAT CANNOT RUN IS REFUSED, AND THE ENGINE SERVES STOCK: no folder, a folder that is not this
- * model's (kva_match.h), or tensors whose shapes are not this model's. Nothing is declared then,
+ * model's (ridgefill_match.h), or tensors whose shapes are not this model's. Nothing is declared then,
  * so the graph is the in-tree graph (R6/R7).
  */
-#ifndef KVA_PROJECTOR_H
-#define KVA_PROJECTOR_H
+#ifndef RIDGEFILL_PROJECTOR_H
+#define RIDGEFILL_PROJECTOR_H
 
-#include "kva_match.h"
-#include "kva_int8.h"
+#include "ridgefill_match.h"
+#include "ridgefill_int8.h"
 
 #include <mutex>
 
-namespace kva {
+namespace ridgefill {
 
 using namespace rad::arch;
 
@@ -44,7 +44,7 @@ struct Loaded {
     int64_t split = -1;
     bool    has_st = false;
     bool    int8 = false;      /* the maps are i8*bf16[1x128] (the manifest's projector dtype "i8") */
-    bool    has_final = false; /* final.weight [w, w] + final.bias [w] bf16: the MTP map (kva_final.h) */
+    bool    has_final = false; /* final.weight [w, w] + final.bias [w] bf16: the MTP map (ridgefill_final.h) */
 };
 static Loaded     g_loaded;
 static std::mutex g_load_mu;   /* TP ranks declare on their own threads; the first reads the folder */
@@ -64,7 +64,7 @@ struct Upload {
 };
 static Upload g_upload[MAX_RANKS];
 
-/* The row tables quality mode selects its exact rows from, indexed by RADIANCE_KVA_ROWSEL_TABLE. */
+/* The row tables quality mode selects its exact rows from, indexed by RADIANCE_RIDGEFILL_ROWSEL_TABLE. */
 static const char* const kScoreNames[] = { "score", "score_none", "score_all" };
 
 /* The folder's tensor `name`, or null; `shaped` = present with exactly this dtype and shape. */
@@ -92,7 +92,7 @@ inline std::string check_map(const Folder& f, int64_t li, int64_t n, int64_t wid
 /* What the adapter's model needs of the folder's tensors; the first one that cannot run, or empty. Every
  * shape is a fact (wide, the state, the vocabulary) and the maps' dtype is the manifest's, so a new
  * model needs no schema of its own here. */
-inline std::string check_tensors(const Folder& f, const KvaAdapter& a, Loaded* l) {
+inline std::string check_tensors(const Folder& f, const RidgeFillAdapter& a, Loaded* l) {
     const int64_t S = f.manifest.integer("split", -1), n = a.n_embd, wide = a.wide;
     if (S < a.split_lo || S >= a.n_layer)
         return "its split " + std::to_string(S) + " is not a late layer of this model (n-gram layer " +
@@ -127,7 +127,7 @@ inline std::string check_tensors(const Folder& f, const KvaAdapter& a, Loaded* l
 }
 
 /* Finds, reads and checks the folder once per process; every later declare reads the answer. */
-inline const Loaded& load_folder(const RadModelMeta* meta, RadBuilder* b, const KvaAdapter& a) {
+inline const Loaded& load_folder(const RadModelMeta* meta, RadBuilder* b, const RidgeFillAdapter& a) {
     std::lock_guard<std::mutex> lk(g_load_mu);
     Loaded& l = g_loaded;
     if (l.tried) return l;
@@ -137,27 +137,27 @@ inline const Loaded& load_folder(const RadModelMeta* meta, RadBuilder* b, const 
     else l.folder.place = find_folder();
     const FolderPlace& at = l.folder.place;
     if (at.dir.empty()) {
-        std::fprintf(stderr, "radiance: %s: KVA: no projector folder (looked at %s); "
+        std::fprintf(stderr, "radiance: %s: RidgeFill: no projector folder (looked at %s); "
                              "serving stock\n", g_log_name, at.how.c_str());
         return l;
     }
     if (!g_folder_for_test && !read_folder(&l.folder, &why)) {
-        std::fprintf(stderr, "radiance: %s: KVA: projector %s REFUSED: %s; serving stock\n", g_log_name,
+        std::fprintf(stderr, "radiance: %s: RidgeFill: projector %s REFUSED: %s; serving stock\n", g_log_name,
                      at.dir.c_str(), why.c_str());
         return l;
     }
     const Match mt = match_model(l.folder, meta, b, a.match_name);
     why = mt.refused.empty() ? check_tensors(l.folder, a, &l) : mt.refused;
     if (!why.empty()) {
-        std::fprintf(stderr, "radiance: %s: KVA: projector %s (found %s) REFUSED, it cannot run "
+        std::fprintf(stderr, "radiance: %s: RidgeFill: projector %s (found %s) REFUSED, it cannot run "
                              "on this model: %s [%s]; serving stock\n", g_log_name, at.dir.c_str(), at.how.c_str(),
                      why.c_str(), mt.summary.c_str());
         return l;
     }
     for (const std::string& w : mt.warnings)
-        std::fprintf(stderr, "radiance: %s: KVA: WARNING: projector %s: %s -- it runs, but "
+        std::fprintf(stderr, "radiance: %s: RidgeFill: WARNING: projector %s: %s -- it runs, but "
                              "was fitted on another variant\n", g_log_name, at.dir.c_str(), w.c_str());
-    std::fprintf(stderr, "radiance: %s: KVA: projector %s (found %s) matches %s: %s, "
+    std::fprintf(stderr, "radiance: %s: RidgeFill: projector %s (found %s) matches %s: %s, "
                          "%zu warning(s); split %lld, %s, %.1f MiB in %zu files\n", g_log_name,
                  at.dir.c_str(), at.how.c_str(), meta->name ? meta->name : "(unnamed)", mt.summary.c_str(),
                  mt.warnings.size(), (long long)l.split, l.has_st ? "correction held" : "no correction",
@@ -188,7 +188,7 @@ inline void* fill_block(const std::vector<Piece>& plan, bool host, int64_t bytes
     if (bytes == 0) return nullptr;
     void* p = rad_dev_alloc(bytes, host ? RAD_MEM_HOST_MAPPED : RAD_MEM_DEVICE);
     if (!p) {
-        std::fprintf(stderr, "radiance: %s: KVA: rank %d could not allocate %.1f MiB of %s "
+        std::fprintf(stderr, "radiance: %s: RidgeFill: rank %d could not allocate %.1f MiB of %s "
                              "for the projector: %s\n", g_log_name, rank, (double)bytes / (1 << 20),
                      host ? "host-mapped memory" : "VRAM", rad_dev_last_error());
         return nullptr;
@@ -205,7 +205,7 @@ inline void* fill_block(const std::vector<Piece>& plan, bool host, int64_t bytes
     ok = ok && rad_stream_sync(s) == RAD_OK;
     if (s) rad_stream_destroy(s);
     if (ok) return p;
-    std::fprintf(stderr, "radiance: %s: KVA: rank %d: the projector upload failed: %s\n", g_log_name,
+    std::fprintf(stderr, "radiance: %s: RidgeFill: rank %d: the projector upload failed: %s\n", g_log_name,
                  rank, rad_dev_last_error());
     rad_dev_free(p, RAD_MEM_DEVICE);
     return nullptr;
@@ -225,13 +225,13 @@ inline void free_upload(Upload& u) {
 }
 
 /* ONE LATE LAYER'S ROW BLOCK, in the host block and in a ring slot alike: rows of `wide` bf16, because
- * the ring's copy moves whole rows (kva_declare.h decl_ring). bf16: the map's n rows, the bias in the
+ * the ring's copy moves whole rows (ridgefill_declare.h decl_ring). bf16: the map's n rows, the bias in the
  * first n elements of row n. int8: the stored codes, then the stored scales, then the bias, each on a
  * 256-byte boundary -- at the sizes the GEMM's layout hook gave (`codes`, `scales`, bytes). Offsets in
  * bytes from the block's start. */
 struct RowBlock { int64_t rows = 0, scale_at = -1, bias_at = 0; };
 
-inline RowBlock row_block(const KvaAdapter& a, int64_t codes = -1, int64_t scales = 0) {
+inline RowBlock row_block(const RidgeFillAdapter& a, int64_t codes = -1, int64_t scales = 0) {
     const int64_t n = a.n_embd, row = a.wide * 2;
     RowBlock r;
     if (codes < 0) {
@@ -259,13 +259,13 @@ inline void put_piece(std::vector<Piece>& plan, const unsigned char* src, int64_
 }
 
 /* THE STAGING RING (Dylan's DD-L; since Stage E the only placement): every late layer's row block in
- * the host block, ONE VRAM slot of one block's size taking each layer in turn (kva_layer.h ring_*). int8 maps are
- * relaid out into the engine's int8 GEMM's stored form first (kva_int8.h); `stored` keeps them alive
+ * the host block, ONE VRAM slot of one block's size taking each layer in turn (ridgefill_layer.h ring_*). int8 maps are
+ * relaid out into the engine's int8 GEMM's stored form first (ridgefill_int8.h); `stored` keeps them alive
  * until the copy. False and `why` when that GEMM cannot take them. */
-/* THE FINAL MAP'S BLOCKS (with MTP, kva_final.h): hc row blocks of [n + 1, wide] bf16 -- rows i*n .. i*n + n of
+/* THE FINAL MAP'S BLOCKS (with MTP, ridgefill_final.h): hc row blocks of [n + 1, wide] bf16 -- rows i*n .. i*n + n of
  * the map, then that slice of its bias -- the bf16 projector block's shape, so they ride the same ring after
  * the late layers. Each block's GEMM writes columns i*n .. i*n + n of the predicted final stream. */
-inline void plan_final(const Folder& f, const KvaAdapter& a, std::vector<Piece>& plan, Layout* x) {
+inline void plan_final(const Folder& f, const RidgeFillAdapter& a, std::vector<Piece>& plan, Layout* x) {
     const int64_t n = a.n_embd, row = a.wide * 2;
     const FolderTensor* w = tensor(f, "final.weight");
     const FolderTensor* b = tensor(f, "final.bias");
@@ -276,7 +276,7 @@ inline void plan_final(const Folder& f, const KvaAdapter& a, std::vector<Piece>&
     }
 }
 
-inline bool plan_maps(const Folder& f, const Loaded& l, const KvaAdapter& a, bool final,
+inline bool plan_maps(const Folder& f, const Loaded& l, const RidgeFillAdapter& a, bool final,
                       std::vector<Piece>& plan, Layout* x, Stored* stored, std::string* why) {
     const int64_t n = a.n_embd, wide = a.wide;
     stored->assign((size_t)a.n_layer, I8Stored{});
@@ -307,7 +307,7 @@ inline bool plan_maps(const Folder& f, const Loaded& l, const KvaAdapter& a, boo
         put_piece(plan, b->data, b->bytes, x->w[li] + x->rb.bias_at);
     }
     if (final) plan_final(f, a, plan, x);
-    /* ONE slot (kva_layer.h ring_copy), the larger of a layer's block -- so int8 maps take half -- and (with
+    /* ONE slot (ridgefill_layer.h ring_copy), the larger of a layer's block -- so int8 maps take half -- and (with
      * MTP) a final block */
     const int64_t slot = final ? std::max(block, (n + 1) * wide * 2) : block;
     x->slot.push_back(place_piece(plan, &x->vend, nullptr, slot, false));
@@ -316,7 +316,7 @@ inline bool plan_maps(const Folder& f, const Loaded& l, const KvaAdapter& a, boo
 
 /* This rank's copy plan for `mode`: the maps (host block + ring slots), its value heads of the
  * correction, the selected row table. */
-inline Layout plan_rank(const Loaded& l, const KvaAdapter& a, const Config& c, int rank, bool final,
+inline Layout plan_rank(const Loaded& l, const RidgeFillAdapter& a, const Config& c, int rank, bool final,
                         std::vector<Piece>& plan, Stored* stored, std::string* why) {
     const Folder& f = l.folder;
     const int64_t heads = a.state.n_head * a.state.sd0 * a.state.sd1 * 4;   /* one rank's correction, bytes */
@@ -338,7 +338,7 @@ inline Layout plan_rank(const Loaded& l, const KvaAdapter& a, const Config& c, i
 
 /* The issue sites' operands for a layout: each late layer's GEMM reads the ring's one slot (codes /
  * scales / bias at the row block's offsets), and the ring copies its host row block there. */
-inline void take_operands(Upload& u, const Layout& x, const KvaAdapter& a, bool int8) {
+inline void take_operands(Upload& u, const Layout& x, const RidgeFillAdapter& a, bool int8) {
     const int64_t n = a.n_embd, wide = a.wide, L = a.n_layer, F = (int64_t)x.fw.size();
     for (auto* v : { &u.proj_w, &u.proj_b, &u.proj_s, &u.st }) v->assign(L, RAD_NONE);
     for (auto* v : { &u.ring_src, &u.ring_dst }) v->assign(L + F, RAD_NONE);
@@ -364,7 +364,7 @@ inline void take_operands(Upload& u, const Layout& x, const KvaAdapter& a, bool 
 }
 
 /* This rank's copies of what `mode` reads. Once per rank per process. */
-inline bool upload_rank(const Loaded& l, const KvaAdapter& a, const Config& c, int rank, bool final) {
+inline bool upload_rank(const Loaded& l, const RidgeFillAdapter& a, const Config& c, int rank, bool final) {
     Upload& u = g_upload[rank];
     const int key = (c.mode * 3 + c.rowsel_table) * 2 + final;
     if (u.done && u.key == key) return u.ok;
@@ -376,7 +376,7 @@ inline bool upload_rank(const Loaded& l, const KvaAdapter& a, const Config& c, i
     std::string why;
     const Layout x = plan_rank(l, a, c, rank, final, plan, &stored, &why);
     if (!why.empty()) {
-        std::fprintf(stderr, "radiance: %s: KVA: rank %d cannot load the int8 projector %s: %s\n", g_log_name,
+        std::fprintf(stderr, "radiance: %s: RidgeFill: rank %d cannot load the int8 projector %s: %s\n", g_log_name,
                      rank, l.folder.place.dir.c_str(), why.c_str());
         return false;
     }
@@ -388,8 +388,8 @@ inline bool upload_rank(const Loaded& l, const KvaAdapter& a, const Config& c, i
     take_operands(u, x, a, l.int8);
     if (x.score >= 0) u.score = RAD_P_T2(dev_at(u, true, x.score), RAD_F32, a.n_vocab_all, 0);
     if (c.mode == MODE_PLUMB)   /* plumb reads no fitted tensor: say so rather than print a row of zeros */
-        std::fprintf(stderr, "radiance: %s: KVA: rank %d holds nothing (plumb reads no fitted tensor)\n", g_log_name, rank);
-    else std::fprintf(stderr, "radiance: %s: KVA: rank %d holds the projector: %.1f MiB host-mapped "
+        std::fprintf(stderr, "radiance: %s: RidgeFill: rank %d holds nothing (plumb reads no fitted tensor)\n", g_log_name, rank);
+    else std::fprintf(stderr, "radiance: %s: RidgeFill: rank %d holds the projector: %.1f MiB host-mapped "
                          "(%s maps, correction, row table), %.1f MiB VRAM (the staging ring's one slot)\n", g_log_name,
                  rank, (double)x.hend / (1 << 20), l.int8 ? "int8" : "bf16", (double)x.vend / (1 << 20));
     u.ok = true;
@@ -401,6 +401,6 @@ inline void free_uploads() {
     for (Upload& u : g_upload) free_upload(u);
 }
 
-}  /* namespace kva */
+}  /* namespace ridgefill */
 
-#endif /* KVA_PROJECTOR_H */
+#endif /* RIDGEFILL_PROJECTOR_H */

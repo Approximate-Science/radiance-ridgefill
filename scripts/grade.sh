@@ -1,7 +1,7 @@
 #!/bin/sh
 # grade.sh -- the KL-mode quality measurement (radiance docs/TOOLS.md lines 470-506).
 #
-# WHAT IT MEASURES: how far a KVA mode is from the exact engine on the quick quality set,
+# WHAT IT MEASURES: how far a RidgeFill mode is from the exact engine on the quick quality set,
 # scored on the exact tail only: per-position KL divergence, both engines' perplexity and
 # top-1 agreement, per source. The reports (and their .rows files) are compared doc by
 # doc with tools/paired.py.
@@ -25,7 +25,7 @@
 # reference dir or out file (and their .rows / .log sidecars). The full container log is
 # kept beside the output: <out>.log (candidates), <ref_dir>.log (record).
 #
-# After a candidate run the count of "kva: approximate step" log lines is printed (the
+# After a candidate run the count of "ridgefill: approximate step" log lines is printed (the
 # plugin logs one per approximate step); RK_EXPECT_APPROX, when set, is the expected
 # count and a mismatch exits non-zero with both numbers (the bulk-chunk gate, HANDOVER R18).
 #
@@ -36,7 +36,7 @@
 #   RK_KLD_SEQS        default 1: --max-num-seqs of a CANDIDATE run. 2 lets the scheduler top a
 #                      step up with the next doc's first chunk -- two prefills in one step, the
 #                      shape R58' scores (scripts/two_prompts.sh); the reference stays at 1
-#   plus the mode's RADIANCE_KVA*/RADIANCE_LOG_STEPS pass-through into the container.
+#   plus the mode's RADIANCE_RIDGEFILL*/RADIANCE_LOG_STEPS pass-through into the container.
 
 set -eu
 
@@ -122,7 +122,7 @@ run_logged "$log"
 
 # the plugin logs one line per approximate step; the count proves the bulk chunks ran
 # approximate rather than falling back to exact (HANDOVER R18)
-approx=$(grep -c 'kva: approximate step' "$log" || true)
+approx=$(grep -c 'ridgefill: approximate step' "$log" || true)
 printf 'grade: %s approximate steps: %s (log: %s)\n' "$mode" "$approx" "$log"
 if [ -n "${RK_EXPECT_APPROX:-}" ]; then
     if [ "$approx" != "$RK_EXPECT_APPROX" ]; then

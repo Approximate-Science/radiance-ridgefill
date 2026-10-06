@@ -24,7 +24,7 @@
 #               adapter files it points at: those whose COPIED in-tree source changed (arch/*.copies).
 #   e. PACKAGE  (not with --host-only) when a-d are green and radiance-build:<release> exists: the
 #               committed HEAD built in that image (scripts/frozen_home.sh) and tools/package.py into
-#               dist/radiance-kva-r<name>-<short>/; no image: SKIPPED, naming the commands that make one.
+#               dist/radiance-ridgefill-r<name>-<short>/; no image: SKIPPED, naming the commands that make one.
 #   f. REPORT   always: the WARNING section -- every file of radiance's abi/, arch/common/ and
 #               arch/qwen4exp_fp8/ that changed between the pinned release (RADIANCE_VERSION) and this one
 #               -- and which adapter file copies each changed file. Loud, but not failing: a compatible
@@ -45,7 +45,7 @@
 #   RK_RADIANCE_REPO  the radiance git checkout (default /var/home/dylan/projects/inference/radiance)
 #   RK_CMAKE          cmake >= 3.21 (default: `cmake` on PATH, else ~/.local/bin/cmake)
 #   RK_PYTHON         python for pytest (default python3)
-#   RK_PROJECTOR      the folder to package and smoke-test (default data/projector-qwen38fn-int8)
+#   RK_PROJECTOR      the folder to package and smoke-test (default data/projector-ridgefill-qwen38fn-int8)
 #   RK_JOBS           build parallelism (default 4, at nice 19)
 set -u
 
@@ -66,7 +66,7 @@ done
 RREPO=${RK_RADIANCE_REPO:-/var/home/dylan/projects/inference/radiance}
 PY=${RK_PYTHON:-python3}
 JOBS=${RK_JOBS:-4}
-PROJ=${RK_PROJECTOR:-$RK_REPO/data/projector-qwen38fn-int8}
+PROJ=${RK_PROJECTOR:-$RK_REPO/data/projector-ridgefill-qwen38fn-int8}
 
 infra() { echo "update_radiance: INFRASTRUCTURE: $*" >&2; [ $ci = 1 ] && echo "::error title=radiance watch: infrastructure::$*"; exit 2; }
 
@@ -232,9 +232,9 @@ else
         hs=$(git -C "$RK_REPO" rev-parse --short HEAD)
         if RK_HOME_TAG=-r$name RK_BUILD_IMAGE=$BIMG RK_RADIANCE_SRC=$SRC "$RK_SCRIPTS/frozen_home.sh" HEAD > "$LOG/frozen_home.log" 2>&1; then
             home=$RK_REPO/data/home-$hs-r$name
-            pver=$(sed -n 's/^RAD_ARCH_PLUGIN([^,]*, *"[^"]*", *"[^"]*", *"\([0-9.]*\)".*/\1/p' "$RK_REPO/arch/qwen4exp_kva.cpp")
+            pver=$(sed -n 's/^RAD_ARCH_PLUGIN([^,]*, *"[^"]*", *"[^"]*", *"\([0-9.]*\)".*/\1/p' "$RK_REPO/arch/qwen4exp_ridgefill.cpp")
             abi=$(sed -n 's/^set(PACKAGE_VERSION "\([0-9.]*\)")/\1/p' "$HB"/install/lib*/cmake/radiance/*ersion*.cmake 2>/dev/null | head -1)
-            out=$RK_REPO/dist/radiance-kva-r$name-$hs
+            out=$RK_REPO/dist/radiance-ridgefill-r$name-$hs
             if [ -e "$out" ]; then
                 step package "SKIPPED: $out exists (remove it to rebuild); device home $home"
             elif "$PY" "$RK_REPO/tools/package.py" --home "$home" --projector "$PROJ" --out "$out" --version "$pver" \
@@ -272,7 +272,7 @@ C=$RK_REPO/corpus/quick9.jsonl
 T0=\$(date '+%Y-%m-%d %H:%M:%S')
 log() { echo "\$*" | tee -a \$E/session.log; }
 klog() { if journalctl -k --since "\$T0" | grep -qiE 'amdgpu.*(MES|SMU|timeout|reset)'; then log "STOP: kernel log"; exit 3; fi; }
-fin() { docker logs radiance-kva-\$2 > \$E/\$1.serve.log 2>&1; scripts/stop.sh > /dev/null 2>&1; klog; }
+fin() { docker logs radiance-ridgefill-\$2 > \$E/\$1.serve.log 2>&1; scripts/stop.sh > /dev/null 2>&1; klog; }
 srv=\$(docker ps --format '{{.Names}} {{.Image}}' | awk '\$2 !~ /build/ {print \$1}' | tr '\n' ' ')
 [ -z "\$srv" ] || { log "STOP: a serving container is running: \$srv"; exit 4; }
 log "smoke start \$(date -u +%FT%TZ) boot \$(cat /proc/sys/kernel/random/boot_id) radiance $ver home $home"
@@ -281,8 +281,8 @@ scripts/serve.sh off > \$E/off.serve.out 2>&1 && scripts/ident.sh > \$E/off.iden
 if [ -s \$E/exact.ident ] && diff -q \$E/exact.ident \$E/off.ident > /dev/null; then log "ident: off EQUALS stock -- PASS"
 else log "ident: off DIFFERS from stock (or a serve failed) -- FAIL"; diff \$E/exact.ident \$E/off.ident | head -8 | tee -a \$E/session.log; fi
 if [ ! -d \$REF ]; then scripts/grade.sh record \$REF \$C > \$E/ref.out 2>&1 || { log "reference FAILED: \$(tail -2 \$E/ref.out | tr '\n' '|')"; exit 5; }; log "reference recorded: \$REF"; fi
-env RADIANCE_KVA_TAIL=2560 RADIANCE_KVA_PROJECTOR=/projector RADIANCE_KVA_SCORE_BULK=1 RK_EXPECT_APPROX=67 "\$I8" scripts/grade.sh quality \$REF \$E/quality-t2560.json > \$E/quality.out 2>&1; log "quality T2560: \$(tail -1 \$E/quality.out)"; klog
-env RADIANCE_KVA_PROJECTOR=/projector RADIANCE_KVA_SCORE_BULK=1 RK_EXPECT_APPROX=67 "\$I8" scripts/grade.sh speed \$REF \$E/speed-t2048.json > \$E/speed.out 2>&1; log "speed T2048: \$(tail -1 \$E/speed.out)"; klog
+env RADIANCE_RIDGEFILL_TAIL=2560 RADIANCE_RIDGEFILL_PROJECTOR=/projector RADIANCE_RIDGEFILL_SCORE_BULK=1 RK_EXPECT_APPROX=67 "\$I8" scripts/grade.sh quality \$REF \$E/quality-t2560.json > \$E/quality.out 2>&1; log "quality T2560: \$(tail -1 \$E/quality.out)"; klog
+env RADIANCE_RIDGEFILL_PROJECTOR=/projector RADIANCE_RIDGEFILL_SCORE_BULK=1 RK_EXPECT_APPROX=67 "\$I8" scripts/grade.sh speed \$REF \$E/speed-t2048.json > \$E/speed.out 2>&1; log "speed T2048: \$(tail -1 \$E/speed.out)"; klog
 $PY scripts/kl_tail.py --corpus \$C --last 512 \$E/quality-t2560.json \$E/speed-t2048.json 2>&1 | grep -v '^    ppl/' | tee -a \$E/session.log
 log "smoke end \$(date -u +%FT%TZ)"
 EOF

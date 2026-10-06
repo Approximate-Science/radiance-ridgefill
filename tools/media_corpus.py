@@ -14,7 +14,7 @@ WHAT IT WRITES: DIR/img<i>-<kind>.png (640 x 480, no timestamp metadata) and DIR
 3 + i, cut to `chars` characters (~12-14K tokens; tools/media_ident.py refuses a prompt under its --min-prompt),
 so pictures and texts are distinct and every document is long enough.
 
-Needs matplotlib and numpy (the kva venv).
+Needs matplotlib and numpy (the ridgefill venv).
 """
 import argparse
 import hashlib

@@ -1,29 +1,29 @@
-/* kva_adapter.h -- the ONE interface between the KVA core and a model (notes/adapter-split-spec.md §1.3).
+/* ridgefill_adapter.h -- the ONE interface between the RidgeFill core and a model (notes/adapter-split-spec.md §1.3).
  *
- * The core (every kva_*.h but this file's users' adapters) is compiled into each adapter's .so and
+ * The core (every ridgefill_*.h but this file's users' adapters) is compiled into each adapter's .so and
  * names no model type: what it needs of the model it reads here, filled once per rank by the
  * adapter's `adapter_of` after the in-tree declare: facts, and hooks for whatever the model owns.
  * Nothing speculative: every field is read by the core's declare or step.
  */
-#ifndef KVA_ADAPTER_H
-#define KVA_ADAPTER_H
+#ifndef RIDGEFILL_ADAPTER_H
+#define RIDGEFILL_ADAPTER_H
 
 #include <arch/rad_arch.h>
 
-#include "kva_plan.h"   /* Pass, Path: what late_block is told */
+#include "ridgefill_plan.h"   /* Pass, Path: what late_block is told */
 
 #include <cstdint>
 #include <vector>
 
-namespace kva {
+namespace ridgefill {
 
-struct Kva;        /* kva_declare.h: the core's per-rank declare state, which the hooks fill */
-struct StateDump;  /* kva_dump.h: RADIANCE_KVA_CAPTURE_STATE's per-step copies */
+struct RidgeFill;        /* ridgefill_declare.h: the core's per-rank declare state, which the hooks fill */
+struct StateDump;  /* ridgefill_dump.h: RADIANCE_RIDGEFILL_CAPTURE_STATE's per-step copies */
 
 /* This rank's recurrent state per late layer, as the correction ops see it; {0,0,0} = none. */
 struct StateShape { int64_t n_head = 0, sd0 = 0, sd1 = 0; };
 
-struct KvaAdapter {
+struct RidgeFillAdapter {
     /* identity: the refusal prefix, the projector manifest's "adapter" string, and the in-tree .so the
      * release guard forwards to (it shadows that file by stem, arch/CMakeLists.txt). */
     const char* log_name = nullptr;
@@ -57,38 +57,38 @@ struct KvaAdapter {
      * writes (whichever dtype that is), the logits. The projector maps' dtype is not a model fact:
      * it is read from the folder's manifest (bf16 or int8). */
     rad_buf buf_stream = 0, buf_x = 0, buf_x_q = 0, buf_x_s = 0, buf_logits = 0;
-    rad_buf buf_route_ids = 0;   /* the routed FFN's expert ids, which kva_drop_rows rewrites; 0 = dense */
+    rad_buf buf_route_ids = 0;   /* the routed FFN's expert ids, which ridgefill_drop_rows rewrites; 0 = dense */
     /* hooks; nullptr = the capability is absent and the core skips it */
-    int (*declare_model)(RadBuilder*, const RadBuildCtx*, Kva&) = nullptr;          /* the fill's quantiser */
-    int (*declare_codes)(RadBuilder*, const RadBuildCtx*, Kva&) = nullptr;          /* Kva::xp's code pair */
-    const char* (*decl_state_ops)(RadBuilder*, const RadBuildCtx*, Kva&) = nullptr; /* correction ops: the
+    int (*declare_model)(RadBuilder*, const RadBuildCtx*, RidgeFill&) = nullptr;          /* the fill's quantiser */
+    int (*declare_codes)(RadBuilder*, const RadBuildCtx*, RidgeFill&) = nullptr;          /* RidgeFill::xp's code pair */
+    const char* (*decl_state_ops)(RadBuilder*, const RadBuildCtx*, RidgeFill&) = nullptr; /* correction ops: the
                                                                      missing op's name, or nullptr */
-    /* The step's late-layer issues, which the core's drivers (kva_layer.h) order around the projection.
+    /* The step's late-layer issues, which the core's drivers (ridgefill_layer.h) order around the projection.
      * conn: the connection in front of the block (ffn false) or the FFN, its read or its write, over
      * rows [r0, r0 + rows) of a T-row step. late_block: the block over the path's rows -- LEAN its
      * cache-writing pieces only, MASKED the whole block with the correction spliced in, STRADDLE /
      * DECODERS the rows [r0, r0 + rows) whole and the rest lean. ffn: the feed-forward over rows
      * [r0, to) (to < 0: all), dropping the rows `mask` marks with `drop` when both are set. */
     void (*conn)(RadCtx*, int64_t li, bool ffn, bool write, int64_t T, int64_t r0, int64_t rows) = nullptr;
-    void (*late_block)(RadCtx*, const Kva&, int64_t li, const RadBatch*, const Pass&, StateDump*, Path,
+    void (*late_block)(RadCtx*, const RidgeFill&, int64_t li, const RadBatch*, const Pass&, StateDump*, Path,
                        int64_t r0, int64_t rows) = nullptr;
-    void (*ffn)(RadCtx*, const Kva&, int64_t li, const RadBatch*, int64_t r0, int64_t to, rad_op drop,
+    void (*ffn)(RadCtx*, const RidgeFill&, int64_t li, const RadBatch*, int64_t r0, int64_t to, rad_op drop,
                 rad_buf mask) = nullptr;
-    /* The rest of the step (kva_step.h), verbatim copies of the in-tree step's pieces: prologue (embedding
+    /* The rest of the step (ridgefill_step.h), verbatim copies of the in-tree step's pieces: prologue (embedding
      * .. rope table) and epilogue (last connection, logits) around the layers; stock_layer one exact
      * layer below S, carrying the stager probes when `probes` (the routed layer S - probe_depth of a
-     * streaming pass); stock_step the in-tree step itself, for every pass KVA leaves alone. */
+     * streaming pass); stock_step the in-tree step itself, for every pass RidgeFill leaves alone. */
     void (*prologue)(RadCtx*, const RadBatch*) = nullptr;
-    void (*stock_layer)(RadCtx*, const Kva&, int64_t li, const RadBatch*, bool probes) = nullptr;
+    void (*stock_layer)(RadCtx*, const RidgeFill&, int64_t li, const RadBatch*, bool probes) = nullptr;
     void (*epilogue)(RadCtx*, const RadBatch*) = nullptr;
     void (*stock_step)(RadCtx*, const RadBatch*) = nullptr;
-    /* the debug captures (RADIANCE_KVA_CAPTURE / _CAPTURE_STATE), which interleave with the model's own
+    /* the debug captures (RADIANCE_RIDGEFILL_CAPTURE / _CAPTURE_STATE), which interleave with the model's own
      * blocks; null = the adapter keeps none and the core skips them */
-    void (*capture_step)(RadCtx*, const Kva&, const RadBatch*) = nullptr;
-    void (*finish_state)(RadCtx*, const Kva&, const RadBatch*, StateDump&, bool approx) = nullptr;
-    void (*capture_mixed)(RadCtx*, const Kva&, const RadBatch*, bool approx) = nullptr;
+    void (*capture_step)(RadCtx*, const RidgeFill&, const RadBatch*) = nullptr;
+    void (*finish_state)(RadCtx*, const RidgeFill&, const RadBatch*, StateDump&, bool approx) = nullptr;
+    void (*capture_mixed)(RadCtx*, const RidgeFill&, const RadBatch*, bool approx) = nullptr;
 };
 
-}  // namespace kva
+}  // namespace ridgefill
 
 #endif

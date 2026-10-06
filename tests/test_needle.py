@@ -8,9 +8,9 @@ timings.prompt_ms (radiance core/server/admin.cpp:119-196, core/server/oai.cpp:1
 
 The fake tokenizer is word-level (whitespace split, one id per word), so token counts
 are exact and predictable.  The fake completions endpoint simulates the two engines
-under test: mode "stock" always finds the needle anywhere in the prompt; mode "kva"
+under test: mode "stock" always finds the needle anywhere in the prompt; mode "ridgefill"
 finds it only when its number token sits in the last 2048 prompt tokens (the plugin's
-exact tail, README.md RADIANCE_KVA_TAIL), which is exactly the failure the harness
+exact tail, README.md RADIANCE_RIDGEFILL_TAIL), which is exactly the failure the harness
 must catch.
 """
 
@@ -88,7 +88,7 @@ class Handler(BaseHTTPRequestHandler):
                             and words[j + 2].endswith(".")):
                         number, pos = words[j + 2][:-1], j + 2
                         break
-            # stock sees the whole prompt; kva only its last 2048 tokens
+            # stock sees the whole prompt; ridgefill only its last 2048 tokens
             visible = number is not None and (
                 srv.mode == "stock" or pos >= len(ids) - srv.tail_tokens)
             text = " " + number if visible else " I'm sorry, I don't know."
@@ -133,8 +133,8 @@ def stock_server():
 
 
 @pytest.fixture
-def kva_server():
-    srv = FakeRadiance(mode="kva")
+def ridgefill_server():
+    srv = FakeRadiance(mode="ridgefill")
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield srv
     srv.shutdown()
@@ -387,13 +387,13 @@ def test_run_resume_skips_done_ids(stock_server, tmp_path, capsys):
     assert "nothing to do" in capsys.readouterr().out
 
 
-def test_run_records_wrong_answers(kva_server, tmp_path):
-    """The kva-mode fake only retrieves needles inside the last 2048 tokens."""
+def test_run_records_wrong_answers(ridgefill_server, tmp_path):
+    """The ridgefill-mode fake only retrieves needles inside the last 2048 tokens."""
     needle = load_needle()
     docs = write_docs(tmp_path / "docs.jsonl")
-    items = build(needle, kva_server, docs, tmp_path / "corpus.jsonl",
+    items = build(needle, ridgefill_server, docs, tmp_path / "corpus.jsonl",
                   lengths="3072", depths="0.1,0.9")
-    recs = run(needle, kva_server, tmp_path / "corpus.jsonl", tmp_path / "res.jsonl")
+    recs = run(needle, ridgefill_server, tmp_path / "corpus.jsonl", tmp_path / "res.jsonl")
     by_id = {r["id"]: r for r in recs}
     for item in items:
         rec = by_id[item["id"]]
@@ -407,23 +407,23 @@ def test_run_records_wrong_answers(kva_server, tmp_path):
 
 # ---------------------------------------------------------------- compare
 
-def test_compare_end_to_end(stock_server, kva_server, tmp_path, capsys):
+def test_compare_end_to_end(stock_server, ridgefill_server, tmp_path, capsys):
     needle = load_needle()
     docs = write_docs(tmp_path / "docs.jsonl")
     corpus = tmp_path / "corpus.jsonl"
     build(needle, stock_server, docs, corpus, lengths="3072", depths="0.1,0.9")
-    # the same corpus built against the kva server: identical ids (same tokenize
+    # the same corpus built against the ridgefill server: identical ids (same tokenize
     # order), so each server's word-level vocabulary covers them
-    items = build(needle, kva_server, docs, tmp_path / "corpus_kva.jsonl",
+    items = build(needle, ridgefill_server, docs, tmp_path / "corpus_ridgefill.jsonl",
                   lengths="3072", depths="0.1,0.9")
     with open(corpus, encoding="utf-8") as f:
         assert [it["id"] for it in items] == \
                [json.loads(l)["id"] for l in f if l.strip()]
 
     a = tmp_path / "stock.jsonl"
-    b = tmp_path / "kva.jsonl"
+    b = tmp_path / "ridgefill.jsonl"
     run(needle, stock_server, corpus, a)               # the stock engine: all right
-    run(needle, kva_server, tmp_path / "corpus_kva.jsonl", b)
+    run(needle, ridgefill_server, tmp_path / "corpus_ridgefill.jsonl", b)
 
     needle.cmd_compare(SimpleNamespace(a_file=str(a), b_file=str(b)))
     out = capsys.readouterr().out

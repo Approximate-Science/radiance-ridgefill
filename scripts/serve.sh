@@ -1,5 +1,5 @@
 #!/bin/sh
-# serve.sh -- start the engine in one KVA mode as a detached container and leave it up.
+# serve.sh -- start the engine in one RidgeFill mode as a detached container and leave it up.
 #
 # WHAT IT IS FOR: the deployment every speed/quality number is taken against; it measures
 # nothing itself. scripts/speed.sh attaches to the server this leaves running.
@@ -9,8 +9,8 @@
 #   quality (see scripts/common.sh for what each mode means).
 #
 # WHAT IT DOES: runs scripts/preflight.sh first (fail closed before touching the cards),
-# refuses if any radiance-kva-* container is already running (Flash-Next needs both
-# cards), starts radiance-kva-<mode> detached with the standard prefix (common.sh) and
+# refuses if any radiance-ridgefill-* container is already running (Flash-Next needs both
+# cards), starts radiance-ridgefill-<mode> detached with the standard prefix (common.sh) and
 # RK_FLAGS plus --max-num-seqs 8 (fnserve.sh's serving default), waits for GET /health
 # (RK_SERVE_TIMEOUT, progress every 30 s), and records the container id, the image
 # digest, the model file size and the full command in
@@ -25,7 +25,7 @@
 #   RK_FLAGS          the shared engine flags (common.sh)
 #   RK_SERVE_SEQS     8: --max-num-seqs for the serving deployment; `default` passes none (radiance's own)
 #   RK_SERVE_TIMEOUT  1800 s: how long to wait for /health (a 114 GiB model load is slow)
-#   plus any RADIANCE_KVA*/RADIANCE_LOG_STEPS in the caller's environment, passed through
+#   plus any RADIANCE_RIDGEFILL*/RADIANCE_LOG_STEPS in the caller's environment, passed through
 #   to the container.
 
 set -eu
@@ -40,9 +40,9 @@ rk_require_model
 : "${RK_SERVE_TIMEOUT:=1800}"
 : "${RK_SERVE_SEQS:=8}"
 
-container=radiance-kva-$mode
-running=$(docker ps --filter name=radiance-kva- --format '{{.Names}}' || true)
-[ -z "$running" ] || rk_die "refusing to start: a radiance-kva container is already running: $running"
+container=radiance-ridgefill-$mode
+running=$(docker ps --filter name=radiance-ridgefill- --format '{{.Names}}' || true)
+[ -z "$running" ] || rk_die "refusing to start: a radiance-ridgefill container is already running: $running"
 
 # fail closed before touching the cards: squatters, leftover VRAM, amdgpu kernel errors
 "$RK_SCRIPTS/preflight.sh" || rk_die "preflight failed before serve; nothing was started"

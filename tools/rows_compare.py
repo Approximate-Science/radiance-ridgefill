@@ -3,16 +3,16 @@
 
   rows_compare.py fixture --ppl ppl.jsonl --out FIXTURE.json  COMMON
       R33: for each doc, its first --window token ids and the rows fnlev.rules keeps when that window is the
-      whole prompt; the kernel test feeds the ids to kva_rowsel and must get these rows. The fixture also
+      whole prompt; the kernel test feeds the ids to ridgefill_rowsel and must get these rows. The fixture also
       carries the scores of the kept ids it uses (every other id is -inf), so the test needs no sidecar.
   rows_compare.py compare --corpus corpus.jsonl (--dump rows.jsonl | --simulate) [--tail T] [--out R.json]  COMMON
       R39: per doc, the rows chosen chunk by chunk (from the engine's dump, or simulated with the same rule on
       each --window chunk) vs fnlev.rules over the whole prompt at P = N - T, as a Jaccard index.
-  COMMON = --tokenizer DIR --sidecar kva-sidecar.safetensors --freq F --fnlev-root RESEARCH_REPO [--window 2048]
+  COMMON = --tokenizer DIR --sidecar ridgefill-sidecar.safetensors --freq F --fnlev-root RESEARCH_REPO [--window 2048]
 
 The share and classes come from the sidecar's metadata; the sidecar's freq hash must equal --freq's.
 
-Engine dump format (RADIANCE_KVA_DUMP=<dir> writes <dir>/rows.jsonl), one JSON object per approximate chunk:
+Engine dump format (RADIANCE_RIDGEFILL_DUMP=<dir> writes <dir>/rows.jsonl), one JSON object per approximate chunk:
   {"chunk_start": absolute position of the chunk's first row, "n_tok": rows in the chunk,
    "rows_idx": chunk-relative selected rows, ascending (-1 padding may be kept; it is dropped here),
    "token_ids": the chunk's n_tok token ids}
@@ -28,27 +28,27 @@ import numpy as np
 from safetensors import safe_open
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-import kva_rules as R  # noqa: E402
+import ridgefill_rules as R  # noqa: E402
 
-FIXTURE_FORMAT = "kva-rowsel-fixture-1"
+FIXTURE_FORMAT = "ridgefill-rowsel-fixture-1"
 
 
 def load_sidecar(path, freq):
     """(score [vocab] f32, share, classes, sha256 of the score bytes) from the sidecar."""
     with safe_open(str(path), "np") as f:
         meta = f.metadata() or {}
-        score = f.get_tensor("kva.rowsel.score")
-    if meta.get("kva.src.freq.sha256") != hashlib.sha256(Path(freq).read_bytes()).hexdigest():
+        score = f.get_tensor("ridgefill.rowsel.score")
+    if meta.get("ridgefill.src.freq.sha256") != hashlib.sha256(Path(freq).read_bytes()).hexdigest():
         raise SystemExit(f"{path} was built from another unigram table than --freq {freq}")
     score = np.ascontiguousarray(score, dtype="<f4")
-    return (score, float(meta["kva.rowsel.share"]), meta["kva.rowsel.classes"].split(","),
+    return (score, float(meta["ridgefill.rowsel.share"]), meta["ridgefill.rowsel.classes"].split(","),
             hashlib.sha256(score.tobytes()).hexdigest())
 
 
 def load_oracle(fnlev_root, tokenizer_dir, freq, tok):
     """fnlev.rules.Rules from the research repo: the code that made the paper's row lists."""
     if not (Path(fnlev_root) / "fnlev" / "rules.py").is_file():
-        raise SystemExit(f"--fnlev-root {fnlev_root}: no fnlev/rules.py (expected the KVA research repo)")
+        raise SystemExit(f"--fnlev-root {fnlev_root}: no fnlev/rules.py (expected the RidgeFill research repo)")
     sys.path.insert(0, str(fnlev_root))
     from fnlev import rules
     return rules.Rules(model_dir=tokenizer_dir, freq=freq, tok=tok)
@@ -83,7 +83,7 @@ def fixture(args, tok, oracle, score, share, classes, score_sha):
     # (every other id is -inf) without the 1.3 GB sidecar; score_sha256 ties them to the full table.
     kept = sorted({t for d in docs for t in d["token_ids"] if np.isfinite(score[t])})
     out = dict(format=FIXTURE_FORMAT, window=args.window, share=share, classes=classes,
-               score_tensor="kva.rowsel.score", score_sha256=score_sha, vocab=len(score),
+               score_tensor="ridgefill.rowsel.score", score_sha256=score_sha, vocab=len(score),
                kept_ids=kept, kept_scores=[float(score[t]) for t in kept],
                ppl=ppl.name, ppl_sha256=hashlib.sha256(ppl.read_bytes()).hexdigest(),
                rule="fnlev/rules.py class56, rank rarity (table), ties by position; k = round(share * matches), "
@@ -147,9 +147,9 @@ def main(argv=None):
     for name in ("fixture", "compare"):
         p = sub.add_parser(name)
         p.add_argument("--tokenizer", required=True, help="checkpoint dir holding the model's tokenizer")
-        p.add_argument("--sidecar", required=True, help="kva-sidecar.safetensors (score table, share, classes)")
+        p.add_argument("--sidecar", required=True, help="ridgefill-sidecar.safetensors (score table, share, classes)")
         p.add_argument("--freq", required=True, help="the unigram table the sidecar was built from")
-        p.add_argument("--fnlev-root", required=True, help="KVA research repo root (holds fnlev/rules.py)")
+        p.add_argument("--fnlev-root", required=True, help="RidgeFill research repo root (holds fnlev/rules.py)")
         p.add_argument("--window", type=int, default=2048, help="prefill chunk = --max-num-batched-tokens")
         if name == "fixture":
             p.add_argument("--ppl", required=True, help="ppl.jsonl: one {id, prompt} per line")

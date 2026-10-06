@@ -2,7 +2,7 @@
 
 This is an optional second projected map. On an approximated prompt chunk, it supplies the stream that
 radiance's multi-token-prediction (MTP) head reads. It is built and tested, but it is not in the release:
-`RADIANCE_KVA_FINAL` defaults to `off`. This page covers what it does, what it costs, what it measured, and
+`RADIANCE_RIDGEFILL_FINAL` defaults to `off`. This page covers what it does, what it costs, what it measured, and
 when it would be worth turning on. Terms (bulk rows, split S, layer-S stream, staging slot, lean and masked
 paths) are defined in [HOW-IT-WORKS.md](HOW-IT-WORKS.md).
 
@@ -32,7 +32,7 @@ chunk except a prompt's last) stops after the head's attention: no experts, no c
 
 On an approximate trunk pass, a bulk row's `b_h` is not the final stream the head was trained on:
 
-- **lean** (speed): the late layers write only caches and never write `b_h` (`kva_layer.h` `fill_layer`),
+- **lean** (speed): the late layers write only caches and never write `b_h` (`ridgefill_layer.h` `fill_layer`),
   so the bulk rows still hold the **layer-S stream**;
 - **masked** (quality): the late layers run on projected inputs with the bulk rows' experts dropped, so
   `b_h` holds a stream the model never computes.
@@ -48,24 +48,24 @@ exact** (range 0.78–0.95) on the first answer.
 A ridge map, fitted offline, from the layer-S stream to the trunk's final wide stream:
 `y = h_S · Wᵀ + bias`, with `W` [10,240 × 10,240] and `bias` [10,240], both bf16.
 
-- **Built by** `tools/kva_projector.py final --from FOLDER --proj P --out DIR`. `P` must be the projector
+- **Built by** `tools/ridgefill_projector.py final --from FOLDER --proj P --out DIR`. `P` must be the projector
   source file the folder was fitted from: its sha256 is checked against the manifest's `fit.proj_sha256`.
   It holds `final` [w, w + 1] with the bias in the last column. The tool writes `final.safetensors`
-  (`final.weight`, `final.bias`), adds a `"final"` block to `kva.json`, and copies every other file byte
+  (`final.weight`, `final.bias`), adds a `"final"` block to `ridgefill.json`, and copies every other file byte
   for byte. The int8-final folder R70 used is the int8 folder plus this file (`data/projector-qwen38fn-int8-final`,
-  notes/stagee.md §18). It predates the distribution fix and its `kva.json` still lists `README.md`; rebuild
-  it with the current tool, or run `tools/kva_projector.py reseal --folder <dir>`, before replacing that README.
-- **Checked by** `kva_projector.h` `check_tensors`. When the manifest names a final map, it must be bf16
+  notes/stagee.md §18). It predates the distribution fix and its `ridgefill.json` still lists `README.md`; rebuild
+  it with the current tool, or run `tools/ridgefill_projector.py reseal --folder <dir>`, before replacing that README.
+- **Checked by** `ridgefill_projector.h` `check_tensors`. When the manifest names a final map, it must be bf16
   with exactly those shapes, or the whole folder is refused.
-- **Declared** (`kva_declare_masked.h` `decl_selected`) only when all four hold: `RADIANCE_KVA_FINAL=on`,
+- **Declared** (`ridgefill_declare_masked.h` `decl_selected`) only when all four hold: `RADIANCE_RIDGEFILL_FINAL=on`,
   MTP is on (`max_spec > 0`, i.e. `--num-speculative-tokens` > 0), the mode is speed or quality, and the
   folder holds the map. Otherwise nothing of it is declared, held or streamed.
-- **Applied** by `kva_final.h` `final_stream`, on every approximate trunk pass after layer 47 and before
-  the epilogue. Four GEMMs (`kva_gemm_nt_bias`, one per hyper-connection copy) read the layer-S stream of
+- **Applied** by `ridgefill_final.h` `final_stream`, on every approximate trunk pass after layer 47 and before
+  the epilogue. Four GEMMs (`ridgefill_gemm_nt_bias`, one per hyper-connection copy) read the layer-S stream of
   the bulk rows (`h_S` on the masked path; `b_h`'s untouched bulk rows on lean, straddle and decoders
-  paths). Block `i` writes columns `i·2,560 … (i+1)·2,560` of the buffer `kva_final`. The predicted rows
+  paths). Block `i` writes columns `i·2,560 … (i+1)·2,560` of the buffer `ridgefill_final`. The predicted rows
   then go into `b_h`: by a plain row copy on the lean path (every row is bulk), and through the device
-  mask (`kva_select`, mask-1 rows only) elsewhere, so exact rows, decoders and other sequences keep their
+  mask (`ridgefill_select`, mask-1 rows only) elsewhere, so exact rows, decoders and other sequences keep their
   own stream.
 
 ```mermaid
@@ -74,7 +74,7 @@ flowchart LR
     E["layers 0..23 exact"] --> S["layer-S stream"]
     S --> L["late layers 24..47<br/>(lean or masked)"]
     L --> BH["b_h"]
-    S -->|"final map, 4 GEMMs<br/>(RADIANCE_KVA_FINAL=on)"| F["kva_final"]
+    S -->|"final map, 4 GEMMs<br/>(RADIANCE_RIDGEFILL_FINAL=on)"| F["ridgefill_final"]
     F -->|"bulk rows only"| BH
   end
   BH -->|"gather rows"| H["MTP history pass:<br/>mtp_enter + attention<br/>stores head K/V per position"]
@@ -83,7 +83,7 @@ flowchart LR
 
 ## How it is held and streamed
 
-The map goes through the same staging ring as the projector (`kva_projector.h` `plan_final`). In each
+The map goes through the same staging ring as the projector (`ridgefill_projector.h` `plan_final`). In each
 rank's host-mapped block it is stored as four row blocks of [2,561 × 10,240] bf16: 2,560 map rows plus one
 bias row each, which is the shape of a bf16 projector block. They follow layer 47 on the ring (ring
 indices 48..51) and use the same single VRAM slot. Block 0's copy is issued right after layer 47's GEMM and
@@ -98,13 +98,13 @@ map the slot is a bf16 block even with int8 maps**. Costs per rank, from the dec
 |---|---|---|---|
 | staging slot (VRAM) | 25.4 MiB | 50.0 MiB | +24.6 MiB |
 | `h_S`, the copied layer-S stream (VRAM arena) | not declared: int8 maps make their codes from `b_h` at layer S | [2,048 × 10,240] bf16 | +40 MiB |
-| `kva_final` (VRAM arena) | — | [2,048 × 10,240] bf16 | +40 MiB |
+| `ridgefill_final` (VRAM arena) | — | [2,048 × 10,240] bf16 | +40 MiB |
 | host-mapped block | 637.8 MiB | + 4 × 50.0 MiB | +200 MiB |
 | link per approximate pass | 0.639 GB | + 4 × 52.4 MB | +210 MB (+33%) |
 | GEMM work per approximate pass | 24 maps of [2,560 × 10,240] | + one [10,240 × 10,240] | +17% of the projector's MACs |
 
 The VRAM rows are computed from the declarations (`decl_projected` keeps `h_S` when `want_final`;
-`decl_final` declares `kva_final`), not measured. Every request pays VRAM like this in resident experts.
+`decl_final` declares `ridgefill_final`), not measured. Every request pays VRAM like this in resident experts.
 The plugin's existing ~67 MiB per rank measured +0.9–1.2% on prompts that take the stock path
 (HOW-IT-WORKS.md, "Streaming the projector"). To check that the map is active, look for `50.0 MiB VRAM`
 in the startup line `rank N holds the projector: …`; with the int8 folder and the map off it reads
@@ -117,7 +117,7 @@ the shortened history pass still gathers `b_h` and still stores the head's K/V f
 So the deficit the map targets survives the change, and the map remains the only thing that alters the
 head's history for bulk positions.
 
-The plugin never approximates a head pass. `kva_step.h` `derive` requires `draft_pass == 0`, so every
+The plugin never approximates a head pass. `ridgefill_step.h` `derive` requires `draft_pass == 0`, so every
 history pass and draft round is the in-tree step. The static case
 `an_mtp_history_pass_is_the_in_tree_head_whether_or_not_it_drafts` (off, speed and quality, `n_draft_out`
 0 and 1) holds the plugin's head pass equal to the in-tree one (notes/rebase-1.0.13.md). The map writes
@@ -136,11 +136,11 @@ per step:
 |---|---|---|
 | stock | 2.265 | 1.000× |
 | int8 + final map | **2.339** | 1.033× |
-| int8, `RADIANCE_KVA_FINAL=off` | **2.297** | 1.014× |
+| int8, `RADIANCE_RIDGEFILL_FINAL=off` | **2.297** | 1.014× |
 
 Final-on and final-off produced **byte-identical texts in all 5 reps**: drafts change speed, never text.
 That makes final against off a paired comparison, and final ≥ off in 5 of 5 reps, **+1.8% tokens per
-step**. The ratios to stock compare different texts, because KVA changes the continuation.
+step**. The ratios to stock compare different texts, because RidgeFill changes the continuation.
 
 **Why the deficit does not appear at T = 2,048.** Without the map, quality's acceptance was not below
 stock's (1.014×), so R9V's 0.895× was not reproduced. The notes' reading: when drafting starts, the head's
@@ -158,8 +158,8 @@ map, if present, is ignored.
 **To turn it on** for a drafting-heavy deployment:
 
 ```sh
-tools/kva_projector.py final --from <int8 folder> --proj <the projector source it was fitted from> --out <dir>
-RADIANCE_KVA=quality RADIANCE_KVA_FINAL=on RADIANCE_KVA_PROJECTOR=<dir>   # with --num-speculative-tokens > 0
+tools/ridgefill_projector.py final --from <int8 folder> --proj <the projector source it was fitted from> --out <dir>
+RADIANCE_RIDGEFILL=quality RADIANCE_RIDGEFILL_FINAL=on RADIANCE_RIDGEFILL_PROJECTOR=<dir>   # with --num-speculative-tokens > 0
 ```
 
 Check that the startup line shows the 50.0 MiB slot.

@@ -84,16 +84,16 @@ def test_missing_fields_are_refused(tmp_path, capsys):
 # ---------------------------------------------------------------------------
 
 def test_the_hazard_log_regex_matches_the_two_spellings_and_rejects_the_rest():
-    m = H.HAZARD_LOG_RE.search("radiance: kva: hazard 1395 positions (mode=quality)")
+    m = H.HAZARD_LOG_RE.search("radiance: ridgefill: hazard 1395 positions (mode=quality)")
     assert m and m.group("positions") == "1395" and m.group("request") is None
-    m = H.HAZARD_LOG_RE.search("2026-10-05T12:00:00 kva: hazard request branch/007/B "
+    m = H.HAZARD_LOG_RE.search("2026-10-05T12:00:00 ridgefill: hazard request branch/007/B "
                                "512 positions n_checkpoints=3")
     assert m and m.group("request") == "branch/007/B" and m.group("positions") == "512"
-    assert H.HAZARD_LOG_RE.search("kva: hazard request branch/007/B 0 positions")
-    for line in ("kva: hazard positions",          # no count
-                 "kva: hazards 44 positions",       # not the marker word
-                 "kvaa: hazard 44 positions",       # not the marker prefix
-                 "kva: hazard 44 rows"):            # not the marker unit
+    assert H.HAZARD_LOG_RE.search("ridgefill: hazard request branch/007/B 0 positions")
+    for line in ("ridgefill: hazard positions",          # no count
+                 "ridgefill: hazards 44 positions",       # not the marker word
+                 "ridgefilla: hazard 44 positions",       # not the marker prefix
+                 "ridgefill: hazard 44 rows"):            # not the marker unit
         assert H.HAZARD_LOG_RE.search(line) is None, line
 
 
@@ -101,15 +101,15 @@ def test_parse_plugin_log_counts_and_reports_unparsed(tmp_path):
     path = tmp_path / "server.log"
     path.write_text(
         "radiance: serving on 8100\n"
-        "radiance: kva: hazard request branch/000/B 44 positions\n"
-        "radiance: kva: hazard 1 positions\n"
-        "some unrelated kva noise\n"
-        "radiance: kva: hazard request branch/000/C 0 positions\n", encoding="utf-8")
+        "radiance: ridgefill: hazard request branch/000/B 44 positions\n"
+        "radiance: ridgefill: hazard 1 positions\n"
+        "some unrelated ridgefill noise\n"
+        "radiance: ridgefill: hazard request branch/000/C 0 positions\n", encoding="utf-8")
     p = H.parse_plugin_log(str(path))
     assert p["lines"] == 3 and p["positions_total"] == 45
     assert p["by_request"] == {"branch/000/B": 44, "branch/000/C": 0}
     assert p["unnamed"] == [1]
-    assert len(p["unparsed"]) == 1 and "unrelated kva noise" in p["unparsed"][0]
+    assert len(p["unparsed"]) == 1 and "unrelated ridgefill noise" in p["unparsed"][0]
 
 
 def test_cross_check_agrees_and_require_match_passes(tmp_path, capsys):
@@ -117,10 +117,10 @@ def test_cross_check_agrees_and_require_match_passes(tmp_path, capsys):
     records.write_text("".join(json.dumps(r) + "\n" for r in ROWS), encoding="utf-8")
     plugin = tmp_path / "plugin.log"
     plugin.write_text(
-        "kva: hazard request branch/000/B 44 positions\n"
-        "kva: hazard request edge/one 1 positions\n"
-        "kva: hazard request tiny-hit 100 positions\n"
-        "kva: hazard request branch/000/C 0 positions\n", encoding="utf-8")
+        "ridgefill: hazard request branch/000/B 44 positions\n"
+        "ridgefill: hazard request edge/one 1 positions\n"
+        "ridgefill: hazard request tiny-hit 100 positions\n"
+        "ridgefill: hazard request branch/000/C 0 positions\n", encoding="utf-8")
     assert H.main(["--records", str(records), "--plugin-log", str(plugin), "--tail", "2048",
                    "--require-match"]) == 0
     out = capsys.readouterr().out
@@ -132,7 +132,7 @@ def test_cross_check_disagreement_fails_require_match(tmp_path, capsys):
     records.write_text("".join(json.dumps(r) + "\n" for r in ROWS), encoding="utf-8")
     plugin = tmp_path / "plugin.log"
     # the device counter says 50 for a request the records side counts as 44
-    plugin.write_text("kva: hazard request branch/000/B 50 positions\n", encoding="utf-8")
+    plugin.write_text("ridgefill: hazard request branch/000/B 50 positions\n", encoding="utf-8")
     assert H.main(["--records", str(records), "--plugin-log", str(plugin), "--tail", "2048",
                    "--require-match"]) == 1
     out = capsys.readouterr().out
@@ -220,9 +220,9 @@ def test_the_corpus_predictions_are_exactly_what_hazard_rate_flags(tmp_path, cap
             {"id": t["id"] + "/B", "prompt_len": t["n2"], "cache_n": t["B"]["p"]},
             {"id": t["id"] + "/C", "prompt_len": t["n3"], "cache_n": t["C"]["p"]},
         ]
-        plugin_lines.append(f"radiance: kva: hazard request {t['id']}/B "
+        plugin_lines.append(f"radiance: ridgefill: hazard request {t['id']}/B "
                             f"{t['B']['predicted_tail_from_cache']} positions")
-        plugin_lines.append(f"radiance: kva: hazard request {t['id']}/C 0 positions")
+        plugin_lines.append(f"radiance: ridgefill: hazard request {t['id']}/C 0 positions")
     records_path = tmp_path / "responses.jsonl"
     records_path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
     plugin_path = tmp_path / "server.log"

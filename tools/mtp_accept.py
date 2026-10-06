@@ -12,8 +12,8 @@ stager moved for it.
 
 TOKENS A STEP: a verify step drafts `depth` tokens and emits the accepted ones plus one, so steps = draft_n / depth
 and tokens a step = (draft_n_accepted + steps) / steps. Printed per request and as the median over the reps; the
-server under test is compared with a stock server of the same flags on the same prompts (R70: KVA with the final map
-0.95-1.0x stock, RADIANCE_KVA_FINAL=off 0.85-0.92x).
+server under test is compared with a stock server of the same flags on the same prompts (R70: RidgeFill with the final map
+0.95-1.0x stock, RADIANCE_RIDGEFILL_FINAL=off 0.85-0.92x).
 
 Standard library only.
 """

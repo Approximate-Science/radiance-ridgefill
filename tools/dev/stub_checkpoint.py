@@ -4,7 +4,7 @@
   stub_checkpoint.py --repo Qwen/Qwen3.8-Flash-Next --revision main --out DIR --extra SHARD [--extra SHARD ...]
 
 Why: `rad-convert --reuse C --in-place` plans every weight the architecture declares from the INPUT namespace
-(names, dtypes, shapes) before it copies anything from C, so appending the KVA tensors to a published container
+(names, dtypes, shapes) before it copies anything from C, so appending the RidgeFill tensors to a published container
 needs the namespace of the checkpoint the container was made from (notes/sidecar.md §7). The weights themselves
 are never read for a weight C already holds, so each shard here is its real safetensors header followed by a
 hole of the real data length: apparent size = the original, disk use = the headers. Every non-safetensors file

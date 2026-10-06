@@ -1,8 +1,8 @@
 /* qwen4exp_adapter.h -- the qwen4exp side of the core/adapter split (notes/adapter-split-spec.md §1.2):
  * every fact the core reads, taken from the in-tree model after its declare (adapter_of, at the end),
  * and every hook body: the declare-side ops only a gated delta net and a routed MoE have, then the
- * step-side pieces that issue this model's blocks. Included by qwen4exp_kva.cpp after
- * <qwen4exp_fp8/qwen4exp_fp8.cpp> and the core, so `qwen4exp_fp8::Model` and `kva::Kva` are complete.
+ * step-side pieces that issue this model's blocks. Included by qwen4exp_ridgefill.cpp after
+ * <qwen4exp_fp8/qwen4exp_fp8.cpp> and the core, so `qwen4exp_fp8::Model` and `ridgefill::RidgeFill` are complete.
  *
  * Every hook reads g_model[rank] -- the model the REAL declare filled -- also under a sizing declare,
  * exactly as the plugin did before the split: the in-tree declare writes a sizing declare's model to
@@ -11,15 +11,15 @@
 #ifndef QWEN4EXP_ADAPTER_H
 #define QWEN4EXP_ADAPTER_H
 
-#include "kva_adapter.h"
+#include "ridgefill_adapter.h"
 
-namespace qwen4exp_kva {
+namespace qwen4exp_ridgefill {
 
 /* A LINEAR group of [heads, 1, inner] f32 a sequence, bound to every late delta-net layer: one
  * slot per sequence the engine zeroes at admission, keeps for the sequence's life and snapshots
  * with every checkpoint (kv.cpp:1449-1486). The tape audit fails a step whose issues depend on host
  * state outside the pass key, so per-sequence state lives on the device, here (PLAN D7). */
-inline rad_kvgroup decl_late_group(RadBuilder* b, const qwen4exp_fp8::Model& m, Kva& k,
+inline rad_kvgroup decl_late_group(RadBuilder* b, const qwen4exp_fp8::Model& m, RidgeFill& k,
                                    const char* name, int64_t inner) {
     RadKVGroupDecl d{};
     d.kind         = RAD_KV_LINEAR;
@@ -33,49 +33,49 @@ inline rad_kvgroup decl_late_group(RadBuilder* b, const qwen4exp_fp8::Model& m, 
     return g;
 }
 
-/* The correction's and the decay sums' kva.so ops, declared per late delta-net layer: the adapter's
+/* The correction's and the decay sums' ridgefill.so ops, declared per late delta-net layer: the adapter's
  * decl_state_ops hook, because the decay sums read the delta net's own a|b columns and A_log / dt_bias.
- * A handle that comes back null means no kernel library serves the op: kva.so is not on the search
+ * A handle that comes back null means no kernel library serves the op: ridgefill.so is not on the search
  * path, or declines this machine -- reported by name in decl_selected (R31). */
-inline const char* decl_state_ops(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
+inline const char* decl_state_ops(RadBuilder* b, const RadBuildCtx* ctx, RidgeFill& k) {
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[ctx->rank];
     const Config& c = k.cfg;
     const char* missing = nullptr;
     const bool corrects = k.have_st && (c.mode == MODE_SPEED || c.mode == MODE_QUALITY);
-    if (corrects && !(k.kv_applied = decl_late_group(b, m, k, "kv_kva_applied", 1)))
-        return "kv_kva_applied";
-    if (corrects && c.mode == MODE_QUALITY && !(k.kv_rho = decl_late_group(b, m, k, "kv_kva_rho", 2)))
-        return "kv_kva_rho";
+    if (corrects && !(k.kv_applied = decl_late_group(b, m, k, "kv_ridgefill_applied", 1)))
+        return "kv_ridgefill_applied";
+    if (corrects && c.mode == MODE_QUALITY && !(k.kv_rho = decl_late_group(b, m, k, "kv_ridgefill_rho", 2)))
+        return "kv_ridgefill_rho";
     /* The decay sums read the in-tree a|b buffer from an op declared after the graph. */
     if (k.kv_rho && rad_buf_concurrent(b, m.b_ab) < 0) return "gdn_ab";
     for (int64_t l = k.split; corrects && l < m.g.n_layer; ++l) {
         const qwen4exp_fp8::Layer& lay = m.layers[(size_t)l];
         if (lay.full) continue;
         for (int apply = 0; apply < 2; ++apply) {
-            const rad_op h = RAD_OP(b, "kva_state_correct",
+            const rad_op h = RAD_OP(b, "ridgefill_state_correct",
                 RAD_PARAMS(RAD_RANGE("M", 1, m.g.max_seqs), RAD_STR("mode", apply ? "apply" : "undo"),
                            RAD_F64("alpha", c.alpha), RAD_INT("n_head", m.gcfg.n_head_v),
                            RAD_INT("sd0", m.gcfg.head_v), RAD_INT("sd1", m.gcfg.head_k)),
                 RAD_NOWEIGHTS);
             (apply ? k.op_apply : k.op_undo)[(size_t)l] = h;
-            if (!h) missing = "kva_state_correct";
+            if (!h) missing = "ridgefill_state_correct";
         }
         /* The decay sums read the layer's own a|b columns and its own A_log / dt_bias. Under a
          * sizing declare these in-tree handles are the real declare's, which name the same weights
          * (the in-tree declare declares them in the same order at every max_tok; the static test
          * checks the weight lists agree). */
         if (!k.kv_rho) continue;
-        k.op_rho[(size_t)l] = rw(b, RAD_OP(b, "kva_rho_update",
+        k.op_rho[(size_t)l] = rw(b, RAD_OP(b, "ridgefill_rho_update",
             RAD_PARAMS(RAD_RANGE("M", 1, ctx->max_tok), RAD_INT("n_head", m.gcfg.n_head_v)),
             RAD_WEIGHTS(lay.gdn.w_a_log, lay.gdn.w_dt_bias)), {lay.gdn.w.ab, k.b_mask, k.b_bounds}, {});
-        if (!k.op_rho[(size_t)l]) missing = "kva_rho_update";
+        if (!k.op_rho[(size_t)l]) missing = "ridgefill_rho_update";
     }
     return missing;
 }
 
 /* The block input's code pair, written by the fill as the connection read would (QuantFP8 takes int8 or
  * E4M3 off the model's a_x, nothing for a bf16 one): the adapter's declare_model hook. */
-inline int declare_model(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
+inline int declare_model(RadBuilder* b, const RadBuildCtx* ctx, RidgeFill& k) {
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[ctx->rank];
     Geom g = m.g;
     g.max_tok = ctx->max_tok;
@@ -83,13 +83,13 @@ inline int declare_model(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
 }
 
 /* The projected block input's code pair, mirroring the model's a_x (int8 when the trunk is fed int8
- * codes, E4M3 otherwise, none for a bf16 model), so kva_select can copy a projected row's codes over
+ * codes, E4M3 otherwise, none for a bf16 model), so ridgefill_select can copy a projected row's codes over
  * an exact row's and no linear re-quantises anything: the declare_codes hook. */
-inline int declare_codes(RadBuilder* b, const RadBuildCtx* ctx, Kva& k) {
+inline int declare_codes(RadBuilder* b, const RadBuildCtx* ctx, RidgeFill& k) {
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[ctx->rank];
     Geom g = m.g;
     g.max_tok = ctx->max_tok;
-    if (m.a_x.cq()) RAD_ARCH_TRY(k.xp.declare_qs(b, k.nm, g, "kva_x_proj", g.n_embd, 0, m.a_x.q8_fed));
+    if (m.a_x.cq()) RAD_ARCH_TRY(k.xp.declare_qs(b, k.nm, g, "ridgefill_x_proj", g.n_embd, 0, m.a_x.q8_fed));
     k.xp.q8_fed = m.a_x.q8_fed;
     return RAD_OK;
 }
@@ -121,7 +121,7 @@ inline void conn(RadCtx* c, int64_t li, bool ffn, bool write, int64_t T, int64_t
  * block output, so none is computed. MASKED runs the in-tree block over every row, the delta net's last
  * sequence corrected. STRADDLE and DECODERS run the window [r0, r0 + rows) whole -- the tail, or the
  * decoders -- and the rest lean, which is where speed mode's saving beside other rows comes from. */
-inline void late_block(RadCtx* c, const Kva& k, int64_t li, const RadBatch* batch, const Pass& p,
+inline void late_block(RadCtx* c, const RidgeFill& k, int64_t li, const RadBatch* batch, const Pass& p,
                        StateDump* sd, Path path, int64_t r0, int64_t rows) {
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
     const qwen4exp_fp8::Layer& l = m.layers[(size_t)li];
@@ -150,14 +150,14 @@ inline void late_block(RadCtx* c, const Kva& k, int64_t li, const RadBatch* batc
 
 /* Layer li's MoE over rows [r0, to), issued by hand (qwen4exp_moe.h) so that, given the drop op and the
  * mask, the bulk rows' routing slots are emptied: a dropped slot's expert is neither staged nor read. */
-inline void ffn(RadCtx* c, const Kva&, int64_t li, const RadBatch* batch, int64_t r0, int64_t to, rad_op drop,
+inline void ffn(RadCtx* c, const RidgeFill&, int64_t li, const RadBatch* batch, int64_t r0, int64_t to, rad_op drop,
                 rad_buf mask) {
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
     moe_layer(c, m.layers[(size_t)li].mlp, MoeArm{ drop, mask, {} }, batch, r0, to);
 }
 
 /* ---- the exact layers and the step around them: copies of the in-tree step's pieces, issued by the core's
- * approximate_step (kva_step.h) and the debug captures. */
+ * approximate_step (ridgefill_step.h) and the debug captures. */
 
 /* qwen4exp_fp8.cpp:1450-1463, verbatim: embedding, media rows, PLE hash, the stream's first value,
  * the rope table. */
@@ -209,7 +209,7 @@ inline void epilogue(RadCtx* c, qwen4exp_fp8::Model& m, const RadBatch* batch) {
  * buffers held STREAMS that layer: from here on no late layer is staged whole, and each reads only
  * the experts its exact rows route to. Layer S-1 itself, which runs every row, is still staged when
  * the real pass reaches layer S-2. Correctness never depends on any of it: a probe moves no number. */
-inline MoeArm probe_arm(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m) {
+inline MoeArm probe_arm(RadCtx* c, const RidgeFill& k, const qwen4exp_fp8::Model& m) {
     MoeArm arm;
     arm.after_gate_up = [c, &k, &m] {
         for (int64_t x = k.split - 1; x < m.g.n_layer; ++x)
@@ -222,23 +222,23 @@ inline MoeArm probe_arm(RadCtx* c, const Kva& k, const qwen4exp_fp8::Model& m) {
  * one layer the core names (S - probe_depth of a streaming pass); every other layer is the in-tree one. */
 inline void prologue_hook(RadCtx* c, const RadBatch* batch) { prologue(c, qwen4exp_fp8::g_model[rad_rank(c)], batch); }
 inline void epilogue_hook(RadCtx* c, const RadBatch* batch) { epilogue(c, qwen4exp_fp8::g_model[rad_rank(c)], batch); }
-inline void stock_layer(RadCtx* c, const Kva& k, int64_t li, const RadBatch* batch, bool probes) {
+inline void stock_layer(RadCtx* c, const RidgeFill& k, int64_t li, const RadBatch* batch, bool probes) {
     qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
     if (!probes) { layer(c, m, li, batch); return; }
     const MoeArm arm = probe_arm(c, k, m);
     layer(c, m, li, batch, &arm);
 }
 
-/* RADIANCE_KVA_CAPTURE (mode off, rank 0): the stock step, issued through the same pieces as
+/* RADIANCE_RIDGEFILL_CAPTURE (mode off, rank 0): the stock step, issued through the same pieces as
  * every other path here (the static test holds them to the in-tree step), with host copies of the
  * stream entering layer S and of every late layer's block input `x`, read right after its
  * connection read and before the block writes its output over it. */
-inline void capture_step(RadCtx* c, const Kva& k, const RadBatch* batch) {
+inline void capture_step(RadCtx* c, const RidgeFill& k, const RadBatch* batch) {
     qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
     const int64_t T = batch->n_tok, n = m.g.n_embd;
     Capture cap;
     const bool ok = capture_begin(c, batch, k.capture_dir, &cap);
-    if (!ok) std::fprintf(stderr, "radiance: qwen4exp_kva: RADIANCE_KVA_CAPTURE: device read failed\n");
+    if (!ok) std::fprintf(stderr, "radiance: qwen4exp_ridgefill: RADIANCE_RIDGEFILL_CAPTURE: device read failed\n");
     prologue(c, m, batch);
     for (int64_t li = 0; li < m.g.n_layer; ++li) {
         const qwen4exp_fp8::Layer& l = m.layers[(size_t)li];
@@ -262,10 +262,10 @@ inline void capture_step(RadCtx* c, const Kva& k, const RadBatch* batch) {
     if (ok) capture_end(cap, k.split, n, m.hccfg.hc);
 }
 
-/* RADIANCE_KVA_CAPTURE_STATE: whatever late delta-net layer the step did not already copy (an
+/* RADIANCE_RIDGEFILL_CAPTURE_STATE: whatever late delta-net layer the step did not already copy (an
  * exact chunk copies here, after the step; nothing touches a layer's state after its scan), then
  * one file for this (chunk, rank). */
-inline void finish_state(RadCtx* c, const Kva& k, const RadBatch* batch, StateDump& sd, bool approx) {
+inline void finish_state(RadCtx* c, const RidgeFill& k, const RadBatch* batch, StateDump& sd, bool approx) {
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
     for (int64_t li = k.split; li < m.g.n_layer; ++li)
         if (!m.layers[(size_t)li].full &&
@@ -275,10 +275,10 @@ inline void finish_state(RadCtx* c, const Kva& k, const RadBatch* batch, StateDu
               m.g.world, approx, kModeNames[k.cfg.mode]);
 }
 
-/* R61 -- RADIANCE_KVA_CAPTURE_STATE ON A MIXED STEP (decoders beside a prefill chunk): after the
+/* R61 -- RADIANCE_RIDGEFILL_CAPTURE_STATE ON A MIXED STEP (decoders beside a prefill chunk): after the
  * step, every sequence's late delta-net states, so the decoders' slots of two runs of one arrangement
- * (KVA and off) can be compared byte for byte; the prefill's slot is the positive control. */
-inline void capture_mixed(RadCtx* c, const Kva& k, const RadBatch* batch, bool approx) {
+ * (RidgeFill and off) can be compared byte for byte; the prefill's slot is the positive control. */
+inline void capture_mixed(RadCtx* c, const RidgeFill& k, const RadBatch* batch, bool approx) {
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
     std::vector<int> layers;
     for (int64_t li = k.split; li < m.g.n_layer; ++li)
@@ -296,9 +296,9 @@ constexpr int64_t kAdapterMinTail = 512, kAdapterDefaultTail = 2048;
 
 /* Rank `m`'s facts. Read after qwen4exp_fp8::declare has filled `m`; the buffers are this rank's. Once
  * a declare (a few hundred bytes of per-layer arrays), never on the step path. */
-inline KvaAdapter adapter_of(const qwen4exp_fp8::Model& m) {
-    KvaAdapter a;
-    a.log_name = "qwen4exp_kva";
+inline RidgeFillAdapter adapter_of(const qwen4exp_fp8::Model& m) {
+    RidgeFillAdapter a;
+    a.log_name = "qwen4exp_ridgefill";
     a.match_name = "qwen4exp";
     a.shadow_so = "qwen4exp_fp8.so";
     a.n_layer = m.g.n_layer;
@@ -348,6 +348,6 @@ inline KvaAdapter adapter_of(const qwen4exp_fp8::Model& m) {
     return a;
 }
 
-}  // namespace qwen4exp_kva
+}  // namespace qwen4exp_ridgefill
 
 #endif

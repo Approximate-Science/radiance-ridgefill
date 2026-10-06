@@ -3,11 +3,11 @@
 
 Per (length, C): the long prompt's prompt_ms median over the settled reps (reps[skip:], A.1's warmed
 protocol reads reps 3-7), and the decoders' median token gap during the prefill and alone (the median
-of the per-rep medians). Then, for each KVA result against the exact one: the speedup exact/KVA at each
-C, R55's ratio speedup(C) / speedup(0), and R56's ratio KVA gap / exact gap during the prefill, each
+of the per-rep medians). Then, for each RidgeFill result against the exact one: the speedup exact/RidgeFill at each
+C, R55's ratio speedup(C) / speedup(0), and R56's ratio RidgeFill gap / exact gap during the prefill, each
 with a bootstrap 95% interval over the settled reps (unpaired, 2,000 resamples, seed 0).
 
-usage: conc_table.py <exact.json> <kva.json> [<kva.json> ...] [--skip 2]
+usage: conc_table.py <exact.json> <ridgefill.json> [<ridgefill.json> ...] [--skip 2]
 """
 import argparse
 import json
@@ -43,17 +43,17 @@ def med(xs):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("exact")
-    ap.add_argument("kva", nargs="+")
+    ap.add_argument("ridgefill", nargs="+")
     ap.add_argument("--skip", type=int, default=2)
     a = ap.parse_args()
     rng = random.Random(0)
     ex = settled(json.load(open(a.exact)), a.skip)
     print("| arm | length | C | prompt_ms | speedup | R55 speedup(C)/speedup(0) | decoder gap prefill ms | "
-          "R56 KVA/exact gap | decoder gap alone ms |")
+          "R56 RidgeFill/exact gap | decoder gap alone ms |")
     print("|---|---|---|---|---|---|---|---|---|")
     for (length, c), e in sorted(ex.items()):
         print(f"| exact | {length} | {c} | {med(e['prompt']):.0f} | 1 | | {med(e['gap']):.1f} | | {med(e['alone']):.1f} |")
-    for path in a.kva:
+    for path in a.ridgefill:
         res = json.load(open(path))
         kv = settled(res, a.skip)
         for (length, c), k in sorted(kv.items()):

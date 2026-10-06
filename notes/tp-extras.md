@@ -6,10 +6,10 @@ Branch `tp-extras` from main (rebased onto a4d8f16, release 0.1.0): 7dff421 (tes
 
 - The correction, the state read and the decay sums are per VALUE HEAD, and TP hands rank r the contiguous
   heads [r*48/W, (r+1)*48/W): 48 a rank at TP1, 24 at TP2, 12 at TP4 (the folder's st.L is sliced the same
-  way, kva_projector.h plan_rank).
+  way, ridgefill_projector.h plan_rank).
 - The int8 projector GEMM is NOT sharded: every rank holds the whole map and computes the whole block input,
   N = n_embd 2560 from K = hc*n 10240, at any TP -- TP4's per-rank GEMM is TP1's.
-- kva_hazard has no head extent.
+- ridgefill_hazard has no head extent.
 
 ## Host (7dff421; ctest -LE gpu 5/5, arch_static 67 / 1,144,174, pytest 209 / 33)
 
@@ -19,7 +19,7 @@ Branch `tp-extras` from main (rebased onto a4d8f16, release 0.1.0): 7dff421 (tes
   slice one head over): 4.7M diffs, FAIL.
 - kernel_test's device-vs-host cases (state_correct, state_read, rho) loop over 48, 24, 12 heads.
 - arch_static `every_rank_at_every_tp_declares_the_full_width_int8_projector`: every rank of TP1/2/4 declares
-  kva_gemm_nt_q N 2560 K 10240 on each late layer, the quantiser over 10240, and the correction at
+  ridgefill_gemm_nt_q N 2560 K 10240 on each late layer, the quantiser over 10240, and the correction at
   n_head 48 / world on the three late delta-net layers.
 
 ## Scripts (7d32b02)
@@ -51,7 +51,7 @@ overlapped.
 ### TP1 on one card -- DOES NOT FIT with the profile's memory flags (gpuq tp1-7d32b02, 23:30:12Z;
 ### evidence/tpx/tp1-20261005T233012Z)
 A first attempt at 23:29:45Z stopped itself before starting anything: the release session's last container
-(radiance-kva-speed) was still being torn down as the queue moved on. Re-queued at 23:30:12Z.
+(radiance-ridgefill-speed) was still being torn down as the queue moved on. Re-queued at 23:30:12Z.
 Stock `exact`, RK_FLAGS with only --tp 1 (expert_tiered, --host-pool-mib 12288, --gpu-headroom-mib 3072,
 --expert-vs-cache-ratio 0.82, fp8 KV, 49152 context), on 13:00.0 alone ("AQL backend, 1 device(s) [0:gfx1201]").
 The engine's own budget: claimable 27.59 GiB; static weights 6.33 GiB (TP2: 4.03 a card; the token embedding

@@ -35,7 +35,7 @@ PY=/var/home/dylan/projects/research/kva/.venv/bin/python; [ -x "$PY" ] || PY=py
 T0=$(date '+%Y-%m-%d %H:%M:%S')
 log() { echo "$*" | tee -a "$E/session.log"; }
 klog() { if journalctl -k --since "$T0" | grep -qiE 'amdgpu.*(MES|SMU|timeout|reset)'; then log "STOP: kernel log"; exit 3; fi; }
-fin() { docker logs "radiance-kva-$2" > "$E/$1.serve.log" 2>&1; "$RK_SCRIPTS/stop.sh" > /dev/null 2>&1; klog; }
+fin() { docker logs "radiance-ridgefill-$2" > "$E/$1.serve.log" 2>&1; "$RK_SCRIPTS/stop.sh" > /dev/null 2>&1; klog; }
 srv=$(docker ps --format '{{.Names}} {{.Image}}' | awk '$2 !~ /build/ {print $1}' | tr '\n' ' ')
 [ -z "$srv" ] || { log "STOP: a serving container is running: $srv"; exit 4; }
 
@@ -43,7 +43,7 @@ idx=$("$RK_SCRIPTS/card_index.sh" "$pci") || { log "STOP: no card at $pci"; exit
 RK_FLAGS=$(printf '%s' "$RK_FLAGS" | sed 's/--tp [0-9]*/--tp 1/')
 case " $RK_FLAGS " in *" --tp 1 "*) ;; *) log "STOP: RK_FLAGS has no --tp to set: $RK_FLAGS"; exit 1 ;; esac
 export RK_FLAGS RK_DOCKER_EXTRA="-e ROCR_VISIBLE_DEVICES=$idx"
-I8="$RK_DOCKER_EXTRA -v $D/projector-qwen38fn-int8:/projector:ro"
+I8="$RK_DOCKER_EXTRA -v $D/projector-ridgefill-qwen38fn-int8:/projector:ro"
 log "tp1 start $(date -u +%FT%TZ) boot $(cat /proc/sys/kernel/random/boot_id) card $pci = ROCR_VISIBLE_DEVICES $idx"
 log "  image $RK_IMAGE; home $RK_PLUGIN_HOME $(sha256sum "$RK_PLUGIN_HOME"/*/*.so | cut -c1-16 | tr '\n' ' ')"
 log "  flags: $RK_FLAGS"
@@ -80,8 +80,8 @@ log "TP1 exact reference: $REF ($(tail -1 "$E/ref.out"))"
 klog
 
 # 4. int8 quality T2560 against it
-env RK_DOCKER_EXTRA="$I8" RADIANCE_KVA_TAIL=2560 RADIANCE_KVA_PROJECTOR=/projector RADIANCE_KVA_FINAL=off \
-    RADIANCE_KVA_SCORE_BULK=1 RK_EXPECT_APPROX=67 "$RK_SCRIPTS/grade.sh" quality "$REF" "$E/i8-quality-t2560.json" \
+env RK_DOCKER_EXTRA="$I8" RADIANCE_RIDGEFILL_TAIL=2560 RADIANCE_RIDGEFILL_PROJECTOR=/projector RADIANCE_RIDGEFILL_FINAL=off \
+    RADIANCE_RIDGEFILL_SCORE_BULK=1 RK_EXPECT_APPROX=67 "$RK_SCRIPTS/grade.sh" quality "$REF" "$E/i8-quality-t2560.json" \
     > "$E/quality.out" 2>&1 || rc=1
 log "int8 quality T2560 at TP1: $(tail -1 "$E/quality.out")"
 log "    $(grep -E 'holds the projector|REFUSED|forwarding' "$E/i8-quality-t2560.json.log" | sort -u | cut -c1-160 | tr '\n' '|')"

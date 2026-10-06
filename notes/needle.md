@@ -8,8 +8,8 @@ commit 140987f (read-only), as documented in `notes/scripts.md` and used by
 
 ## What it measures and why perplexity is not enough
 
-The KVA plugin accelerates prefill by approximating most of a long prompt and keeping
-only the last T = 2048 tokens exact (README.md `RADIANCE_KVA_TAIL`; `tools/speed.py`
+The RidgeFill plugin accelerates prefill by approximating most of a long prompt and keeping
+only the last T = 2048 tokens exact (README.md `RADIANCE_RIDGEFILL_TAIL`; `tools/speed.py`
 `tail_note` is the arithmetic at the protocol lengths). Perplexity on a long doc is a
 mean over positions and the exact tail dominates it, so a fact lost in the approximated
 bulk moves the score by less than run-to-run noise: a KL/perplexity gate can pass while
@@ -17,7 +17,7 @@ the engine has quietly stopped retrieving anything from the first N − T tokens
 harness makes that failure binary: it buries one fact at a known token depth, asks the
 model to return it, and the reply is either right or wrong. Both the position and the
 bulk/tail side of the boundary are recorded per item, so `compare` can say not just
-"KVA is worse" but "KVA loses exactly the needles in the approximated bulk".
+"RidgeFill is worse" but "RidgeFill loses exactly the needles in the approximated bulk".
 
 ## Usage
 
@@ -29,14 +29,14 @@ python3 tools/needle.py build \
   --lengths 8192,16384,32768 --depths 0.05,0.25,0.5,0.75,0.9,0.98 \
   --keys 4 --seed 0 --server http://127.0.0.1:8100 --out corpus.jsonl
 
-# 2. Run it against each engine (stock, then the KVA build), resumable:
+# 2. Run it against each engine (stock, then the RidgeFill build), resumable:
 python3 tools/needle.py run --corpus corpus.jsonl \
   --server http://127.0.0.1:8100 --out results-stock.jsonl --max-tokens 16
 python3 tools/needle.py run --corpus corpus.jsonl \
-  --server http://127.0.0.1:8101 --out results-kva.jsonl
+  --server http://127.0.0.1:8101 --out results-ridgefill.jsonl
 
 # 3. Compare:
-python3 tools/needle.py compare results-stock.jsonl results-kva.jsonl
+python3 tools/needle.py compare results-stock.jsonl results-ridgefill.jsonl
 ```
 
 `build` refuses to overwrite its output; `run` appends one JSON line per item to `--out`
@@ -88,15 +88,15 @@ straddle it at 16K/32K:
 | 32768 | 30720 | 0.05 → 1638 (bulk), 0.25 → 8192 (bulk), 0.5 → 16384 (bulk), 0.75 → 24575 (bulk), **0.9 → 29490 (bulk)**, **0.98 → 32112 (tail)** |
 
 Reading the straddle: at 16K a 0.9-depth needle sits 1,639 tokens from the end —
-inside the 2,048-token exact tail, where KVA is expected to retrieve it; at 32K the
+inside the 2,048-token exact tail, where RidgeFill is expected to retrieve it; at 32K the
 same 0.9 depth sits 3,278 tokens from the end — inside the approximated bulk, where a
 correct answer would prove nothing about approximation and a wrong one is the expected
 signature. Only 0.98 survives in the tail at 32K, and at 8K even 0.75 lands one token
 before the boundary, which is why the positions are computed and labelled exactly
 rather than assumed from the depth. The question itself is the last ~16 tokens and so
-always inside the tail. A KVA-vs-stock `compare` that shows stock near 100% everywhere
-but KVA collapsing on `bulk` (with `tail` intact) is the direct evidence that the
-plugin's approximation is losing retrievable facts; KVA matching stock on `tail`
+always inside the tail. A RidgeFill-vs-stock `compare` that shows stock near 100% everywhere
+but RidgeFill collapsing on `bulk` (with `tail` intact) is the direct evidence that the
+plugin's approximation is losing retrievable facts; RidgeFill matching stock on `tail`
 at every length is the direct evidence that the exact tail really is exact.
 
 ## `run` and `compare`
@@ -124,7 +124,7 @@ ends with the list of items where A and B disagree, each with the loser's reply.
 word-level `/tokenize` (exact counts, `add_special_tokens=false` asserted) and a
 `/v1/completions` that decodes the prompt, finds the asked needle and answers its
 number — always (mode `stock`, the control) or only when the needle sits in the last
-2048 prompt tokens (mode `kva`, the plugin's failure mode). Covered: exact token
+2048 prompt tokens (mode `ridgefill`, the plugin's failure mode). Covered: exact token
 lengths and needle token positions (including that the block really is the needle and
 the question really is last), determinism per seed, distinct keys/numbers, the
 bulk/tail flip across the boundary, 7-digit parsing edge cases, resume (done ids are

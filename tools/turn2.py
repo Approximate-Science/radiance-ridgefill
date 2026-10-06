@@ -5,7 +5,7 @@ against the same turn recomputed (--no-prefix-cache) and against exact, through 
   turn2.py build --docs JSONL --out CONV.json [--n 5] [--context 12000] [--answer 64]
   turn2.py run   --conv CONV.json --dump HOST_DUMP_DIR --out MANIFEST.json [--answer 64]
 
-WHY: with KVA on, a cached prefix holds the KV the first turn computed -- its bulk approximated, its last T rows
+WHY: with RidgeFill on, a cached prefix holds the KV the first turn computed -- its bulk approximated, its last T rows
 exact -- and the second turn reuses it; without the cache the second turn approximates its whole bulk afresh. The
 bar is that the cached second turn is no further from exact than the recomputed one, within noise.
 
@@ -13,7 +13,7 @@ build (against the REFERENCE server, the exact engine): n conversations from the
 at document 3), each turn 1 = a document cut to `context` tokens + a question, answered greedily (`answer` tokens);
 turn 2 = turn 1 + that answer + a follow-up. Everything is kept as token ids, so every server is sent the same ids.
 
-run (against the server under test, started with RADIANCE_KVA_DUMP_LOGITS=<dir> -- mounted from HOST_DUMP_DIR -- and
+run (against the server under test, started with RADIANCE_RIDGEFILL_DUMP_LOGITS=<dir> -- mounted from HOST_DUMP_DIR -- and
 --profile-ops so no pass is replayed): per conversation, turn 1 + its answer as one prefill (max_tokens 1, so a
 cache server holds exactly turn 2's prefix), then turn 2, greedy, `answer` tokens. The manifest records which lines
 of <HOST_DUMP_DIR>/logits.jsonl turn 2 wrote ({"solo": [[lo, hi], ...]}, tools/logit_compare.py's form: side

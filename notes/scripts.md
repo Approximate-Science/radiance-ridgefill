@@ -68,7 +68,7 @@ are already image env (docs/DOCKER.md "Run it").
   corpus tokenization, core/kld.cpp:222: encode(..., add_special=false, parse_special=true)).
 - preflight (a) excludes the check's own PROCESS TREE (the script, its launcher, every
   ancestor), the repo's own tooling (cmdline contains the repo path), the PIDs inside
-  radiance-kva-* containers (`docker top`), and any cmdline that merely QUOTES the check
+  radiance-ridgefill-* containers (`docker top`), and any cmdline that merely QUOTES the check
   pattern (no real engine carries a `|` in its name). Verified live: a fake `vllm-serve`
   squatter is caught and named; the harness/agent wrappers are not.
 - preflight (b) counts a card as discrete when `mem_info_vram_total > 8 GiB` — verified live
@@ -94,8 +94,8 @@ are already image env (docs/DOCKER.md "Run it").
   sandbox, so docker/curl were fakes on PATH):
   - preflight.sh: provenance line with both PCI ids, temps, sclk; catches a fake `vllm`
     squatter; catches fake amdgpu MES/SMU kernel lines; passes on the live machine.
-  - serve.sh: refuses on an existing radiance-kva-* container; preflight before start;
-    assembles the full docker line (prefix + RK_FLAGS + port + extra args, RADIANCE_KVA*
+  - serve.sh: refuses on an existing radiance-ridgefill-* container; preflight before start;
+    assembles the full docker line (prefix + RK_FLAGS + port + extra args, RADIANCE_RIDGEFILL*
     pass-through, plugin home only for non-exact); waits for /health; records container id,
     image digest, model size and the full command one-arg-per-line in the .cmd evidence
     file. Paths with spaces survive the POSIX arg materialisation.
@@ -110,7 +110,7 @@ are already image env (docs/DOCKER.md "Run it").
     per-rep preflight lines and /server_info provenance in the evidence JSON.
 - NOT tested (needs the real engine): the docker GPU run itself, the real /health of a
   served radiance, KL-mode record/ref against a real .rad, and the plugin's
-  `kva: approximate step` log lines (faked in the dry-run).
+  `ridgefill: approximate step` log lines (faked in the dry-run).
 
 ## Open items for other lanes
 

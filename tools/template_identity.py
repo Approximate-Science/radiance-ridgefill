@@ -9,9 +9,9 @@ and tokenises what it produced (parse_special=true, add_special_tokens=false
 -- core/server/admin.cpp, `/tokenize`), and checks R119/R120 of
 fix-246/REQUIREMENTS-FIX.md against it:
 
-  R119  every request WITHOUT the `kva` kwarg renders byte-identically to the
+  R119  every request WITHOUT the `ridgefill` kwarg renders byte-identically to the
         stock template (0 differing ids over the suite); every request WITH
-        `chat_template_kwargs {"kva": "on"}` renders the stock prompt with
+        `chat_template_kwargs {"ridgefill": "on"}` renders the stock prompt with
         exactly the 64 marker ids in front; a dial value outside its table
         keeps the request off (identical to stock, no marker).
   R120  the engine's startup reply-format line ("chat: reply format template:
@@ -54,7 +54,7 @@ Suite field spellings (read off the engine, see each case's comment):
     a default server both cases render with thinking on. Identity between
     stock and merged is what is checked, and it holds either way.
 
-Standard library only. tools/kva_template.py (also stdlib-only) supplies the
+Standard library only. tools/ridgefill_template.py (also stdlib-only) supplies the
 spec loader; the fake radiance used by the tests lives in the test file.
 """
 
@@ -70,9 +70,9 @@ import urllib.request
 from pathlib import Path
 
 if __package__:  # imported as tools.template_identity
-    from .kva_template import SpecError, load_spec
+    from .ridgefill_template import SpecError, load_spec
 else:            # run as a script: tools/ is on sys.path
-    from kva_template import SpecError, load_spec
+    from ridgefill_template import SpecError, load_spec
 
 PROG = "template_identity"
 ENDPOINT = "/tokenize"
@@ -152,7 +152,7 @@ SYSTEM_USER = [
 
 # (name, base request fields). `add_generation_prompt` defaults to true; only
 # the shape that exercises its absence names it. `chat_template_kwargs` here
-# are the shape's own kwargs -- the kva variants merge on top of them.
+# are the shape's own kwargs -- the ridgefill variants merge on top of them.
 SHAPES = [
     ("system_user", {"messages": SYSTEM_USER}),
     ("user_only", {"messages": [
@@ -183,23 +183,23 @@ SHAPES = [
         {"role": "user", "content": LONG_USER_CONTENT}]}),
 ]
 
-# (name suffix, kva kwargs merged into the shape's kwargs, declared expect).
-# None = do not add any kva kwarg (the shape's own kwargs stand).
+# (name suffix, ridgefill kwargs merged into the shape's kwargs, declared expect).
+# None = do not add any ridgefill kwarg (the shape's own kwargs stand).
 VARIANTS = [
     ("", None, "identical"),
-    ("__on", {"kva": "on"}, "marker"),
-    ("__on_share", {"kva": "on", "kva_share": "0.50"}, "marker"),
-    ("__on_alpha", {"kva": "on", "kva_alpha": "0.5"}, "marker"),
-    ("__on_tail", {"kva": "on", "kva_tail": "2560"}, "marker"),
-    # 0.75 is not in kva_share's table: the request stays off (identical)
-    ("__on_invalid", {"kva": "on", "kva_share": "0.75"}, "identical"),
+    ("__on", {"ridgefill": "on"}, "marker"),
+    ("__on_share", {"ridgefill": "on", "ridgefill_share": "0.50"}, "marker"),
+    ("__on_alpha", {"ridgefill": "on", "ridgefill_alpha": "0.5"}, "marker"),
+    ("__on_tail", {"ridgefill": "on", "ridgefill_tail": "2560"}, "marker"),
+    # 0.75 is not in ridgefill_share's table: the request stays off (identical)
+    ("__on_invalid", {"ridgefill": "on", "ridgefill_share": "0.75"}, "identical"),
 ]
 
 SUITE_COMMENT = (
     "R119 request suite: /tokenize bodies whose ids the stock and the merged "
-    "(kva-marker) template must render identically for every case without "
-    "`kva: on`; with `kva: on` the merged template must render the same ids "
-    "with exactly the 64 marker ids of kva-marker-spec.json in front (dials "
+    "(ridgefill-marker) template must render identically for every case without "
+    "`ridgefill: on`; with `ridgefill: on` the merged template must render the same ids "
+    "with exactly the 64 marker ids of ridgefill-marker-spec.json in front (dials "
     "resolved from the spec); an invalid dial value keeps the request off. "
     "Spellings: reasoning_effort rides chat_template_kwargs because /tokenize "
     "does not read the top-level field (parse_thinking runs on the chat "
@@ -216,11 +216,11 @@ SUITE_COMMENT = (
 def build_suite() -> dict:
     cases = []
     for shape_name, fields in SHAPES:
-        for suffix, kva_kwargs, expect in VARIANTS:
+        for suffix, ridgefill_kwargs, expect in VARIANTS:
             request = dict(fields)
             kwargs = dict(fields.get("chat_template_kwargs") or {})
-            if kva_kwargs is not None:
-                kwargs.update(kva_kwargs)
+            if ridgefill_kwargs is not None:
+                kwargs.update(ridgefill_kwargs)
             if kwargs:
                 request["chat_template_kwargs"] = kwargs
             request.setdefault("add_generation_prompt", True)
@@ -241,7 +241,7 @@ def build_suite() -> dict:
             "render_stock": f"{PROG} render --server URL --suite suite.json --out stock-ids.json",
             "render_merged": f"{PROG} render --server URL --suite suite.json --out merged-ids.json",
             "diff": f"{PROG} diff --stock stock-ids.json --merged merged-ids.json "
-                    "--spec kva-marker-spec.json",
+                    "--spec ridgefill-marker-spec.json",
             "replyfmt": f"{PROG} replyfmt --stock-log stock.log --merged-log merged.log",
         },
         "cases": cases,
@@ -336,7 +336,7 @@ def cmd_suite(args: argparse.Namespace) -> int:
     _write_json(args.out, build_suite())
     n = len(SHAPES) * len(VARIANTS)
     print(f"wrote {args.out}: {n} cases ({len(SHAPES)} shapes x {len(VARIANTS)} "
-          "kva variants); render it against the stock and the merged server, "
+          "ridgefill variants); render it against the stock and the merged server, "
           "then diff")
     return 0
 
@@ -531,8 +531,8 @@ def cmd_diff(args: argparse.Namespace) -> int:
     if n_fail:
         print("FAIL: the merged template is not identical to stock where it must be")
         return 1
-    print("OK: every request without the kva kwarg is identical to stock, and "
-          f"every kva:on request is stock with exactly the {spec['length']} "
+    print("OK: every request without the ridgefill kwarg is identical to stock, and "
+          f"every ridgefill:on request is stock with exactly the {spec['length']} "
           "marker ids in front (R119)")
     return 0
 
@@ -612,7 +612,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("diff", help="compare stock and merged id files case by case")
     p.add_argument("--stock", required=True, help="ids rendered against the stock template")
     p.add_argument("--merged", required=True, help="ids rendered against the merged template")
-    p.add_argument("--spec", required=True, help="kva-marker-spec.json")
+    p.add_argument("--spec", required=True, help="ridgefill-marker-spec.json")
     p.set_defaults(func=cmd_diff)
 
     p = sub.add_parser("replyfmt", help="the reply-format startup line must be identical")

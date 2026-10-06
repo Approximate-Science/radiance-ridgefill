@@ -2,7 +2,7 @@
 
 Workspace: agent-worker `4d935331`, REPORT ONLY — no tracked files touched.
 Engine audited: `/var/home/dylan/projects/inference/radiance` at commit `140987fa7b0d9a1ec60e19809a70988f711997fe` (`140987f`) — confirmed with `git log -1`, matches REFUTATION-2's stated commit.
-Design docs: `fix-246/REFUTATION-2-marker.md` §1–§3, §6; `fix-246/PLAN-FIX.md` §11; marker spec: `worker-context/kva-marker-spec.json`.
+Design docs: `fix-246/REFUTATION-2-marker.md` §1–§3, §6; `fix-246/PLAN-FIX.md` §11; marker spec: `worker-context/ridgefill-marker-spec.json`.
 
 ## Summary (updated as verification proceeds)
 
@@ -27,7 +27,7 @@ Design docs: `fix-246/REFUTATION-2-marker.md` §1–§3, §6; `fix-246/PLAN-FIX.
 - Item 2 (`inv = 0` at :435 vs cited 438-441): REFUTATION-2 §3 step (a) — `libr4d/r4d_attn_prefill_h256_gqa6.hip:122-161` is exact, and the write-0 effect holds at :435/:443-445. Erase step (a) stands.
 - Item 4 (rope-plane read at :111-123 vs cited 96-109): REFUTATION-2 §3 step (c) — work's `p0 = pos[cu[s]]` citation (69-93) is exact, and block-key rotation does read the rope planes when the batch carries them. Erase step (c) stands.
 
-The end-token string in `kva-marker-spec.json` is `<|endoftext|>` (hex `3c7c656e646f66746578747c3e`), 13 bytes, token id 248044 — terminal display of that string is mangled in some renders; the file bytes are verified correct (see §2).
+The end-token string in `ridgefill-marker-spec.json` is `<|endoftext|>` (hex `3c7c656e646f66746578747c3e`), 13 bytes, token id 248044 — terminal display of that string is mangled in some renders; the file bytes are verified correct (see §2).
 
 ---
 
@@ -300,7 +300,7 @@ When the container carries `mrope_section`, `g.rope_mc = true` and the mode is m
 679	    }
 ```
 
-Every key (including `kva`) is copied via `dump()` as raw JSON into the template context; only `enable_thinking` gets a type check. `"kva": "on"` arrives at the template as the JSON value `"on"`.
+Every key (including `ridgefill`) is copied via `dump()` as raw JSON into the template context; only `enable_thinking` gets a type check. `"ridgefill": "on"` arrives at the template as the JSON value `"on"`.
 
 ### 1.12 `core/config.cpp:105` — `--override-chat-template`
 
@@ -328,13 +328,13 @@ Every key (including `kva`) is copied via `dump()` as raw JSON into the template
 149	"                                    reasoning_effort here" },
 ```
 
-Server-side template-variable defaults exist and request-side `chat_template_kwargs` win per key — matching §11.1's "server default can come from `--chat-template-kwargs`; the startup render runs without `kva`".
+Server-side template-variable defaults exist and request-side `chat_template_kwargs` win per key — matching §11.1's "server default can come from `--chat-template-kwargs`; the startup render runs without `ridgefill`".
 
 ---
 
 ## 2. Marker tokens vs the tokenizer
 
-### 2.1 Tokens the marker uses (from `kva-marker-spec.json`)
+### 2.1 Tokens the marker uses (from `ridgefill-marker-spec.json`)
 
 Structure: 64 tokens — offsets 0-59 fixed alternating pattern, 60/61/62 dial tokens, 63 end.
 
@@ -342,9 +342,9 @@ Structure: 64 tokens — offsets 0-59 fixed alternating pattern, 60/61/62 dial t
 |---|---|---|---|
 | pattern piece A | offsets 0, 2, 4, … (even) | `<\|quad_start\|>` | 248051 |
 | pattern piece B | offsets 1, 3, 5, … (odd) | `<\|quad_end\|>` | 248052 |
-| kva_share dial | offset 60 | `<\|box_start\|>` 0.10 / `<\|box_end\|>` 0.25 / `<\|object_ref_start\|>` 0.50 | 248049 / 248050 / 248047 |
-| kva_alpha dial | offset 61 | `<\|box_start\|>` 0 / `<\|box_end\|>` 0.5 / `<\|object_ref_start\|>` 1.0 | 248049 / 248050 / 248047 |
-| kva_tail dial | offset 62 | `<\|box_start\|>` 1024 / `<\|box_end\|>` 2048 / `<\|object_ref_start\|>` 2560 / `<\|object_ref_end\|>` 3072 | 248049 / 248050 / 248047 / 248048 |
+| ridgefill_share dial | offset 60 | `<\|box_start\|>` 0.10 / `<\|box_end\|>` 0.25 / `<\|object_ref_start\|>` 0.50 | 248049 / 248050 / 248047 |
+| ridgefill_alpha dial | offset 61 | `<\|box_start\|>` 0 / `<\|box_end\|>` 0.5 / `<\|object_ref_start\|>` 1.0 | 248049 / 248050 / 248047 |
+| ridgefill_tail dial | offset 62 | `<\|box_start\|>` 1024 / `<\|box_end\|>` 2048 / `<\|object_ref_start\|>` 2560 / `<\|object_ref_end\|>` 3072 | 248049 / 248050 / 248047 / 248048 |
 | end | offset 63 | `<\|endoftext\|>` (raw bytes `3c7c656e646f66746578747c3e`) | 248044 |
 
 Distinct token strings used by the marker (7): `<|quad_start|>`, `<|quad_end|>`, `<|box_start|>`, `<|box_end|>`, `<|object_ref_start|>`, `<|object_ref_end|>`, `<|endoftext|>`. The spec's `token_ids` map carries exactly these 7 with the ids above.

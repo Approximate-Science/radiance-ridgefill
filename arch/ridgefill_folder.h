@@ -1,4 +1,4 @@
-/* kva_folder.h -- the projector folder: where it is, and what it holds (PACKAGING.md §0, §2, §3;
+/* ridgefill_folder.h -- the projector folder: where it is, and what it holds (PACKAGING.md §0, §2, §3;
  * REFUTATION-3 §1). Model-agnostic: no model type appears here.
  *
  * WHERE. The user runs the stock model file and puts the projector in `<model dir>/projector/`. No
@@ -7,20 +7,20 @@
  * :2467 then :2472), so /proc/self/maps names its RESOLVED file -- the mapping whose bytes start
  * with the container magic (abi/rad_format.h:28) -- and /proc/self/cmdline holds `--model PATH` as
  * typed (the one spelling, core/config.cpp:32, 338), accepted only when it is the same file
- * (device and inode). Order: $RADIANCE_KVA_PROJECTOR, else projector/ beside the typed path (a
+ * (device and inode). Order: $RADIANCE_RIDGEFILL_PROJECTOR, else projector/ beside the typed path (a
  * Hugging Face cache's snapshots/<rev>/model.rad symlink keeps its own directory), else beside the
  * resolved file. Anything that fails is "no projector", never an error.
  *
- * WHAT. kva.json (format 1) lists every file with its sha256; each .safetensors file's tensors are
+ * WHAT. ridgefill.json (format 1) lists every file with its sha256; each .safetensors file's tensors are
  * mapped read-only and named by their own names (proj.24.weight, st.24, score, ...). A partial
  * download, a corrupt file or a duplicate tensor name refuses the folder by name. The hashes run
  * one thread a file, once per process (~1.3 GiB: about a second, mostly the first read).
  */
-#ifndef KVA_FOLDER_H
-#define KVA_FOLDER_H
+#ifndef RIDGEFILL_FOLDER_H
+#define RIDGEFILL_FOLDER_H
 
-#include "kva_guard.h"   /* sha256_block, real_path */
-#include "kva_json.h"
+#include "ridgefill_guard.h"   /* sha256_block, real_path */
+#include "ridgefill_json.h"
 
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -36,7 +36,7 @@
 #include <thread>
 #include <vector>
 
-namespace kva {
+namespace ridgefill {
 
 using namespace rad::arch;
 
@@ -101,16 +101,16 @@ inline std::string dir_of(const std::string& p) {
 
 inline bool has_manifest(const std::string& dir) {
     struct stat st {};
-    return stat((dir + "/kva.json").c_str(), &st) == 0 && S_ISREG(st.st_mode);
+    return stat((dir + "/ridgefill.json").c_str(), &st) == 0 && S_ISREG(st.st_mode);
 }
 
 inline FolderPlace find_folder() {
     FolderPlace f;
     f.container = mapped_container();
-    if (const char* e = std::getenv("RADIANCE_KVA_PROJECTOR"); e && *e) {
-        f.how = std::string("$RADIANCE_KVA_PROJECTOR=") + e;
+    if (const char* e = std::getenv("RADIANCE_RIDGEFILL_PROJECTOR"); e && *e) {
+        f.how = std::string("$RADIANCE_RIDGEFILL_PROJECTOR=") + e;
         if (has_manifest(e)) f.dir = e;
-        else f.how += " (no kva.json there)";
+        else f.how += " (no ridgefill.json there)";
         return f;
     }
     const std::string typed = typed_model();
@@ -145,7 +145,7 @@ struct FolderTensor {
 };
 
 /* The folder as read: tensors point into the files' read-only mappings and are never copied here --
- * the one copy is each rank's upload (kva_projector.h). */
+ * the one copy is each rank's upload (ridgefill_projector.h). */
 struct Folder {
     FolderPlace place;
     Json        manifest;
@@ -159,7 +159,7 @@ inline std::string hex_digest(const uint32_t h[8]) {
     return hex;
 }
 
-/* SHA-256 of n bytes in memory (FIPS 180-4; kva_guard.h's block function). */
+/* SHA-256 of n bytes in memory (FIPS 180-4; ridgefill_guard.h's block function). */
 inline std::string sha256_bytes(const unsigned char* p, size_t n) {
     uint32_t h[8] = { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
                       0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 };
@@ -191,7 +191,7 @@ inline const unsigned char* map_file(const std::string& path, size_t* size) {
     return (const unsigned char*)p;
 }
 
-/* The dtypes tools/kva_projector.py writes; any other tensor refuses the folder (RAD_DT_INVALID). */
+/* The dtypes tools/ridgefill_projector.py writes; any other tensor refuses the folder (RAD_DT_INVALID). */
 inline uint32_t safetensors_dtype(const std::string& s) {
     if (s == "BF16") return RAD_BF16;
     if (s == "F32")  return RAD_F32;
@@ -245,15 +245,15 @@ inline bool read_safetensors(const std::string& name, const unsigned char* p, si
  * the tensors of the safetensors files. False and *why (naming the file) on any failure. */
 inline bool read_folder(Folder* f, std::string* why) {
     const std::string& dir = f->place.dir;
-    std::ifstream in(dir + "/kva.json", std::ios::binary);
+    std::ifstream in(dir + "/ridgefill.json", std::ios::binary);
     const std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
     if (!json_parse(text.data(), text.size(), &f->manifest) || f->manifest.integer("format", 0) != 1) {
-        *why = dir + "/kva.json does not parse as a format-1 projector manifest";
+        *why = dir + "/ridgefill.json does not parse as a format-1 projector manifest";
         return false;
     }
     const Json* files = f->manifest.get("files");
     if (!files || files->kind != Json::OBJ || files->obj.empty()) {
-        *why = dir + "/kva.json lists no files";
+        *why = dir + "/ridgefill.json lists no files";
         return false;
     }
     const size_t n = files->obj.size();
@@ -288,6 +288,6 @@ inline bool read_folder(Folder* f, std::string* why) {
     return true;
 }
 
-}  /* namespace kva */
+}  /* namespace ridgefill */
 
-#endif /* KVA_FOLDER_H */
+#endif /* RIDGEFILL_FOLDER_H */

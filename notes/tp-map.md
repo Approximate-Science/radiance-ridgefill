@@ -1,4 +1,4 @@
-# notes/tp-map.md -- TP 1 / 2 / 4 map for the KVA plugin on radiance 1.0.8 (report only)
+# notes/tp-map.md -- TP 1 / 2 / 4 map for the RidgeFill plugin on radiance 1.0.8 (report only)
 > Report by an open-model worker (GLM-5.3 via opencode-go), written against main at 9af94f7 and spot-checked by the
 > orchestrator (the engine facts in summary items 1, 4, 5 verified in the radiance source). Summary item 9 is STALE:
 > the int8 projector is built on branch stage-e (Stage E), which this map did not see. TP1/TP4 memory figures are
@@ -26,12 +26,12 @@ Measured config is always `--tp 2` (scripts/common.sh RK_FLAGS, notes/gates.md:1
    (rad:arch/common/rad_block_hc.h:297), so at TP4 every block issues its own `all_reduce`; MoE expert shares are
    unequal by parity at 4 ranks (rad:qwen4exp_fp8.cpp:495-498).
 5. The projector maps are **replicated on every rank at every TP** (1,228 MiB/rank bf16); the only TP-scaled plugin
-   weight is the correction head slice (54/27/13.5 MiB at TP1/2/4, arch/kva_projector.h:217,224).
+   weight is the correction head slice (54/27/13.5 MiB at TP1/2/4, arch/ridgefill_projector.h:217,224).
 6. Mask / row selection is **identical on all ranks by construction** (pure function of the replicated batch + the
-   full-vocab score table; no rank input, no broadcast) -- correct at 1/2/4 (notes/impl.md:241-246; kernels/kva.h).
+   full-vocab score table; no rank input, no broadcast) -- correct at 1/2/4 (notes/impl.md:241-246; kernels/ridgefill.h).
 7. Host placement moves exactly 1.26 GB/pass/rank over PCIe at **every** TP (notes/aprime.md:202); on rank 1's Gen4 x4
    (~7.2 GB/s, machine fact) that is the measured +6%/+10% TTFT (NOTES.md (d)).
-8. A **per-rank-sharded projector is possible plugin-side** (sliced `kva_gemm_nt_bias` + the in-tree `all_reduce` row):
+8. A **per-rank-sharded projector is possible plugin-side** (sliced `ridgefill_gemm_nt_bias` + the in-tree `all_reduce` row):
    saves 614 MiB VRAM and half the GEMM at TP2 but adds ~480 MiB/pass of all-reduce wire -- net slower on this box,
    ~time-neutral only on symmetric fast links (§4.3).
 9. The **int8 projector (~0.61 GiB/rank, Stage E, unbuilt)** is blocked plugin-side on the forwarded row's dtype
@@ -130,14 +130,14 @@ rad:core/engine_bringup.cpp:2462).
   TP4's is replicated, rad:rad_arch.h:794-795), 6,144 at TP1; ~2.4 GiB / 8 seqs x 49,152 ctx (ESTIMATE from shapes,
   rad:qwen4exp_fp8.cpp:24-26, notes/gates.md:15 `--max-model-len 49152`).
 - GDN state: 36 layers x per-rank value heads x 128 x 128 x 4 B = 108/54/27 MiB per seq at TP1/2/4 (shape
-  arch/kva_declare.h:88; f32, arch/kva_declare_masked.h:201-206).
+  arch/ridgefill_declare.h:88; f32, arch/ridgefill_declare_masked.h:201-206).
 
-### 2.4 Plugin per-card cost (per rank; maps are REPLICATED at every TP, arch/kva_projector.h:249-266)
+### 2.4 Plugin per-card cost (per rank; maps are REPLICATED at every TP, arch/ridgefill_projector.h:249-266)
 Pieces: maps+biases 1,228.1 MiB bf16 (notes/aprime.md:168); correction slice 54/27/13.5 MiB at TP1/2/4
-(arch/kva_projector.h:217,224; 18 layers x 48/world heads x 128x128x4 B); row tables (score*) 0.95 MiB, quality only,
-full vocab replicated (arch/kva_projector.h:83-86,241); boundary/plugin buffers ~0.25 GiB (b_hs
-[max_tok, 10240] bf16 ~40 MiB at max_tok 2048, arch/kva_declare_masked.h:33; x_P, mask, bounds, probe rows --
-notes/aprime.md:167-168 difference); ring slots 2 x 50.0 MiB VRAM, host placement only (arch/kva_projector.h:199).
+(arch/ridgefill_projector.h:217,224; 18 layers x 48/world heads x 128x128x4 B); row tables (score*) 0.95 MiB, quality only,
+full vocab replicated (arch/ridgefill_projector.h:83-86,241); boundary/plugin buffers ~0.25 GiB (b_hs
+[max_tok, 10240] bf16 ~40 MiB at max_tok 2048, arch/ridgefill_declare_masked.h:33; x_P, mask, bounds, probe rows --
+notes/aprime.md:167-168 difference); ring slots 2 x 50.0 MiB VRAM, host placement only (arch/ridgefill_projector.h:199).
 
 | placement | TP1 | TP2 (measured) | TP4 |
 |---|---|---|---|
@@ -153,45 +153,45 @@ forwarded int8 row plus an int8 folder format -- plugin-side work, listed as Sta
 ## 3. Plugin correctness per rank
 
 ### 3.1 Every place the plugin reads rank/TP (grep of arch/, kernels/, tests/)
-- arch/qwen4exp_kva.cpp:50 (rank-0 mode note), :62-66 (g_model[ctx->rank]), :212-213 (step), :220-224 (rank-0 dump),
+- arch/qwen4exp_ridgefill.cpp:50 (rank-0 mode note), :62-66 (g_model[ctx->rank]), :212-213 (step), :220-224 (rank-0 dump),
   :235 (rank-0 log line), :261 (capture), :293-299 (state capture: heads [rank*H, (rank+1)*H), `world` in the jsonl),
-  :314 (g_kva[rad_rank(c)]), :323/:329 (rank-0 capture/log).
-- arch/kva_declare.h:77 (g_kva[MAX_RANKS]), :34-36 (st per rank), :88 (d.n_head_kv = m.gcfg.n_head_v, per rank),
+  :314 (g_ridgefill[rad_rank(c)]), :323/:329 (rank-0 capture/log).
+- arch/ridgefill_declare.h:77 (g_ridgefill[MAX_RANKS]), :34-36 (st per rank), :88 (d.n_head_kv = m.gcfg.n_head_v, per rank),
   :117-118/:129 (op params take the per-rank head count).
-- arch/kva_declare_masked.h:141-142 (upload_rank(ctx->rank), g_upload[ctx->rank]), :201-206 (state shape per-rank heads).
-- arch/kva_projector.h:55 (g_upload[MAX_RANKS]), :82 (st shape check x world), :153-171 (rank-named error paths),
+- arch/ridgefill_declare_masked.h:141-142 (upload_rank(ctx->rank), g_upload[ctx->rank]), :201-206 (state shape per-rank heads).
+- arch/ridgefill_projector.h:55 (g_upload[MAX_RANKS]), :82 (st shape check x world), :153-171 (rank-named error paths),
   :217/:224 (per-rank correction bytes, slice offset `rank * heads`), :244 (st operand rows = per-rank heads),
   :249-266 (upload_rank, per-rank log), :273-277 (free).
-- arch/kva_layer.h:38 (k.st = this rank's heads), :51/:62/:85/:126 (per-rank n_head_v from m.gcfg),
+- arch/ridgefill_layer.h:38 (k.st = this rank's heads), :51/:62/:85/:126 (per-rank n_head_v from m.gcfg),
   :181/:270/:312 (the blocks' own all_reduce guards), :210-218
   (project_masked: full n and wide per rank).
-- arch/kva_dump.h:225,244-254 (state file per rank, heads [rank*heads, (rank+1)*heads), world field).
-- arch/kva_fill.h:40,106 (H / n_head_kv from the per-rank block configs).
+- arch/ridgefill_dump.h:225,244-254 (state file per rank, heads [rank*heads, (rank+1)*heads), world field).
+- arch/ridgefill_fill.h:40,106 (H / n_head_kv from the per-rank block configs).
 - **Hard-coded to two ranks: none found.** The only `world == 2` branch is in the engine (rad:rad_block_hc.h:297); the
-  plugin's only "/ 2"-shaped constant is unrelated (arch/kva_config.h:203, an env-parse bound).
+  plugin's only "/ 2"-shaped constant is unrelated (arch/ridgefill_config.h:203, an env-parse bound).
 
 ### 3.2 Per mechanism
 - **GDN correction head slicing**: correct at TP1 (rank 0 takes all 48 heads, offset 0) and TP4 (rank r takes heads
-  [12r, 12r+12) -- `st->data + rank * heads` with heads = per-rank bytes, arch/kva_projector.h:217,224). This matches
+  [12r, 12r+12) -- `st->data + rank * heads` with heads = per-rank bytes, arch/ridgefill_projector.h:217,224). This matches
   the engine's contiguous GDN head split (notes/arch.md:296: heads [rank*H_local, (rank+1)*H_local), "the contiguous
-  split of the delta net's own weights"). The folder check multiplies by world (arch/kva_projector.h:82), so ONE
+  split of the delta net's own weights"). The folder check multiplies by world (arch/ridgefill_projector.h:82), so ONE
   correction.safetensors [48,128,128] serves every TP. 4 uploads: upload_rank runs once per rank per process
-  (arch/kva_projector.h:44-47,249) -- at TP4 that is 4 x 1,228 MiB of maps (correct, wasteful; §4.3).
-- **Row selection / mask**: `kva_mask` is a pure function of cu_last, token_ids, positions, the score table
-  ([n_vocab_all], replicated) and the seed (schema notes/impl.md:239-246; kernels/kva.h:96+). No rank input -> computed
+  (arch/ridgefill_projector.h:44-47,249) -- at TP4 that is 4 x 1,228 MiB of maps (correct, wasteful; §4.3).
+- **Row selection / mask**: `ridgefill_mask` is a pure function of cu_last, token_ids, positions, the score table
+  ([n_vocab_all], replicated) and the seed (schema notes/impl.md:239-246; kernels/ridgefill.h:96+). No rank input -> computed
   redundantly, byte-identically, on every rank; no broadcast exists or is needed. Correct at 1/2/4.
 - **MoE drop-row masking under expert sharding**: at every TP all ranks route the same experts (router replicated,
   rad:qwen4exp_fp8.cpp:490-492) and compute a column slice of each, so the drop must be identical per rank -- and is,
-  because it reads the same mask (arch/kva_moe.h:72-74). Dropped slots cost nothing per rank (arch/kva_moe.h:9-11,
+  because it reads the same mask (arch/ridgefill_moe.h:72-74). Dropped slots cost nothing per rank (arch/ridgefill_moe.h:9-11,
   citing rad:libr4d/r4d_moe.hip:477-479,909-916,1580-1586). The probe issue is rank-consistent
-  (arch/kva_moe.h:25-51; probed_expert per rank rad:qwen4exp_fp8.cpp:465).
+  (arch/ridgefill_moe.h:25-51; probed_expert per rank rad:qwen4exp_fp8.cpp:465).
 - **Tail-only straddle (speed)**: attn_straddle / gdn_straddle issue in-tree handles with per-rank head counts
-  (arch/kva_layer.h:279-341); at TP4 attention runs 6 query heads + 1 replicated KV head (kv_off, rad:rad_arch.h:794-795)
-  through the block's own declared handles (arch/kva_fill.h:101-114). Correct; the `op_ar` guards mirror the in-tree
-  step (`if (d.op_ar && !ar_taken(...))`, arch/kva_layer.h:181,270,312; arch/kva_moe.h:139-141), which is what makes TP4's
+  (arch/ridgefill_layer.h:279-341); at TP4 attention runs 6 query heads + 1 replicated KV head (kv_off, rad:rad_arch.h:794-795)
+  through the block's own declared handles (arch/ridgefill_fill.h:101-114). Correct; the `op_ar` guards mirror the in-tree
+  step (`if (d.op_ar && !ar_taken(...))`, arch/ridgefill_layer.h:181,270,312; arch/ridgefill_moe.h:139-141), which is what makes TP4's
   separate-collective world consistent.
 - **Projector GEMM**: full [M, 2560] output per rank over the full [2560, 10240] map, no collective
-  (arch/kva_layer.h:210-218,252-257,343-347). Correct at every TP (the 10240 stream is replicated,
+  (arch/ridgefill_layer.h:210-218,252-257,343-347). Correct at every TP (the 10240 stream is replicated,
   rad:rad_block_hc.h:44-46); at TP4 it is 4x redundant compute (§4.1).
 - **TP1 specifics**: no collectives anywhere (op_ar only at world>1, rad:rad_block_gdn_fp8.h:379); the plugin's TP1
   behaviour is already oracle-tested (tests/arch_static_test.cpp:484,1314; notes/impl.md:347 "quality TP1 + TP2").
@@ -202,7 +202,7 @@ forwarded int8 row plus an int8 folder format -- plugin-side work, listed as Sta
 - FLOPs per layer per pass: 2 * M * 2560 * 10240 (M = projected rows); at M = 2048 that is 107 GFLOP/layer, 2.58 TFLOP
   for the 24 late layers per rank per pass. Measured 1,464-1,737 us/call (notes/gates.md:74) -> 35-42 ms/pass/rank.
 - Bytes per layer: map 52.4 MB (VRAM or ring slot) + h_S read M x 10240 x 2 B + output M x 2560 x 2 B
-  (shapes arch/kva_layer.h:212; arch/kva_projector.h:70,199).
+  (shapes arch/ridgefill_layer.h:212; arch/ridgefill_projector.h:70,199).
 - These do NOT shrink with TP: each rank needs the full projected stream because the 10240 stream and hc weights are
   replicated (rad:rad_block_hc.h:44-46,241-247).
 
@@ -213,7 +213,7 @@ forwarded int8 row plus an int8 folder format -- plugin-side work, listed as Sta
   (NOTES.md (d); notes/aprime.md:196-199).
 
 ### 4.3 Per-rank-SHARDED projector (each rank holds 1/TP of the 2560 output rows of proj.L)
-- Possible plugin-side: slice the proj_w operand in take_operands (arch/kva_projector.h:236-244) to rows
+- Possible plugin-side: slice the proj_w operand in take_operands (arch/ridgefill_projector.h:236-244) to rows
   [rank*n/TP, (rank+1)*n/TP), keep each rank's bias columns, and issue the in-tree `all_reduce` row (world 2/4/8,
   rad:core/device/host.cpp:56) over the [M, 2560] block input x after the GEMM -- the same collective the blocks
   already issue (rad:rad_block_gdn_fp8.h:511-512). Each rank's GEMM output covers disjoint columns, so the
@@ -244,7 +244,7 @@ forwarded int8 row plus an int8 folder format -- plugin-side work, listed as Sta
 **TP1** (correctness: no gap found -- §3.2; static oracle covers TP1 at tests/arch_static_test.cpp:484,1314):
 1. **Memory pressure (rank 1)**: one card holds static ~6.8-7.2 GiB (ESTIMATE §2.3) + plugin 1.53 GiB (vram) + slab
    cache ~20 GiB + KV; the expert working set doubles vs TP2 (NOTES.md:34 x2). Plugin-side fix: default to host
-   placement (built, `RADIANCE_KVA_PROJ_PLACE=host`, notes/aprime.md:196-199) and build the int8 projector (Stage E,
+   placement (built, `RADIANCE_RIDGEFILL_PROJ_PLACE=host`, notes/aprime.md:196-199) and build the int8 projector (Stage E,
    notes/arch.md:377) -- needs a forwarded int8 row in kernels/forward.cpp:41-76 (today the engine matches
    `dtype in {bf16}` only, notes/aprime.md:221).
 2. **Unmeasured (rank 2)**: no TP1 run exists in the notes; TTFT/quality at TP1 unknown. Fix: run the §5 harness arms
@@ -257,12 +257,12 @@ forwarded int8 row plus an int8 folder format -- plugin-side work, listed as Sta
    correction-slice assertion at world 4 (the :739-780 case already computes `rank * heads * 4` from the per-rank
    model, so it generalises).
 2. **Projector replication (rank 2, memory)**: 4 x 1,228 MiB = 4.9 GiB of VRAM across the cards for identical maps
-   (arch/kva_projector.h:249-266). Fix (optional, §4.3): per-rank sharded projector via sliced operands + the in-tree
+   (arch/ridgefill_projector.h:249-266). Fix (optional, §4.3): per-rank sharded projector via sliced operands + the in-tree
    `all_reduce` row -- memory -921 MiB/card at TP4, but net slower on this box's asymmetric links; only worth it for
    the slab-slot headroom.
 3. **Separate collectives (rank 3, perf, NOT plugin-fixable)**: no fused `ar_hc_write` outside world==2
    (rad:rad_block_hc.h:297) -> one extra `all_reduce` op per block per layer at TP4 (rad:rad_block_gdn_fp8.h:511-512).
-   The plugin already mirrors this exactly (arch/kva_layer.h:181,270,312; arch/kva_moe.h:139-141), so it stays
+   The plugin already mirrors this exactly (arch/ridgefill_layer.h:181,270,312; arch/ridgefill_moe.h:139-141), so it stays
    consistent; nothing plugin-side can recover the fusion.
 4. **Unequal MoE shares (rank 4, perf, NOT plugin-fixable)**: at 4 ranks the parity split gives ranks 0/1 three blocks
    of alternate expert pairs and ranks 2/3 two (rad:qwen4exp_fp8.cpp:495-498) -> the all-reduce waits on ranks 0/1.

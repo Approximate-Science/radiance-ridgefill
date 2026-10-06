@@ -8,7 +8,7 @@ Two measurements, both on one server in one mode (Stage B, PLAN-FIX §3, REQUIRE
          1) is sent; recorded per rep: the long prompt's timings.prompt_ms (R55), every decoder
          token's arrival time -- the gaps between them alone and during the prefill are the
          decoders' ms/step (R56) -- the engine's step counters over the prefill, and the engine log
-         lines of the prefill window: the plugin's "kva: approximate step" lines and, with
+         lines of the prefill window: the plugin's "ridgefill: approximate step" lines and, with
          RADIANCE_LOG_STEPS=1, the engine's step lines, so the approximate-step count can be held
          to the rule step by step (R57). C = 0 is the solo prefill.
   text   the tiercross pattern made deterministic: ONE completions request whose prompt is a batch
@@ -141,7 +141,7 @@ def log_window(since, until, path):
     with open(path, "w") as f:
         f.write(text)
     lines = text.splitlines()
-    approx = [l for l in lines if "kva: approximate step" in l]
+    approx = [l for l in lines if "ridgefill: approximate step" in l]
     return {"approximate_steps": len(approx), "step_lines": sum(" step " in l and "n_seq=" in l for l in lines),
             "pn2_steps": sum("Pn 2," in l for l in approx), "file": os.path.basename(path)}
 
