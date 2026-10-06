@@ -94,15 +94,16 @@ RadBuildCtx served_ctx(int rank = 0, int world = 1) {
 }
 
 /* The manifest the test folder carries: this test model's name, a few of its metadata keys, the
- * tiny container's tokenizer hash; `model` may add members to the model block. */
+ * tiny container's tokenizer hash; `model` may add members to the model block. The projector's credit
+ * comes last: cases address the members before it by position. */
 qwen4exp_ridgefill::Json test_manifest(const std::string& model = "") {
     const std::string text = std::string(R"({"format": 1, "adapter": "qwen4exp", "split": 4,
-        "name": "ridgefill-projector-test", "authors": ["Dylan Johnston", "tcclaviger"],
-        "license": "Apache-2.0", "doi": "10.5281/zenodo.23179168",
         "model": {"arch_id": "qwen4exp", "name": "test-q38-flashnext",
                   "meta": {"hc_count": "4", "linear_num_value_heads": "48"},
                   "vocab_sha256": ")") + kTinyVocab + "\"" + model + R"(},
-        "files": {"proj.L4.safetensors": "unused by the test folder"}})";
+        "files": {"proj.L4.safetensors": "unused by the test folder"},
+        "name": "ridgefill-projector-test", "authors": ["Dylan Johnston", "tcclaviger"],
+        "license": "Apache-2.0", "doi": "10.5281/zenodo.23179168"})";
     qwen4exp_ridgefill::Json j;
     qwen4exp_ridgefill::json_parse(text.data(), text.size(), &j);
     return j;
