@@ -14,9 +14,11 @@ qwen4exp_moe.h, qwen4exp_ridgefill.cpp.
    and arch/CMakeLists.txt's `rad_add_plugin` entry (stem = the shadowed .so's name; pass the same
    name as `shadow_so` and to `open_guard`, so a release mismatch forwards to it).
 1. Write `<model>_adapter.h` with `adapter_of(model)` filling every fact from your in-tree Model
-   after its declare: geometry (`n_layer`, `n_embd`, `wide`, `tile`, `split_lo`, `world`), the
+   after its declare: geometry (`n_layer`, `n_embd`, `wide`, `tile`, `split_lo`), the
    per-layer arrays (`full`, `ext_in`, `calibrated`, `routed`, `straddle_lack`, `qsa_exact_to`),
-   the recurrent `state` shape ({0,0,0} = none), the MoE facts (`top_k` 0 = dense: no probes, no
+   the recurrent `state` shape ({0,0,0} = none; `first` / `n_head_all` = this rank's first head of
+   the whole model's, taken from your in-tree split -- not `rank * n_head`, which an uneven split
+   breaks), the MoE facts (`top_k` 0 = dense: no probes, no
    drop arm), the buffers, and your measured `min_tail` / `default_tail`.
 2. Implement the hooks; a null hook is a capability the core skips: `declare_model` (the fill's
    quantiser), `declare_codes` (the projected input's code pair, mirroring your block input's),

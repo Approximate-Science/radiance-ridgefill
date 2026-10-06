@@ -22,8 +22,11 @@ namespace ridgefill {
 struct RidgeFill;        /* ridgefill_declare.h: the core's per-rank declare state, which the hooks fill */
 struct StateDump;  /* ridgefill_dump.h: RADIANCE_RIDGEFILL_CAPTURE_STATE's per-step copies */
 
-/* This rank's recurrent state per late layer, as the correction ops see it; {0,0,0} = none. */
-struct StateShape { int64_t n_head = 0, sd0 = 0, sd1 = 0; };
+/* This rank's recurrent state per late layer, as the correction ops see it; {0,0,0} = none. `first` is
+ * this rank's first head of the model's `n_head_all`: the rank's heads are [first, first + n_head), which
+ * is NOT rank * n_head when the heads do not divide evenly (radiance 1.1.0 at three ranks: 18, 15, 15 of
+ * 48, the extra heads on the rank without attention, which is the LAST rank). */
+struct StateShape { int64_t n_head = 0, sd0 = 0, sd1 = 0, first = 0, n_head_all = 0; };
 
 struct RidgeFillAdapter {
     /* identity: the refusal prefix, the projector manifest's "adapter" string, and the in-tree .so the
@@ -37,7 +40,6 @@ struct RidgeFillAdapter {
      * injected input (the PLE layer + 1). */
     int64_t n_layer = 0, n_embd = 0, n_vocab_all = 0, wide = 0;
     int64_t n_vocab = 0;     /* this rank's logits columns (vocab-sharded under TP) */
-    int64_t world = 1;       /* tensor-parallel ranks: the folder holds every rank's state heads */
     int64_t tile = 1, split_lo = 0;
     /* the stager probes ride behind the gate-up of layer S - probe_depth, so streaming needs that
      * many routed layers below the split. top_k == 0 = a dense model: no probes, no drop arm. */

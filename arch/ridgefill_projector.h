@@ -109,7 +109,7 @@ inline std::string check_tensors(const Folder& f, const RidgeFillAdapter& a, Loa
         if (a.full[(size_t)li]) continue;
         ++want;
         held += shaped(tensor(f, "st." + std::to_string(li)), RAD_F32,
-                       {a.state.n_head * a.world, a.state.sd0, a.state.sd1});
+                       {a.state.n_head_all, a.state.sd0, a.state.sd1});
     }
     if (held && held != want)
         return "the correction covers " + std::to_string(held) + " of the " + std::to_string(want) +
@@ -340,7 +340,7 @@ inline bool plan_maps(const Folder& f, const Loaded& l, const RidgeFillAdapter& 
 inline Layout plan_rank(const Loaded& l, const RidgeFillAdapter& a, const Config& c, int rank, bool final,
                         std::vector<Piece>& plan, Stored* stored, std::string* why) {
     const Folder& f = l.folder;
-    const int64_t heads = a.state.n_head * a.state.sd0 * a.state.sd1 * 4;   /* one rank's correction, bytes */
+    const int64_t head = a.state.sd0 * a.state.sd1 * 4;   /* one head's correction, bytes */
     Layout x;
     for (auto* v : { &x.w, &x.st }) v->assign(a.n_layer, -1);
     if (c.mode == MODE_PLUMB) return x;
@@ -350,7 +350,7 @@ inline Layout plan_rank(const Loaded& l, const RidgeFillAdapter& a, const Config
      * passes only -- VRAM is what every request pays in resident experts. */
     for (int64_t li = l.split; li < a.n_layer; ++li) {
         const FolderTensor* st = a.full[(size_t)li] ? nullptr : tensor(f, "st." + std::to_string(li));
-        if (st) x.st[li] = place_piece(plan, &x.hend, st->data + rank * heads, heads, true);
+        if (st) x.st[li] = place_piece(plan, &x.hend, st->data + a.state.first * head, a.state.n_head * head, true);
     }
     const FolderTensor* sc = c.mode == MODE_QUALITY ? tensor(f, kScoreNames[c.rowsel_table]) : nullptr;
     if (sc) x.score = place_piece(plan, &x.hend, sc->data, sc->bytes, true);

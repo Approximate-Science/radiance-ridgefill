@@ -101,6 +101,9 @@ inline void qsa_keys(RadCtx* c, const QsaIndexer& q, const ActFP8& in, const Rad
  * layer does not compute; the two are byte-identical (the in-tree's r4d_selftest claim, :290-296),
  * and at more than qk_fuse_rows (64) tokens the stock step takes this form too. */
 inline void attn_kv(RadCtx* c, const AttnGatedFP8& a, const RadBatch* batch) {
+    /* An attention-zero rank (rad_block_attn_gated_fp8.h:482-489) keeps no attention cache
+     * (rad_kv_group_zero) and declares no K/V path: nothing to write. */
+    if (a.op_fill) return;
     const RadKVGroupBatch* kvb = kv_batch(batch, a.kv);
     const int64_t T = batch->n_tok;
     a.kp.step(c, a.w.h, a.w.k, T);

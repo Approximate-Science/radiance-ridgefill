@@ -224,6 +224,15 @@ inline void attn_rows(RadCtx* c, const qwen4exp_fp8::Layer& l, const RadBatch* b
     const AttnGatedFP8& a = l.attn;
     const int64_t T = batch->n_tok, end = r0 + rows, n = a.g.n_embd, qw = a.g.q_dim(), hd = a.g.head_dim;
     l.qsa.step(c, a.w.h, batch);
+    if (a.op_fill) {   /* rad_block_attn_gated_fp8.h:482-489: the attention-zero rank's zero output, over the rows */
+        RAD_ISSUE_N(c, a.op_fill, rows, brow_slice(a.w.h.x, r0, rows, n));
+        if (a.op_ar && !ar_taken(a.g, T, a.ar_out, a.ar_out_take))
+            RAD_ISSUE_N(c, a.op_ar, rows * n, brow_slice(a.w.h.x, r0, rows, n), RAD_NONE);
+        if (a.op_add)
+            RAD_ISSUE_N(c, a.op_add, rows, brow_slice(a.w.x, r0, rows, n), brow_slice(a.w.h.x, r0, rows, n),
+                        brow_slice(a.w.x, r0, rows, n));
+        return;
+    }
     attn_kv(c, a, batch);
     a.qg.step(c, a.w.h, a.w.qg, T);
     RAD_ISSUE_N(c, a.op_q_norm, T * a.g.n_head, bcol(a.w.qg, 0, hd, T), RAD_W(a.w_q_norm), brows(a.w.q, T));

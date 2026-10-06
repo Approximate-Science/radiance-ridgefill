@@ -249,8 +249,8 @@ struct StateDump {
 
 /* One (chunk, rank) state file plus its index line; `approximate` says whether the chunk was RidgeFill's. */
 inline void state_end(RadCtx* c, const std::string& dir, const RadBatch* b, const StateDump& sd,
-                      int64_t heads, int64_t v, int64_t k, int rank, int world, bool approximate,
-                      const char* mode) {
+                      const StateShape& s, int rank, int world, bool approximate, const char* mode) {
+    const int64_t heads = s.n_head, v = s.sd0, k = s.sd1;
     int32_t start = -1;
     std::vector<int32_t> ids;
     if (!dump_chunk(c, b, &start, &ids)) {
@@ -277,8 +277,8 @@ inline void state_end(RadCtx* c, const std::string& dir, const RadBatch* b, cons
               "{\"file\": \"" + file + "\", \"chunk_start\": " + std::to_string(start) +
               ", \"last_position\": " + std::to_string(start + b->n_tok - 1) + ", \"n_tok\": " +
               std::to_string(b->n_tok) + ", \"rank\": " + std::to_string(rank) + ", \"world\": " +
-              std::to_string(world) + ", \"heads\": [" + std::to_string(rank * heads) + ", " +
-              std::to_string((rank + 1) * heads) + "], \"layers\": " + ints_json(layers) +
+              std::to_string(world) + ", \"heads\": [" + std::to_string(s.first) + ", " +
+              std::to_string(s.first + heads) + "], \"layers\": " + ints_json(layers) +
               ", \"approximate\": " + (approximate ? "true" : "false") + ", \"mode\": \"" + mode +
               "\", \"applied_before_copy\": false}");
 }
