@@ -112,7 +112,7 @@ static Pass derive(const RidgeFill& k, const RadBatch* batch) {
     in.n_checkpoints = batch->n_checkpoints;
     in.stream_ok = can_stream(k) && (c.stage == STAGE_AUTO || c.force_stream);
     /* Past the exactness bound every late attention layer takes its per-row sparse form, whose rows the
-     * straddle can restrict (the gated attention's own rule, rad_block_attn_gated_fp8.h:502-504). */
+     * straddle can restrict (the gated attention's own rule, rad_block_attn_gated_fp8.h:541-543). */
     const int64_t reach = (int64_t)batch->max_ctx_len + batch->max_q_len;
     in.straddle_ok = k.straddle_layers && (k.qsa_exact_to <= 0 || reach > k.qsa_exact_to);
     PlanConfig pc;

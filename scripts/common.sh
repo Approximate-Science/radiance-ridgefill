@@ -11,7 +11,11 @@
 #                   is mounted read-only at /models in every container and the engine is
 #                   pointed at /models/<basename>.
 #   RK_PORT         default 8100: the port the served engine listens on.
-#   RK_IMAGE        default stilldeadcode/radiance:1.0.8 (the runtime image, docs/DOCKER.md).
+#   RK_RADIANCE_VERSION  default: the release pinned in <repo>/RADIANCE_VERSION. Every image and
+#                   source default below names it, so moving to another release is one line there.
+#   RK_IMAGE        default stilldeadcode/radiance:<RK_RADIANCE_VERSION> (the runtime image).
+#   RK_BUILD_IMAGE  default radiance-build:<RK_RADIANCE_VERSION> (radiance's docker `build` stage).
+#   RK_RADIANCE_SRC default <repo>/data/radiance-src-<RK_RADIANCE_VERSION> (scripts/update_radiance.sh).
 #   RK_PLUGIN_HOME  default <repo>/home: the plugin home (architectures/, kernels/), mounted
 #                   at /plugins for every mode except exact.
 #   RK_EVIDENCE     default <repo>/evidence: where measurement outputs go.
@@ -32,12 +36,15 @@ RK_REPO=$(CDPATH= cd "$RK_SCRIPTS/.." && pwd) || exit 1
 RK_TOOLS=$RK_REPO/tools
 
 : "${RK_PORT:=8100}"
-: "${RK_IMAGE:=stilldeadcode/radiance:1.0.13}"
+: "${RK_RADIANCE_VERSION:=$(cut -d' ' -f1 "$RK_REPO/RADIANCE_VERSION")}"
+: "${RK_IMAGE:=stilldeadcode/radiance:$RK_RADIANCE_VERSION}"
+: "${RK_BUILD_IMAGE:=radiance-build:$RK_RADIANCE_VERSION}"
+: "${RK_RADIANCE_SRC:=$RK_REPO/data/radiance-src-$RK_RADIANCE_VERSION}"
 : "${RK_PLUGIN_HOME:=$RK_REPO/home}"
 : "${RK_EVIDENCE:=$RK_REPO/evidence}"
 # Exported so a script that hands over to a child process (speed.sh -> tools/speed.py)
 # sees the same values the shell does, including a caller's UNEXPORTED override.
-export RK_PORT RK_IMAGE RK_PLUGIN_HOME RK_EVIDENCE
+export RK_PORT RK_RADIANCE_VERSION RK_IMAGE RK_BUILD_IMAGE RK_RADIANCE_SRC RK_PLUGIN_HOME RK_EVIDENCE
 
 # The engine flags every run shares (HANDOVER §7 measurement protocol). Every flag name
 # verified against the flag table in radiance core/config.cpp lines 31-190:
@@ -66,10 +73,9 @@ export RK_PORT RK_IMAGE RK_PLUGIN_HOME RK_EVIDENCE
 #                                 host pool (fnserve.sh; config.cpp:71)
 #   --host-pool-mib 12288         that pinned host pool; it also holds the KL-mode logits
 #                                 copy in pinned host memory (fnserve.sh; config.cpp:57)
-#   --expert-vs-cache-ratio 0.82  the production weights-vs-KV split (fnserve.sh); at
-#                                 --max-model-len 49152 it only widens the expert side
-#                                 (config.cpp:51)
-: "${RK_FLAGS:=--tp 2 --kv-cache-dtype fp8 --tp-wire exact --max-num-batched-tokens 2048 --no-prefix-cache --num-speculative-tokens 0 --max-model-len 49152 --gpu-headroom-mib 3072 --placement expert_tiered --host-pool-mib 12288 --expert-vs-cache-ratio 0.82}"
+# (--expert-vs-cache-ratio 0.82 was here until radiance 1.1.0 removed it: the experts now keep what the
+# host pool cannot hold and the KV cache takes the rest.)
+: "${RK_FLAGS:=--tp 2 --kv-cache-dtype fp8 --tp-wire exact --max-num-batched-tokens 2048 --no-prefix-cache --num-speculative-tokens 0 --max-model-len 49152 --gpu-headroom-mib 3072 --placement expert_tiered --host-pool-mib 12288}"
 
 # THE CACHE PROFILE (Stage C, HANDOVER-FIX §4): RK_CACHE_DIR=<host dir> serves with fnserve.sh's
 # prefix-cache flags instead of --no-prefix-cache -- finished turns copied to a 4 GiB host tier and on

@@ -1048,25 +1048,42 @@ void push_projection(std::vector<RecIssue>& out, const Batch& x, int l, const Wa
                    brows(m.a_x.x, T), brows(m.a_x.q8, T), brows(m.a_x.s8, T)}, T});
 }
 
-/* The routing with the bulk rows' slots dropped: the fused top-k+sort becomes the pair, with the
- * drop between (the fused form has no point between the two). */
-void push_route(std::vector<RecIssue>& out, const RecIssue& r, const qwen4exp_fp8::Layer& lay,
-                const Batch& x, int rank) {
+/* The routing with the bulk rows' slots dropped: a fused top-k+sort becomes the pair, with the drop
+ * between (the fused form has no point between the two); the fused ROUTER (radiance 1.1.0,
+ * router_gemm_topk_scatter: operands x, router, gate weight, logits, ids, ew, sorted, eoff, counts, gate)
+ * becomes the router and that pair. Returns the shared gate the fused router wrote, which the dropping
+ * pass issues at its own place instead -- in front of the shared arm's gate-up (MoeFP8::shared_up); an
+ * issue with op 0 = none. */
+RecIssue push_route(std::vector<RecIssue>& out, const RecIssue& r, const qwen4exp_fp8::Layer& lay,
+                    const Batch& x, int rank) {
     const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[rank];
     const MoeFP8& e = lay.mlp;
     const int64_t T = x.b.n_tok, kk = e.c.top_k;
     const RecIssue drop{k.op_drop, {brows(k.b_mask, T), brow_slice(e.w.ids, 0, T, kk)}, T};
-    if (r.op == e.op_topk) { out.push_back(r); out.push_back(drop); return; }
+    if (r.op == e.op_topk) { out.push_back(r); out.push_back(drop); return {}; }
+    if (r.op == e.op_router_fused) {
+        out.push_back({e.op_router, {r.opd[0], r.opd[1], r.opd[3]}, r.n});
+        out.push_back({e.op_topk, {r.opd[3], r.opd[4], r.opd[5]}, r.n});
+        out.push_back(drop);
+        out.push_back({e.op_scatter, {r.opd[4], r.opd[6], r.opd[7], r.opd[8]}, r.n});
+        return e.router_fused_gate ? RecIssue{e.op_sgate, {r.opd[0], r.opd[2], r.opd[9]}, r.n} : RecIssue{};
+    }
     out.push_back({e.op_topk, {r.opd[0], r.opd[1], r.opd[2]}, r.n});
     out.push_back(drop);
     out.push_back({e.op_scatter, {r.opd[1], r.opd[3], r.opd[4], r.opd[5]}, r.n});
+    return {};
 }
 
 void push_layer(std::vector<RecIssue>& out, const std::vector<RecIssue>& seg, const Batch& x, int l,
                 const Want& w, int rank) {
     const qwen4exp_fp8::Layer& lay = qwen4exp_fp8::g_model[rank].layers[(size_t)l];
     const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[rank];
+    RecIssue gate;   /* the shared gate a fused router wrote, still to issue (op 0: none) */
     for (RecIssue r : seg) {
+        if (gate.op && r.op == lay.mlp.sh_gate_up.op) {
+            out.push_back(gate);
+            gate = {};
+        }
         if (r.op == lay.hc_mix.op_read) {
             out.push_back(r);
             if (w.project) push_projection(out, x, l, w, rank);
@@ -1075,8 +1092,9 @@ void push_layer(std::vector<RecIssue>& out, const std::vector<RecIssue>& seg, co
             out.push_back(r);
         } else if (!lay.full && r.op == lay.gdn.op_scan) {
             push_scans(out, r, x, l, w, rank);
-        } else if (w.project && (r.op == lay.mlp.op_topk || r.op == lay.mlp.op_topk_scatter)) {
-            push_route(out, r, lay, x, rank);
+        } else if (w.project && (r.op == lay.mlp.op_topk || r.op == lay.mlp.op_topk_scatter ||
+                                 r.op == lay.mlp.op_router_fused)) {
+            gate = push_route(out, r, lay, x, rank);
         } else {
             out.push_back(r);
         }

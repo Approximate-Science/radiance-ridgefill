@@ -7,7 +7,7 @@
  * late block that writes a cache: the delta net's input projections and recurrence, the indexer's
  * block-key half, and the attention's K/V path. The in-tree GdnFP8 / QsaIndexer / AttnGatedFP8
  * step() functions take the whole batch and run the whole block, so the pieces are spelled out
- * here, each a verbatim copy of the in-tree lines it cites (radiance 1.0.13 d0f639b; the files are
+ * here, each a verbatim copy of the in-tree lines it cites (radiance 1.1.1 7001841; the pieces are
  * unchanged since 1.0.8), with the SAME handles and the SAME operands -- the stock wiring, including `w.h` (= the model's `x`) as the
  * input, because the projector writes its prediction there (notes/arch.md §6, the a_x decision).
  * Every other approximate shape takes the masked path (ridgefill_layer.h), which runs the blocks whole.
@@ -25,13 +25,13 @@ using namespace rad::arch;
 
 /* ---------------------------------------------------------------- the delta net */
 
-/* rad_block_gdn_fp8.h:415-416 -- [q|k|v|z] and a|b from the block input. */
+/* rad_block_gdn_fp8.h:444-445 -- [q|k|v|z] and a|b from the block input. */
 inline void gdn_project(RadCtx* c, const GdnFP8& d, int64_t T) {
     d.in.step(c, d.w.h, d.w.in.x, T);
     RAD_ISSUE_N(c, d.op_ab, T, brows(d.w.h.x, T), RAD_W(d.w_ab), brows(d.w.ab, T));
 }
 
-/* rad_block_gdn_fp8.h:478-494 -- the conv window and the recurrent state, which is all a filled
+/* rad_block_gdn_fp8.h:507-523 -- the conv window and the recurrent state, which is all a filled
  * layer keeps. The scan reads and writes the state in place (h0 = ht = this layer's slot). */
 inline void gdn_scan(RadCtx* c, const GdnFP8& d, const RadBatch* batch) {
     const RadKVGroupBatch* st = kv_batch(batch, d.kv_state);
@@ -96,9 +96,9 @@ inline void qsa_keys(RadCtx* c, const QsaIndexer& q, const ActFP8& in, const Rad
 
 /* ---------------------------------------------------------------- the gated attention */
 
-/* rad_block_attn_gated_fp8.h:452-453, :476-477, :479, :482-484 -- k and v, k's norm and rotation,
+/* rad_block_attn_gated_fp8.h:491-492, :515-516, :518, :521-523 -- k and v, k's norm and rotation,
  * the paged store. The UNFUSED form: the fused prologue needs the q|gate projection, which a filled
- * layer does not compute; the two are byte-identical (the in-tree's r4d_selftest claim, :261-267),
+ * layer does not compute; the two are byte-identical (the in-tree's r4d_selftest claim, :290-296),
  * and at more than qk_fuse_rows (64) tokens the stock step takes this form too. */
 inline void attn_kv(RadCtx* c, const AttnGatedFP8& a, const RadBatch* batch) {
     const RadKVGroupBatch* kvb = kv_batch(batch, a.kv);

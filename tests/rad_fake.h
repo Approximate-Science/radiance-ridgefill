@@ -37,6 +37,8 @@ struct RecOp {
     std::vector<rad_buf> reads, writes;
 };
 struct RecIssue { rad_op op = 0; std::vector<RadOperand> opd; int64_t n = 0; };
+/* A weight's declared row span: one part (rad_weight_shard_span, total 0) or one per stacked part. */
+struct RecSpan { rad_weight w = 0; std::vector<int64_t> lo, hi, total; };
 
 struct RadBuilder {
     std::vector<std::pair<std::string, RadWeightDecl>> weights;
@@ -46,6 +48,8 @@ struct RadBuilder {
     std::set<std::string>                              refuse;   /* ops no kernel serves */
     std::set<rad_buf>                                  concurrent;
     std::vector<std::pair<int, rad_kvgroup>>           binds;
+    std::vector<RecSpan>                               spans;
+    std::set<rad_kvgroup>                              kv_zero;   /* rad_kv_group_zero */
     /* What rad_weight_encoding answers: for a ridgefill.* key, the source named by it or by it plus a
      * '.'-suffix ("ridgefill.proj.4" holds ridgefill.proj.4.weight and .bias, "ridgefill.rowsel.score" does not hold
      * ridgefill.rowsel.score_none); for any other key, the first source CONTAINING it, as radiance's own
@@ -121,7 +125,16 @@ void rad_note(RadBuilder* b, const char* fmt, ...) {
 }
 int rad_declare_logits(RadBuilder*, rad_buf) { return RAD_OK; }
 int rad_buf_concurrent(RadBuilder* b, rad_buf h) { b->concurrent.insert(h); return RAD_OK; }
-int rad_weight_shard_span(RadBuilder*, rad_weight, int64_t, int64_t) { return RAD_OK; }
+int rad_weight_shard_span(RadBuilder* b, rad_weight w, int64_t lo, int64_t hi) {
+    b->spans.push_back({w, {lo}, {hi}, {0}});
+    return RAD_OK;
+}
+int rad_weight_shard_span_parts(RadBuilder* b, rad_weight w, const int64_t* lo, const int64_t* hi,
+                                const int64_t* total, int n) {
+    b->spans.push_back({w, {lo, lo + n}, {hi, hi + n}, {total, total + n}});
+    return RAD_OK;
+}
+int rad_kv_group_zero(RadBuilder* b, rad_kvgroup g) { b->kv_zero.insert(g); return RAD_OK; }
 int rad_declare_drafter(RadBuilder*, const RadDrafterDecl*) { return RAD_OK; }
 int rad_declare_encoder(RadBuilder*, const RadEncoderDecl*) { return RAD_OK; }
 

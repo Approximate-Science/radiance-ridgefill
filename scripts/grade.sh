@@ -30,6 +30,12 @@
 # After a candidate run the count of "ridgefill: approximate step" log lines is printed (the
 # plugin logs one per approximate step); RK_EXPECT_APPROX, when set, is the expected
 # count and a mismatch exits non-zero with both numbers (the bulk-chunk gate, HANDOVER R18).
+# The plugin logs from step(), and a RECORDED pass replays without calling step() (radiance
+# core/runtime/ctx.cpp run_pass): from radiance 1.1.x the 2048-token approximate pass is recorded
+# and replayed, so the log shows 38 of quick9's 67 bulk chunks while the rows are byte-identical to
+# 1.0.13's (gate A, 2026-10-06). So when RK_EXPECT_APPROX is set the candidate runs with
+# RADIANCE_DEBUG_ARGSHA=1, which turns pass recording off (ctx.cpp prepare; its digest touches
+# only MTP draft pass 1, off here) and every pass is issued live: the count is the whole count again.
 #
 # Env vars (defaults in scripts/common.sh unless noted):
 #   RK_MODEL           required: host path to the .rad container
@@ -114,6 +120,8 @@ log=$out.log
 {
     printf '%s\n' --rm
     rk_docker_prefix "$mode"
+    # every pass live when the approximate steps are counted (header): a replayed pass logs nothing
+    [ -z "${RK_EXPECT_APPROX:-}" ] || printf '%s\n' -e RADIANCE_DEBUG_ARGSHA=1
     printf '%s\n' -v "$ref_dir":/data/ref:ro -v "$out_dir":/data/out
     printf '%s\n' "$RK_IMAGE" --model "$model_arg"
     # shellcheck disable=SC2086  # RK_FLAGS is one flag or value per word by construction
