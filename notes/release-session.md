@@ -114,3 +114,13 @@ The first attempt aborted at case 5: the gate's glob found only bf16 map files (
   - one flipped byte in proj8.L24.safetensors: "REFUSED: proj8.L24.safetensors is corrupt …", serving stock, 0
     approximate steps, ident == stock;
   - kernel log clean.
+
+## 0.1.0-r2 (2026-10-06): the same binaries, corrected speed figures in both READMEs
+- `~/AI-Work/radiance-kva-plugin-20261004/dist-ridgefill-0.1.0-r2/`, tools/package.py at 3baab23 from the frozen home
+  540c096 and data/projector-ridgefill-qwen38fn-int8, `--version 0.1.0 --commit 540c0965… --radiance-version 1.0.13`:
+  - `radiance-ridgefill-0.1.0.tar.gz` **754f1ebb745d5eed0c1b08862c4ca64bbe0c4f2eeaa5a38cfe2b84c16289b8fe**;
+  - `ridgefill-projector-qwen3.8-flash-next-i8.tar.gz` **88a46a39bf62445f85b38c12f50e8b2d59c043f33b93d66e4f6752d036a1778b**.
+- Both tarballs and every SHA256SUMS verified. Against dist-ridgefill-0.1.0 (7f83cfc1…, df7eef04…), extracted: the
+  same 39 files; both `.so`, `ridgefill.json`, all 26 `.safetensors`, VERSION.json, LICENSE, NOTICE and
+  chat_template.jinja byte-identical. Only the two README.md files and each package's SHA256SUMS (their README line)
+  differ (evidence/r2-repackage/diff.txt in the AI-Work dir). No GPU used.
