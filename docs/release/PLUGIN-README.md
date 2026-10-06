@@ -44,7 +44,7 @@ RidgeFill builds on are at the end.
    `architectures/`, `kernels/`, this README, `ridgefill_report.py` and `TROUBLESHOOTING.md`.
 3. **Download the projector** into a `projector/` folder beside the model file:
    ```sh
-   hf download Dyluhn/ridgefill-projector-qwen3.8-flash-next-i8 --local-dir <model dir>/projector
+   hf download TheCacheIsALie/RidgeFill-Projector-Qwen3.8-Flash-Next-i8 --local-dir <model dir>/projector
    ```
    To keep it elsewhere, set `RADIANCE_RIDGEFILL_PROJECTOR=<dir>`, which is checked first.
 4. **Put the plugin first on `RADIANCE_HOME`:**

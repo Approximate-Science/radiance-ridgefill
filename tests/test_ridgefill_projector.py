@@ -135,7 +135,7 @@ def test_the_manifest_carries_the_fingerprint_and_every_files_hash(built):
     assert m["name"] == "ridgefill-projector-qwen3.8-flash-next-bf16"
     assert m["authors"] == ["Dylan Johnston", "tcclaviger"] and m["license"] == "Apache-2.0"
     assert m["doi"] == "10.5281/zenodo.23179168"
-    assert m["homepage"] == "https://huggingface.co/Dyluhn/ridgefill-projector-qwen3.8-flash-next-bf16"
+    assert m["homepage"] == "https://huggingface.co/TheCacheIsALie/ridgefill-projector-qwen3.8-flash-next-bf16"
     for name in (n for n in m["files"] if n.endswith(".safetensors")):
         with safe_open(str(out / name), "pt") as f:
             assert f.metadata() == {"format": "ridgefill-projector-1", "name": m["name"],

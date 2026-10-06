@@ -37,7 +37,7 @@ plugin from its [GitHub releases](https://github.com/Approximate-Science/radianc
 build for your radiance release):
 
 ```sh
-hf download Dyluhn/ridgefill-projector-qwen3.8-flash-next-i8 --local-dir <model dir>/projector
+hf download TheCacheIsALie/RidgeFill-Projector-Qwen3.8-Flash-Next-i8 --local-dir <model dir>/projector
 ```
 
 The plugin finds the folder on its own, checks every file against `ridgefill.json`, and logs
