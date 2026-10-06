@@ -124,8 +124,9 @@ expert_tiered offload, MTP 3 and `--gpu-headroom-mib 3072`; stock = the same ser
 - **Sustained long-prompt traffic: 2.05x and 2.81x at 32K** (1.85x and 2.33x at 16K), after about 15–18 long
   prompts back to back. radiance's expert cache shifts toward the layers RidgeFill uses at a capped rate, and
   short chats and decode shift it back. With every expert in VRAM there would be no such shift; not measured.
-- **Short prompts and decode: no loss** (decode within 0.5% of stock on a fresh server, 3–4% faster after
-  long-prompt traffic).
+- **Short prompts and decode: no loss beyond ~1%** (decode within 0.5% of stock on a fresh server, 3–4% faster
+  after long-prompt traffic; prompts too short to approximate prefill 0.4–1.0% slower than stock, because the
+  plugin's VRAM displaces resident experts).
 
 Earlier copies of this card gave 2.10x / 2.55x at 32K; those were measured partway through that shift.
 

@@ -114,7 +114,7 @@ exception: their rows are the source library's.
 | `ridgefill_rho_update` | quality only: per head, the decayed share of approximated rows in the delta-net state (`D = e^g·D + 1; N = e^g·N + mask`) | per late delta-net layer, before the apply (`qwen4exp_blocks.h` `decay_sums`) |
 | `ridgefill_state_correct` | `undo`: `state −= applied·C`. `apply`: `state += s·C` with `s = alpha × clamp(N/D, 0, 1)` (quality) or `alpha` (speed), and it records `s` | per late delta-net layer: undo before the scan, apply at the bulk end (`correct`) |
 | `ridgefill_state_read` | copies a sequence's delta-net state slot out | debug/refit captures only (`RADIANCE_RIDGEFILL_CAPTURE_STATE`) |
-| `ridgefill_hazard` | counts prefix-cache positions inside this request's exact tail that the request that wrote the snapshot had approximated; records this pass's last bulk position | end of every speed/quality pass that approximates or still has tail ahead (`ridgefill_hazard.h`) |
+| `ridgefill_hazard` | counts prefix-cache positions inside this request's exact tail that the request that wrote the snapshot had approximated; records this pass's last bulk position | end of every speed/quality pass that approximates, or still has tail ahead and can count (`ridgefill_hazard.h` `may_count`); declared before the in-tree graph so it never extends the prefill stager's reach (`ridgefill_step.h` `core_declare_first`) |
 | `ridgefill_gemm_nt_bias` | libr4d's `gemm_nt_bias` (device) / libref's (host) rows, re-offered with weight and bias as plain inputs: the projector is plugin memory, not a container weight (`forward.cpp`) | per late layer with a bf16 folder; the final map's GEMM |
 | `ridgefill_gemm_nt_q` | libr4d's int8 `gemm_nt_q` (dtype `i8a8`) rows with their layout hooks, weight and scale as inputs. No host row | per late layer with the int8 folder (the shipped one) |
 
@@ -285,9 +285,15 @@ and `RADIANCE_RIDGEFILL_PROJ_PLACE` and `RADIANCE_RIDGEFILL_PROJ_RING` are refus
 **The residual on stock-path prompts.** A RidgeFill server still holds about 67 MiB of VRAM per rank (int8): the
 25.4 MiB slot plus ~41 MiB of whole-program arena (the stream's int8 codes, the projected input and its
 codes, and in-tree buffers the plugin's ops make whole-program). That memory would otherwise go to resident
-experts, about 63 of ~16,850 slab slots. Measured with every pass on the stock step against stock started
-in the same session, matched settled state: **+0.9% at 2K and +1.2% at 8K prompt tokens**. Decode is
-unchanged (notes/stagee.md §19). This was accepted as the floor.
+experts: on the release config, 47 slab slots a card. Prompts RidgeFill does not approximate, paired with stock
+on fresh servers (radiance 1.0.13 flashnext profile, 0.1.0-r3): **+0.4% to +1.0% prefill time at 512-2,000
+tokens, +0.8% on prefix-cache hits** (notes/stockpath-fix.md). Decode is unchanged (notes/stagee.md §19). This
+was accepted as the floor.
+Until 0.1.0-r3 a prompt of 1,025-2,048 tokens paid +2.5%. The hazard op, declared after the in-tree graph, made
+radiance's prefill stager stage the MTP head's expert layer in the trunk pass for nothing: 50 layer stages
+against 49. The op is now declared first. A stock step of more than 1,024 tokens that directly follows an
+approximated one can still stage that layer once, because the stager takes its reach from the previous pass
+of the same kind (radiance `core/place/stager.cpp` `will_issue`).
 
 ## Prefix cache, concurrency, images, MTP
 

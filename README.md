@@ -186,9 +186,12 @@ inputs), so they are kept as small as the pass allows (notes/stagee.md §14).
 
 **What a request that does not use RidgeFill pays (the documented residual, accepted):** with the int8 folder, about 67 MiB
 of VRAM a rank -- the ring's 25.4 MiB slot and 41 MiB of plugin activation buffers -- that the engine would otherwise
-give to resident experts (63 of ~16,850 slab slots). Measured on a server holding the projector with every pass
-running the stock step, settled, against stock started in the same session: **+0.9% at 2K and +1.2% at 8K prompt
-tokens** (notes/stagee.md §19). Decode is unchanged. What RidgeFill gains on long prompts is under "What it gains"
+give to resident experts (47 slab slots a card on the release config). Prompts RidgeFill does not approximate,
+paired with stock on fresh servers (radiance 1.0.13 flashnext profile, 0.1.0-r3): **+0.4% to +1.0% prefill time at
+512-2,000 tokens, +0.8% on prefix-cache hits** (notes/stockpath-fix.md; before r3, 1,025-2,048 tokens paid +2.5%
+for an extra prefill stage, notes/stock-path-cost.md). A stock step of more than 1,024 tokens that directly
+follows an approximated one can still stage one extra expert layer, because radiance's stager reuses the previous
+pass's reach. Decode is unchanged. What RidgeFill gains on long prompts is under "What it gains"
 above.
 Keeping the maps in VRAM instead (an earlier option, removed) cost ~1,100 expert slots a card and made a
 configuration stock radiance serves refuse to start (`--max-num-batched-tokens 8192 --max-num-seqs 10`: the pinned

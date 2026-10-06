@@ -102,7 +102,7 @@ Measured on two AMD R9700 (gfx1201), `--tp 2`, radiance 1.0.13 with its own `dep
 
 - **Typical use: a 32K-token prompt prefills 1.24x faster in quality mode and 1.70x faster in speed mode.** This is a fresh server, or long prompts mixed with chat (measured at 1 long prompt to 6 short chats; 95% CI 1.21–1.27x and 1.68–1.74x). A fresh server's first long prompts get 1.07–1.13x and 1.47–1.56x.
 - **Sustained long-prompt traffic: 2.05x (quality) and 2.81x (speed) at 32K, 1.85x and 2.33x at 16K**, once the server has served about 15–18 long prompts back to back with nothing in between.
-- **Short prompts and decode: no loss.** Decode on a fresh server is within 0.5% of stock; after long-prompt traffic it is 3–4% faster than stock. Prompts too short to approximate (under about 2K tokens) take the stock path.
+- **Short prompts and decode: no loss beyond ~1%.** Decode on a fresh server is within 0.5% of stock; after long-prompt traffic it is 3–4% faster than stock. Prompts too short to approximate (under about 2K tokens) take the stock path and prefill 0.4–1.0% slower than stock (see "What it costs").
 
 | 32K-token prompt, prefill vs stock | quality | speed |
 |---|---|---|
@@ -111,7 +111,7 @@ Measured on two AMD R9700 (gfx1201), `--tp 2`, radiance 1.0.13 with its own `dep
 
 Why it depends on the traffic: with expert_tiered offload, radiance moves VRAM expert slots toward the layers a server's requests use. RidgeFill's long prompts use few experts in layers 24–47, so the cache shifts toward layers 0–23, at most 8 moves per layer and slot class per request; that takes ~15–18 long prompts. Short chats and decode use every layer and pull the cache back within about 10 requests. If all experts fit in VRAM there is no mover and this ramp should not apply, but that has not been measured.
 
-On BetterBench's prefill sweep (fresh servers, 1.6K / 5.9K / 11.8K / 23.6K / 47K real tokens): quality 0.97 / 1.19 / 1.28 / 1.38 / 1.45x, speed 0.97 / 1.08 / 1.27 / 1.48 / 1.50x. At 1.6K nothing is approximated and the plugin costs 3%.
+On BetterBench's prefill sweep (fresh servers, 1.6K / 5.9K / 11.8K / 23.6K / 47K real tokens): quality 0.97 / 1.19 / 1.28 / 1.38 / 1.45x, speed 0.97 / 1.08 / 1.27 / 1.48 / 1.50x. At 1.6K nothing is approximated; those packages cost 3% there, two thirds of it an extra prefill stage that 0.1.0-r3 removed (now +0.9%).
 
 Earlier copies of this README gave 2.10x / 2.55x at 32K. Those were measured partway through the ramp above and hold only for sustained long-prompt traffic.
 
@@ -125,7 +125,7 @@ Same hardware and profile as above. Quality: last 512 tokens of 9 long documents
 | Speed mode quality | ΔNLL +0.0242 per token (95% CI +0.0040 to +0.0446): a small measurable cost; perplexity ratio 1.0245, top-1 agreement 89.4% |
 | Retrieval (needle in a haystack) | 72/72 for stock, quality and speed: one fact (or the right one of four) hidden at 10–85% depth of a 16K or 32K chat prompt, plus exact-tail controls; no disagreements with stock |
 | Decode | No loss, with MTP on. Short chats paired with stock: −0.3% (quality) / −0.5% (speed) on a fresh server; +3.3–3.9% after long-prompt traffic and under mixed traffic; 8 concurrent chats within noise |
-| Prompts that run the stock path on a RidgeFill server | ≈ +0.9% (2K) / +1.2% (8K) settled prefill time vs stock, 3% at 1.6K on BetterBench, because the plugin's VRAM displaces resident experts. Short prompts and the exact tail are unaffected in output, only in time. |
+| Prompts that run the stock path on a RidgeFill server | +0.4–1.0% prefill time vs stock at 512–2,000 tokens, and +0.8% on prefix-cache hits (paired, fresh servers, 2026-10-06), because the plugin's VRAM displaces about 47 resident expert slots a card. A stock step of more than 1,024 tokens that directly follows an approximated one can still stage one extra expert layer, because radiance's prefill stager reuses the previous pass's reach. Output is unaffected, only time. |
 | Projector memory | The projector always lives in host RAM (≈637 MiB host-mapped per rank for int8) and is streamed through ONE VRAM staging slot of 25.4 MiB per rank. Total plugin VRAM ≈ 61 MiB per card (slot + arena buffers). There is no VRAM placement. |
 | MTP drafting (`--num-speculative-tokens`, default auto) | Works with the plugin; decode is unaffected. The MTP `final` map is off by default and optional: +1.8% drafted tokens per step (paired, measured on radiance 1.0.8) for about +105 MiB VRAM per rank (computed from the plugin's declarations). See `docs/MTP-FINAL-MAP.md` in the plugin repo. |
 | Concurrency | Quality mode keeps co-batched decoders byte-identical to off. Speed mode's decoders-beside-prefill path does not promise byte identity; its decoders stay within stock's own solo-vs-batched variation. |
