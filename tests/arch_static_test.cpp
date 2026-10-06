@@ -1711,6 +1711,38 @@ TEST(the_hazard_instrument_counts_on_tail_passes_and_records_on_approximate_ones
     CHECK_EQ(std::count(q.ridgefill.kv_groups.begin(), q.ridgefill.kv_groups.end(), "kv_ridgefill_meta"), 0);
 }
 
+/* THE EXTRA PREFILL STAGE (notes/stock-path-cost.md): radiance's prefill stager stages a routed layer ahead
+ * only up to the highest op a pass of that kind issued before (core/place/stager.cpp will_issue), and every
+ * RidgeFill op is declared after the in-tree graph, MTP head included. A stock pass that issued the hazard op
+ * made each trunk pass of more than 1,024 tokens stage the head's layer for nothing (50 stages against 49,
+ * +2.5% prefill). So a stock pass whose hazard rule can count nothing -- a fresh prompt (no context), or one
+ * prefill sequence whose rows cover the whole span -- issues exactly the in-tree step and no op past its
+ * graph, with MTP declared. Passes that can count still end with the op. */
+TEST(a_stock_pass_that_can_count_no_hazard_issues_no_op_past_the_in_tree_graph) {
+    Pair p;
+    declare_pair(p, "quality", 0, 1, 0, /*max_spec=*/3);
+    REQUIRE_EQ(p.st, RAD_OK);
+    const rad_op op_hazard = qwen4exp_ridgefill::g_ridgefill[0].op_hazard;
+    REQUIRE(op_hazard != 0);
+    const rad_op last_in_tree = (rad_op)p.stock.ops.size();
+    for (const Shape& s : {Shape{{1600}, 0, 0, 0}, Shape{{2000}, 0, 0, 0}, Shape{{2048}, 0, 0, 4096},
+                           Shape{{1, 1, 2048}, 2, 0, 4096}}) {
+        Batch x = make_step(p.ridgefill, s);
+        const Run got = run_step(qwen4exp_ridgefill::step, x.b);
+        CHECK_EQ(count(got.log, "ridgefill: approximate step"), 0);
+        CHECK_EQ(differ(got.all, run_step(qwen4exp_fp8::step, x.b).issues), 0);
+        rad_op highest = 0;
+        for (const RecIssue& i : got.all) highest = std::max(highest, i.op);
+        CHECK(highest <= last_in_tree);
+    }
+    for (const Shape& s : {Shape{{1600}, 0, 0, 4096}, Shape{{64, 2048}, 0, 0, 4096}}) {   /* may count */
+        Batch x = make_step(p.ridgefill, s);
+        const Run got = run_step(qwen4exp_ridgefill::step, x.b);
+        REQUIRE(!got.all.empty());
+        CHECK_EQ(got.all.back().op, op_hazard);
+    }
+}
+
 /* A ONE-SEQUENCE CHUNK OFF THE DELTA NET'S TILE FAILS THE STEP BY NAME: the scheduler never cuts one,
  * and splitting a tile would be silently wrong. A forced split off the tile (R47's negative
  * control) is served, and said at declare. */

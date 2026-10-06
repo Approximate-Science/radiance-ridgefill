@@ -9,7 +9,8 @@
  * approximated position; ridgefill_hazard (ridgefill.so) records it on every approximate pass and, on a pass whose
  * last sequence still has tail ahead (span = T - n_ahead > 0, keyed), counts the tail positions before
  * the pass that the restored slot says were approximated, once, into a host-mapped counter. Rank 0 logs
- * the counter when it moves, on a LATER step: it is read for the log only, never for an issue (R99).
+ * the counter when it moves, on a LATER step: it is read for the log only, never for an issue (R99). A
+ * stock pass that provably counts nothing does not issue it (may_count).
  * Speed and quality only; plumb, which approximates nothing, and off declare none of it.
  */
 #ifndef RIDGEFILL_HAZARD_H
@@ -18,6 +19,22 @@
 namespace ridgefill {
 
 using namespace rad::arch;
+
+/* Whether a stock pass can count anything, from keyed numbers. The rule counts only tail positions that
+ * lie BEFORE the pass (span - q > 0 for the last sequence's q rows) and exist (its context > 0;
+ * max_ctx_len is 0 exactly when no sequence has any, radiance core/sched/batch.cpp bound_bucket). With
+ * one prefill sequence its q is the step's rows after the decoders; with more it is not known here.
+ *
+ * WHY A STOCK PASS THAT CANNOT COUNT ISSUES NOTHING: the op is declared after the whole in-tree graph,
+ * MTP head included, and the engine's prefill stager stages a routed layer ahead only up to the last op
+ * a pass of that kind issued before (radiance core/place/stager.cpp will_issue). One op past the head
+ * made every trunk pass of more than 1,024 tokens stage the head's layer for nothing: 50 layer stages
+ * against stock's 49, +2.5% prefill time at 1,600-2,000 tokens (notes/stock-path-cost.md). A pass that
+ * can count still pays that stage; that needs a prefix hit and a 1,025-2,047-row step. */
+static bool may_count(const RadBatch* batch, int64_t span, int64_t D, int64_t DT) {
+    if (span <= 0 || batch->max_ctx_len <= 0) return false;
+    return batch->n_seq - D > 1 || span > batch->n_tok - DT;
+}
 
 /* After the step: count (span > 0) and, on an approximate pass, record. The last bulk position comes
  * from ridgefill_mask's bounds {s, b'} on the masked, straddle and decoders paths, and is the chunk's last
@@ -28,7 +45,7 @@ static void hazard_issue(RadCtx* c, const RidgeFill& k, const RadBatch* batch, c
     batch_split(batch, &D, &DT);
     const int64_t span = k.cfg.tail - batch->n_ahead;
     const bool approx = p.path != PATH_STOCK;
-    if (batch->n_seq <= D || (!approx && span <= 0)) return;
+    if (batch->n_seq <= D || (!approx && !may_count(batch, span, D, DT))) return;
     const RadOperand cu_last = praw(batch->cu_seqlens + batch->n_seq - 1, RAD_I32, 2);
     const RadOperand bounds = !approx ? RAD_NONE : p.path == PATH_LEAN ? cu_last : brows(k.b_bounds, 2);
     RAD_ISSUE_N(c, k.op_hazard, 1, cu_last, praw(batch->positions, RAD_I32, batch->n_tok), bounds,
