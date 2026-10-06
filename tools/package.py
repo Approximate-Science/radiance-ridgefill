@@ -17,7 +17,8 @@ the chat-template package is NOT built by default -- its code path stays behind 
 Produces, under --out:
   radiance-ridgefill-<version>/  architectures/qwen4exp_fp8.so, kernels/ridgefill.so, README.md
                                  (docs/release/PLUGIN-README.md), LICENSE and NOTICE (the repo's),
-                                 VERSION.json, SHA256SUMS
+                                 ridgefill_report.py and TROUBLESHOOTING.md (the user's diagnosis:
+                                 tools/ridgefill_report.py, docs/TROUBLESHOOTING.md), VERSION.json, SHA256SUMS
   ridgefill-projector-qwen3.8-flash-next-<dtype>/  an exact copy of the projector folder's listed files
                                  (its ridgefill.json hashes verified BEFORE copying; a mismatch refuses
                                  by name), named after the dtype its own manifest carries in
@@ -418,6 +419,8 @@ def package(args: argparse.Namespace) -> int:
     license_ = require_file(repo / "LICENSE", "the repo LICENSE")
     notice = require_file(repo / "NOTICE", "the repo NOTICE (Apache-2.0 §4(d): the attribution every package carries)")
     template_tool = require_file(repo / "tools" / "ridgefill_template.py", "the template tool")
+    report_tool = require_file(repo / "tools" / "ridgefill_report.py", "the diagnosis report tool")
+    troubleshooting = require_file(repo / "docs" / "TROUBLESHOOTING.md", "the troubleshooting guide")
 
     if not VERSION_RE.fullmatch(args.version):
         die(f"--version must be x.y.z, got {args.version!r}")
@@ -459,6 +462,8 @@ def package(args: argparse.Namespace) -> int:
     copy_file(readme, plugin_dir / "README.md")
     copy_file(license_, plugin_dir / "LICENSE")
     copy_file(notice, plugin_dir / "NOTICE")
+    copy_file(report_tool, plugin_dir / "ridgefill_report.py")
+    copy_file(troubleshooting, plugin_dir / "TROUBLESHOOTING.md")
     write_text(plugin_dir / "VERSION.json",
                build_version_json(args.version, args.commit, radiance_version, radiance_source,
                                   gpu_targets, gpu_source, args.abi_version, abi_source))

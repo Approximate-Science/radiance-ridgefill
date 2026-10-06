@@ -44,7 +44,13 @@
 # Nothing outside this repo's data/, build-*/ and dist/ is written; the radiance checkout is only read.
 #
 # Env vars:
-#   RK_RADIANCE_REPO  the radiance git checkout (default /var/home/dylan/projects/inference/radiance)
+#   RK_RADIANCE_REPO  a radiance git checkout to read (only read: it must already hold the tag). Unset: this
+#                     script keeps its own clone in data/radiance (cloned from RK_RADIANCE_URL on first use, its
+#                     tags fetched when the release asked for is not in it yet)
+#   RK_RADIANCE_URL   where that clone comes from (default https://codeberg.org/StillDeadcode/radiance.git)
+#   RK_MODEL          --gpu-smoke only: the stock published .rad file (required; nothing is guessed)
+#   RK_GPUQ           --gpu-smoke only: a command that queues a GPU session (`$RK_GPUQ <label> <cmd...>`), for a
+#                     machine shared with other GPU work; unset, the smoke session starts directly
 #   RK_CMAKE          cmake >= 3.21 (default: `cmake` on PATH, else ~/.local/bin/cmake)
 #   RK_PYTHON         python for pytest (default python3)
 #   RK_PROJECTOR      the folder to package and smoke-test (default data/projector-ridgefill-qwen38fn-int8)
@@ -65,7 +71,8 @@ for a in "$@"; do
 done
 [ -n "$ref" ] || { echo "usage: scripts/update_radiance.sh <radiance tag or commit> [--host-only] [--ci] [--gpu-smoke]" >&2; exit 2; }
 [ $hostonly = 1 ] && [ $smoke = 1 ] && { echo "update_radiance: --gpu-smoke needs the device build --host-only skips" >&2; exit 2; }
-RREPO=${RK_RADIANCE_REPO:-/var/home/dylan/projects/inference/radiance}
+RREPO=${RK_RADIANCE_REPO:-$RK_REPO/data/radiance}
+RURL=${RK_RADIANCE_URL:-https://codeberg.org/StillDeadcode/radiance.git}
 PY=${RK_PYTHON:-python3}
 JOBS=${RK_JOBS:-4}
 PROJ=${RK_PROJECTOR:-$RK_REPO/data/projector-ridgefill-qwen38fn-int8}
@@ -81,7 +88,15 @@ cmake_ok() {  # cmake >= 3.21, the minimum of both trees' CMakeLists.txt
 CM=""
 for c in ${RK_CMAKE:-} cmake "$HOME/.local/bin/cmake"; do cmake_ok "$c" && { CM=$c; break; }; done
 [ -n "$CM" ] || infra "no cmake >= 3.21 (set RK_CMAKE)"
+if [ -z "${RK_RADIANCE_REPO:-}" ]; then   # our own clone: make it, and fetch when the release is new to it
+    [ -d "$RREPO/.git" ] || git clone -q --filter=blob:none "$RURL" "$RREPO" || infra "git clone $RURL into $RREPO"
+    git -C "$RREPO" rev-parse --verify --quiet "$ref^{commit}" > /dev/null ||
+        git -C "$RREPO" fetch -q --tags origin || infra "git fetch --tags in $RREPO"
+fi
 git -C "$RREPO" rev-parse --git-dir > /dev/null 2>&1 || infra "$RREPO is not a radiance git checkout (RK_RADIANCE_REPO)"
+[ $smoke = 0 ] || [ -f "${RK_MODEL:-}" ] || infra "--gpu-smoke needs RK_MODEL, the stock published .rad file"
+[ $smoke = 0 ] || [ -f "$RK_REPO/corpus/quick9.jsonl" ] ||
+    infra "--gpu-smoke needs the KL corpus corpus/quick9.jsonl (maintainer data, not in git: docs/REBASING.md)"
 
 # ---------------------------------------------------------------- a. the release
 commit=$(git -C "$RREPO" rev-parse --verify --quiet "$ref^{commit}") || infra "'$ref' is not a commit of $RREPO"
@@ -267,7 +282,7 @@ set -u
 cd $RK_REPO || exit 1
 E=$LOG/smoke; mkdir -p \$E
 export RK_IMAGE=$RIMG RK_PLUGIN_HOME=$home RK_STAGE=update-$name
-export RK_MODEL=\${RK_MODEL:-${RK_MODEL:-/var/home/dylan/models/rad/qwen3.8-next-flash-fp8-iq4r-moe.rad}}
+export RK_MODEL=$RK_MODEL
 I8="RK_DOCKER_EXTRA=-v $PROJ:/projector:ro"
 REF=$RK_REPO/data/kld/ref-r$name
 C=$RK_REPO/corpus/quick9.jsonl
@@ -288,10 +303,10 @@ env RADIANCE_RIDGEFILL_PROJECTOR=/projector RADIANCE_RIDGEFILL_SCORE_BULK=1 RK_E
 $PY scripts/kl_tail.py --corpus \$C --last 512 \$E/quality-t2560.json \$E/speed-t2048.json 2>&1 | grep -v '^    ppl/' | tee -a \$E/session.log
 log "smoke end \$(date -u +%FT%TZ)"
 EOF
-        nohup setsid /var/home/dylan/AI-Work/radiance-kva-plugin-20261004/gpuq.sh "update-$name" sh "$S" \
-            > "$LOG/smoke.queue" 2>&1 < /dev/null &
+        # shellcheck disable=SC2086  # RK_GPUQ is a command and its own words
+        nohup setsid ${RK_GPUQ:+$RK_GPUQ "update-$name"} sh "$S" > "$LOG/smoke.queue" 2>&1 < /dev/null &
         sleep 2
-        step "gpu smoke" "QUEUED: $(head -1 "$LOG/smoke.queue"); watch $LOG/smoke/session.log"
+        step "gpu smoke" "STARTED${RK_GPUQ:+ (queued with $RK_GPUQ)}; watch $LOG/smoke/session.log"
     fi
 fi
 verdict COMPATIBLE 0

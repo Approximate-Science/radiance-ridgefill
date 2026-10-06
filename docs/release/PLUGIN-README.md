@@ -12,7 +12,7 @@ RidgeFill builds on are at the end.
 
 ## Requirements
 
-- **Radiance engine:** release `1.0.13`. The plugin checks the engine binary at
+- **Radiance engine:** release `1.1.1` (commit 7001841). The plugin checks the engine binary at
   startup and forwards to the engine's own architecture (RidgeFill off) or refuses to
   start on a mismatch; see Troubleshooting.
 - **Base model:** the stock published container
@@ -164,25 +164,22 @@ RidgeFill did not load; check `RADIANCE_HOME` order.
 
 ## Troubleshooting
 
-| Log line | Meaning |
-|---|---|
-| `RidgeFill: no projector folder (looked at …); serving stock` | No `ridgefill.json` at `$RADIANCE_RIDGEFILL_PROJECTOR` or `<model dir>/projector`. Stock serving. Check the path or Docker mount. |
-| `RidgeFill: projector … REFUSED, it cannot run on this model: …; serving stock` | Dimension, layer, tokenizer, or tensor mismatch with this model. Stock serving. Use the projector fitted for the model. |
-| `RidgeFill: WARNING: projector …: … -- it runs, but was fitted on another variant` | Quantization or weight-anchor difference only. RidgeFill still runs. |
-| `WARNING: built against radiance 1.0.13, and the engine … carries release string(s) …; forwarding to the engine's own architecture …, RidgeFill off` | Engine is not release 1.0.13. Stock serving through the engine's in-tree architecture. |
-| `built against radiance 1.0.13, and the engine …; no in-tree architectures/… on $RADIANCE_HOME to forward to, so this plugin declines …` | Engine mismatch and no in-tree architecture behind the plugin on `RADIANCE_HOME`. Startup fails. Fix `RADIANCE_HOME` order (a home given only as `--radiance-home` is invisible to plugins). |
-| `ridgefill.tail is … and the largest step is …` | Tail above `2 × step − tile`. Startup refused. Lower `RADIANCE_RIDGEFILL_TAIL` or raise `--max-num-batched-tokens` (or set `--checkpoint-interval` below it). |
-| `ridgefill.tail is …; the shortest exact tail this method was measured at is …` | Tail below 512. Startup refused. |
-| `RADIANCE_RIDGEFILL_PROJ_PLACE=… is retired: the projector is always streamed from host memory through the staging ring …` | Retired placement switch set. Startup refused. Unset `RADIANCE_RIDGEFILL_PROJ_PLACE` and `RADIANCE_RIDGEFILL_PROJ_RING`. |
-| `RADIANCE_RIDGEFILL_PROJ=… is retired with the container append: …` (likewise `_ST`, `_DECLARE`) | Retired container-append switch set. Startup refused. Unset it; tensors come from the projector folder. |
-| `ridgefill: hazard <n> positions (total <m>)` | Informational: a branched conversation resumed `<n>` approximated positions from prefix cache. See above. |
+Run the report on the serving machine and read its first line; it names the problem and the fix:
+
+```sh
+python3 ridgefill_report.py --container <your radiance container>   # or --log <server stderr file>
+```
+
+It ships in this folder, needs only Python 3.8+, changes nothing, and checks this plugin's and the projector's
+files against their hashes (`--projector <dir>`). Every message RidgeFill can print has a code and a fix in
+`TROUBLESHOOTING.md` (also in this folder). To report a problem, paste the whole report into the issue.
 
 ## Compatibility
 
 - Missing or incompatible projector: the server runs stock (see the `serving
   stock` lines above). A tokenizer or geometry mismatch refuses by name;
   quantization or anchor differences warn and run.
-- Engine other than 1.0.13: forwarded to the in-tree architecture (RidgeFill off) or
+- Engine other than 1.1.1: forwarded to the in-tree architecture (RidgeFill off) or
   refused at startup, never silently approximated. Forwarding needs the engine's own
   in-tree `qwen4exp_fp8.so` on `$RADIANCE_HOME` behind this plugin's home; a home given
   only as `--radiance-home` is invisible to plugins, so the start then fails by name.

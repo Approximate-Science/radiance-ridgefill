@@ -9,6 +9,11 @@ library, and `tools/ridgefill_projector.py`, which builds the projector folder t
 The plugin is a model-independent core (`arch/ridgefill_*.h`) and one adapter per model (`arch/qwen4exp_*`);
 adding a model is docs/ADDING-A-MODEL.md.
 
+**Something wrong?** `python3 tools/ridgefill_report.py --container <name>` (it also ships in the plugin package)
+names the problem from the server's log; every message has a code and a fix in docs/TROUBLESHOOTING.md.
+Reporting a bug or sending a change: CONTRIBUTING.md. A new radiance release: docs/REBASING.md (one command,
+anyone can run it).
+
 RidgeFill is by Dylan Johnston and tcclaviger (Apache-2.0, `NOTICE`); cite it with DOI
 [10.5281/zenodo.23179168](https://doi.org/10.5281/zenodo.23179168) (`CITATION.cff`; BibTeX and the prior work
 it builds on at the end of this file).
@@ -103,20 +108,20 @@ directory is git-ignored.
 
 The plugin is built against ONE radiance release (`RADIANCE_VERSION` names it, with its commit): the arch
 plugin compiles that release's in-tree Qwen4-Exp source, and the release guard forwards to the engine's own
-architecture on any other. To try a new release:
+architecture on any other. The contributor's walk-through is docs/REBASING.md. To try a new release:
 ```sh
 scripts/update_radiance.sh v1.0.14              # + device build and packages when radiance-build:1.0.14 exists
 scripts/update_radiance.sh v1.0.14 --host-only  # no docker: ~15 min the first time, ~1 min after
-scripts/update_radiance.sh v1.0.14 --gpu-smoke  # + one queued GPU session, ~15-20 min
+RK_MODEL=<stock .rad> scripts/update_radiance.sh v1.0.14 --gpu-smoke  # + one GPU session, ~15-20 min
 ```
 Exit 0 COMPATIBLE, 1 INCOMPATIBLE, 2 INFRASTRUCTURE (the answer could not be computed -- never reported
 as compatible).
-It archives the release from the radiance checkout into `data/radiance-src-<release>/` (read-only), builds a
+It clones radiance into `data/radiance` (or reads `RK_RADIANCE_REPO`), archives the release into `data/radiance-src-<release>/` (read-only), builds a
 host-only install of it and the plugin against it, runs `ctest -LE gpu` -- the static oracle holds `off` and
 every approximate path issue for issue against THAT release's in-tree plugin -- and pytest, and on green
 builds the device plugins in `radiance-build:<release>` and the release packages (`tools/package.py`) into
 `dist/radiance-ridgefill-r<release>-<commit>/`. It ends `RESULT: PASS` or `RESULT: FAIL` (exit 0 / 1); logs and a
-summary in `data/update-<release>/`. A change of RAD_ABI_VERSION is INCOMPATIBLE on its own. `--gpu-smoke` adds one `gpuq` session on `stilldeadcode/radiance:<release>`:
+summary in `data/update-<release>/`. A change of RAD_ABI_VERSION is INCOMPATIBLE on its own. `--gpu-smoke` adds one GPU session (queued through `RK_GPUQ` when set) on `stilldeadcode/radiance:<release>`:
 stock and `off` ident (must match), an exact KL reference for the release, int8 quality T2560 and int8
 speed T2048 scored last-512 paired vs exact.
 

@@ -149,4 +149,13 @@ if grep -iE 'amdgpu.*(MES|SMU|ring.*timeout|GPU reset)' "$tmp_klog" >/dev/null 2
     fail "the kernel log since $RK_PREFLIGHT_SINCE holds amdgpu MES/SMU/timeout/reset lines (above); a MES or SMU error invalidates every result after it"
 fi
 
+# ---- (d) GPU page faults: RECORDED, not refused. radiance's release profile page-faults the card as a server
+# stops after long prompts -- stock too: on 2026-10-06 all 14 fault bursts fell within 3 s of a container stop
+# (e2e cases 0/3/4, ramp-stock, betterbench probes; gate A2 notes). Refusing would stop every session after the
+# first such server; the count and the last fault's time go into the evidence instead. A fault whose time falls
+# INSIDE a measurement invalidates that measurement.
+faults=$(grep -ciE 'amdgpu.*(page fault|PROTECTION_FAULT)' "$tmp_klog")
+last=$(grep -iE 'amdgpu.*(page fault|PROTECTION_FAULT)' "$tmp_klog" | tail -1 | awk '{print $3}')
+printf 'preflight: %s amdgpu page-fault line(s) since %s%s\n' "$faults" "$RK_PREFLIGHT_SINCE" "${last:+, the last at $last}"
+
 printf 'preflight: OK\n'

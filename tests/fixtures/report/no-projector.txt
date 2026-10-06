@@ -1,0 +1,5 @@
+I device: AQL backend, 3 device(s) [0:gfx1201 1:gfx1201 2:gfx1036]
+I model: qwen4exp  arch=qwen4exp  quant=bf16  48 layers  262144 ctx
+I plugin /opt/radiance/share/radiance/architectures/qwen4exp_fp8.so is shadowed by /plugins/architectures/qwen4exp_fp8.so, which comes first on the search path
+I device: the 2 cards reach each other's memory directly (peer to peer)
+radiance: qwen4exp_ridgefill: RidgeFill: no projector folder (looked at /models/projector); serving stock
