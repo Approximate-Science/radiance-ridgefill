@@ -68,6 +68,10 @@ fresh_cache() {   # label: a fresh prefix-cache dir for the next server, the vol
   export RK_CACHE_DIR=$K/$1; mkdir -p "$RK_CACHE_DIR"
 }
 export RK_FLAGS="$RK_RELEASE_FLAGS" RK_SERVE_SEQS=default RK_E2E_SEQS=default RK_STAGE=release
+# scripts/common.sh's Stage C cache profile appends its own prefix-cache flags whenever RK_CACHE_DIR is set (and drops
+# --no-prefix-cache); the engine takes the last value, so they must carry the profile's sizes (2026-10-05: its default
+# 32,768 MiB disk tier silently replaced the profile's 131,072 -- never reached, 19 GB at most)
+export RK_CACHE_HOST_MIB=4096 RK_CACHE_DISK_MIB=131072
 PY=/var/home/dylan/projects/research/kva/.venv/bin/python
 T0=$(date '+%Y-%m-%d %H:%M:%S')
 log() { echo "$*" | tee -a "$E/session.log"; }
@@ -168,6 +172,11 @@ r64() {   # label mode extra-flags
   mkdir -p "$R/dump-$label"; fresh_cache "r64-$label"
   # the profile with MTP off (the capture follows one greedy decoder a row a step) and --profile-ops (no replayed pass)
   f=$(echo "$RK_RELEASE_FLAGS" | sed 's/--num-speculative-tokens 3/--num-speculative-tokens 0/')
+  # the no-cache arm: no prefix-cache flag at all and no RK_CACHE_DIR, or common.sh turns the cache back on
+  case "$extra" in *--no-prefix-cache*)
+    unset RK_CACHE_DIR
+    f=$(echo "$f" | sed -e 's/ --prefix-cache-host-mib [0-9]*//' -e 's| --prefix-cache-dir [^ ]*||' -e 's/ --prefix-cache-disk-mib [0-9]*//') ;;
+  esac
   if env RK_FLAGS="$f $extra" RK_DOCKER_EXTRA="$MOUNT -v $R/dump-$label:/dump" \
        RADIANCE_KVA_DUMP_LOGITS=/dump scripts/serve.sh "$mode" --profile-ops > "$R/serve-$label.out" 2>&1; then
     [ -f "$R/conv.json" ] || python3 tools/turn2.py build --docs "$RK_DOCS" --out "$R/conv.json" > "$R/build.out" 2>&1
