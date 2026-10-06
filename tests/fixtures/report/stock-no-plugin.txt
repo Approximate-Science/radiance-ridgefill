@@ -1,0 +1,3 @@
+I device: AQL backend, 3 device(s) [0:gfx1201 1:gfx1201 2:gfx1036]
+I model: qwen4exp  arch=qwen4exp  quant=bf16  48 layers  262144 ctx
+I device: the 2 cards reach each other's memory directly (peer to peer)

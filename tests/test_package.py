@@ -121,8 +121,10 @@ def make_repo(dst: Path, with_license: bool = True, with_notice: bool = True) ->
     tools.mkdir(parents=True)
     shutil.copyfile(PACKAGE, tools / "package.py")
     shutil.copyfile(TEMPLATE_TOOL, tools / "ridgefill_template.py")
+    shutil.copyfile(REPO / "tools" / "ridgefill_report.py", tools / "ridgefill_report.py")
     (dst / "README.md").write_text("# radiance-ridgefill (test repo README)\n", encoding="utf-8")
     (dst / "docs" / "release").mkdir(parents=True)
+    (dst / "docs" / "TROUBLESHOOTING.md").write_text("# Troubleshooting (test repo)\n", encoding="utf-8")
     (dst / "docs" / "release" / "PLUGIN-README.md").write_text("# radiance-ridgefill plugin (release README)\n",
                                                                 encoding="utf-8")
     (dst / "docs" / "release" / "PROJECTOR-MODEL-CARD.md").write_text(
@@ -201,6 +203,9 @@ def test_layout_and_sums_no_template_by_default(inputs, tmp_path):
     assert (plugin / "NOTICE").read_bytes() == (REPO / "NOTICE").read_bytes()
     assert any(line.endswith("  NOTICE") for line in (plugin / "SHA256SUMS").read_text(encoding="utf-8").splitlines())
     assert (plugin / "VERSION.json").is_file()
+    # the user's diagnosis travels with the plugin: the report tool and the guide its codes point at
+    assert (plugin / "ridgefill_report.py").read_bytes() == (REPO / "tools" / "ridgefill_report.py").read_bytes()
+    assert (plugin / "TROUBLESHOOTING.md").read_bytes() == (inputs["repo"] / "docs" / "TROUBLESHOOTING.md").read_bytes()
     check_sums(plugin)
 
     projector = out / "ridgefill-projector-qwen3.8-flash-next-bf16"     # named by the manifest's dtype

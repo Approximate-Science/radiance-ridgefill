@@ -1,0 +1,10 @@
+I device: AQL backend, 3 device(s) [0:gfx1201 1:gfx1201 2:gfx1036]
+I model: qwen4exp  arch=qwen4exp  quant=bf16  48 layers  262144 ctx
+I plugin /opt/radiance/share/radiance/architectures/qwen4exp_fp8.so is shadowed by /plugins/architectures/qwen4exp_fp8.so, which comes first on the search path
+I device: the 2 cards reach each other's memory directly (peer to peer)
+radiance: qwen4exp_ridgefill: RidgeFill: projector /models/projector (found beside --model /models/qwen3.8-next-flash-fp8-iq4r-moe.rad (same device and inode as the mapped /models/qwen3.8-next-flash-fp8-iq4r-moe.rad)) matches qwen4exp: arch ok, metadata 11/11, tokenizer ok, encodings 489/489, anchors 3/3, 0 warning(s); split 24, correction held, 666.4 MiB in 27 files; RidgeFill projector ridgefill-projector-qwen3.8-flash-next-i8 by Dylan Johnston and tcclaviger (Apache-2.0, doi:10.5281/zenodo.23179168)
+radiance: qwen4exp_ridgefill: RidgeFill: rank 0 holds the projector: 637.8 MiB host-mapped (int8 maps, correction, row table), 25.4 MiB VRAM (the staging ring's one slot)
+radiance: qwen4exp_ridgefill: RidgeFill: rank 1 holds the projector: 637.8 MiB host-mapped (int8 maps, correction, row table), 25.4 MiB VRAM (the staging ring's one slot)
+radiance: qwen4exp_ridgefill: ridgefill: approximate step (quality, 2048 tokens, 2048 ahead, b 2048, s_lb 0, D 0, Pn 1, ckpt 1, masked, stage stream)
+radiance: qwen4exp_ridgefill: ridgefill: approximate step (quality, 2048 tokens, 2048 ahead, b 2048, s_lb 0, D 0, Pn 1, ckpt 1, masked, stage stream)
+radiance: qwen4exp_ridgefill: ridgefill: approximate step (quality, 2048 tokens, 2048 ahead, b 2048, s_lb 0, D 0, Pn 1, ckpt 1, masked, stage stream)
