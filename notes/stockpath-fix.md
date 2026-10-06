@@ -135,8 +135,32 @@ paired by request, median [95% CI]):
   server followed a stock throwaway.
 - The uniform +0.3% on requests 2-5 and the one-off +4.3% on the first long request are consistent with that
   state. But a cross-session comparison with no same-session control cannot show "not slower".
-- **Decision (the conservative option): fix/stockpath-prefetch is NOT merged and r3 is not repackaged.** To settle
-  it: one short session, fresh quality servers on r2 and r3 alternated (r3, r2, r3), 5 x 32K each, ~12 GPU minutes.
+- **Decision then (the conservative option): fix/stockpath-prefetch was held unmerged and r3 was not repackaged.**
+  The ABA session below settled it.
+
+**(iv) settled: r3 vs r2 in one session (ABA, 11.9 GPU minutes).**
+- 11:15:04-11:27:01Z, evidence `~/AI-Work/radiance-kva-plugin-20261004/evidence/ridgefix-aba-20261006/` (aba.sh,
+  aba_analyze.py, aba-tables.md). Fresh quality servers r3a, r2, r3b; 5 x 32K each, with the same seeded
+  prompts; release config. Kernel log 0; cache dirs removed.
+
+| request | r3a ms | r2 ms | r3b ms | mean(r3) / r2 | r3b / r3a |
+|---|---|---|---|---|---|
+| 1 | 20,174 | 20,189 | 20,209 | +0.01% | +0.17% |
+| 2 | 20,214 | 20,226 | 20,228 | -0.03% | +0.07% |
+| 3 | 19,702 | 19,691 | 19,707 | +0.07% | +0.02% |
+| 4 | 18,835 | 18,852 | 18,850 | -0.05% | +0.08% |
+| 5 | 17,984 | 18,007 | 17,994 | -0.10% | +0.05% |
+
+- **Gate PASSES.** Over requests 2-5, d = median(mean(r3a, r3b) / r2 - 1) = -0.04%, and the r3-vs-r3 spread
+  s = median |r3b / r3a - 1| = 0.06%. Request 1 is +0.01%.
+- Both r3 servers match the ramp run to the request, here as in the verify session: 20.17-20.21 s against 20.20 s
+  on request 1. So the verify session's +0.3% / +4.3% was that session's state.
+- **Counters.** r3a and r3b are identical to each other and to the ramp run's r1 counters. r2 differs by up to 60
+  staged units and 0.04 GiB streamed a request, although r2's binaries equal r1's. That is the mover's
+  run-to-run variation, not an r3 effect.
+- Labbook HRIDGEFIX-aba is recorded **refuted**, on the registered kill's "any counter difference" clause only. Its
+  timing claim holds.
+- Merged into main and repackaged as r3 with the corrected READMEs (notes/release-session.md).
 
 ## What the plugin's VRAM is made of (read only, nothing changed)
 Startup budget, card 0, quality vs stock (evidence/stockpath-20261006 serve logs): claimable 27.30 vs 27.37 GiB,

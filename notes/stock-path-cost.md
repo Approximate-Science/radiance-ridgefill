@@ -1,6 +1,6 @@
 # notes/stock-path-cost.md -- what prompts RidgeFill does not approximate cost on a RidgeFill server (2026-10-06)
 
-> **Fixed on branch fix/stockpath-prefetch (not merged yet):** the extra prefill stage was the hazard op's handle.
+> **Fixed in 0.1.0-r3 (fix/stockpath-prefetch, merged):** the extra prefill stage was the hazard op's handle.
 > With it removed, 1,600 / 2,000 tokens cost +0.8-0.9% like 512 / 1,024 -- notes/stockpath-fix.md. The
 > measurements below are kept as made.
 
