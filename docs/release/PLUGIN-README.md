@@ -23,14 +23,16 @@ startup. The shipped projector is INT8 only.
 ## Installation
 
 1. **Keep the stock model file intact.** Serve the published `.rad` file as is.
-2. **Unpack the plugin.** Put `architectures/qwen4exp_fp8.so` and
-   `kernels/kva.so` in a plugin directory.
-3. **Unpack the projector.** Copy the projector package
-   `projector-qwen3.8-flash-next-i8` (named by `tools/package.py` after the
-   dtype in the folder manifest's `projector.dtype`) into a `projector/`
-   subdirectory beside the model file (e.g. `<model dir>/projector/`), so it
-   holds `kva.json` plus the map files. To point elsewhere, set
-   `RADIANCE_KVA_PROJECTOR=<dir>`, which is checked first.
+2. **Download the plugin** into a plugin directory (it needs only these two files):
+   ```sh
+   hf download Dyluhn/radiance-kva --include "architectures/*" "kernels/*" --local-dir <plugin dir>
+   ```
+   The same repo's `release/` folder holds the release tarballs and their `SHA256SUMS`.
+3. **Download the projector** into a `projector/` folder beside the model file:
+   ```sh
+   hf download Dyluhn/radiance-kva-projector-qwen3.8-flash-next-i8 --local-dir <model dir>/projector
+   ```
+   To keep it elsewhere, set `RADIANCE_KVA_PROJECTOR=<dir>`, which is checked first.
 4. **Put the plugin first on `RADIANCE_HOME`:**
    ```sh
    export RADIANCE_HOME=<plugin dir>:/opt/radiance/share/radiance
@@ -104,7 +106,7 @@ Measured on radiance 1.0.13 with its own `deploy/compose/flashnext.yaml` profile
 | Decode | Equal to stock, with MTP on: 8.87 vs 9.37 ms/token right after a 16K prompt, 8.18 vs 7.99 settled (stock vs quality) |
 | Prompts that run the stock path on a KVA server | ≈ +0.9% (2K) / +1.2% (8K) settled prefill time vs stock, because the plugin's VRAM displaces resident experts. Short prompts and the exact tail are unaffected in output, only in time. Decode equals stock. |
 | Projector memory | The projector always lives in host RAM (≈637 MiB host-mapped per rank for int8) and is streamed through ONE VRAM staging slot of 25.4 MiB per rank. Total plugin VRAM ≈ 61 MiB per card (slot + arena buffers). There is no VRAM placement. |
-| MTP drafting (`--num-speculative-tokens`, default auto) | Works with the plugin; decode is unaffected. The MTP `final` map is off by default and optional: +1.8% drafted tokens per step (paired) for +25 MiB VRAM per rank. |
+| MTP drafting (`--num-speculative-tokens`, default auto) | Works with the plugin; decode is unaffected. The MTP `final` map is off by default and optional: +1.8% drafted tokens per step (paired, measured on radiance 1.0.8) for about +105 MiB VRAM per rank (computed from the plugin's declarations). See `docs/MTP-FINAL-MAP.md` in the plugin repo. |
 | Concurrency | Quality mode keeps co-batched decoders byte-identical to off. Speed mode's decoders-beside-prefill path does not promise byte identity; its decoders stay within stock's own solo-vs-batched variation. |
 | Prefix cache | Works like stock. A branched or edited conversation can resume from a checkpoint whose cached positions were approximated; the plugin counts these and logs `kva: hazard N positions (total M)`. `RADIANCE_KVA_CKPT_FLOOR` (default 0) trades cache reuse for exactness. |
 | Images | Steps carrying image rows run the stock path; approximation resumes on later text steps. |

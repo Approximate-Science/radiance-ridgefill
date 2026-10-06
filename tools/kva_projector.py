@@ -197,12 +197,12 @@ The fitted tensors the radiance KVA plugin reads. The model file stays exactly a
 1. Serve the stock model as you do today.
 2. Install the plugin: unpack it to e.g. /opt/kva (architectures/qwen4exp_fp8.so, kernels/kva.so).
 3. Put this folder next to your model:  hf download <this repo> --local-dir <model dir>/projector
-4. Start radiance with  RADIANCE_HOME=/opt/kva:/opt/radiance/share/radiance  and RADIANCE_KVA=quality (every
-   request) -- or, for per-request KVA, --override-chat-template <model dir>/projector/chat_template.jinja.
+4. Start radiance with  RADIANCE_HOME=/opt/kva:/opt/radiance/share/radiance  and RADIANCE_KVA=quality
+   (or speed); the mode is server-wide.
 5. Check the startup log: "KVA: projector <folder> ... matches <model>".
 
 Docker: mount the model's DIRECTORY (not the single file), or set RADIANCE_KVA_PROJECTOR to this folder.
-The projector is streamed from host memory: it costs the cards two one-layer staging slots, not the whole map.
+The projector is streamed from host memory: it costs each card one one-layer staging slot, not the whole map.
 """
 
 

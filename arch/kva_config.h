@@ -47,8 +47,10 @@
  *                             approximate pass writes the predicted final stream of its bulk rows into the
  *                             trunk's stream before the epilogue, which the MTP head reads (kva_final.h; DD-D).
  *                             Measured (R70, notes/staged.md): +1.8% drafted tokens a step at T 2048, for a
- *                             bf16-sized ring slot (+25 MiB VRAM a rank with int8 maps), +200 MiB host and
- *                             +210 MB a pass over the link. off: nothing of the map is declared, held or
+ *                             about +105 MiB VRAM a rank with int8 maps (a bf16-sized ring slot, 50 instead
+ *                             of 25.4 MiB, plus the copied layer-S stream h_S and the kva_final buffer, 40 MiB
+ *                             each at 2,048 rows; computed from the declarations), +200 MiB host and +210 MB a
+ *                             pass over the link. R70 ran on radiance 1.0.8. off: nothing of the map is declared, held or
  *                             streamed, whatever the folder holds                         default off
  *   env RADIANCE_KVA_SCORE_BULK  1: approximate in KL mode too, whose logits on bulk rows are then
  *                             not the model's -- score only the exact tail (PLAN-FIX §6.2, R73)

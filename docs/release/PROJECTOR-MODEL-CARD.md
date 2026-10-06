@@ -27,13 +27,24 @@ projector package is Apache-2.0.
   `transformers` or `vLLM`. It runs only when loaded by the plugin alongside
   the untouched stock model container.
 
+## Use
+
+Download this folder into a `projector/` folder beside the stock model file, and install the
+plugin from [Dyluhn/radiance-kva](https://huggingface.co/Dyluhn/radiance-kva):
+
+```sh
+hf download Dyluhn/radiance-kva-projector-qwen3.8-flash-next-i8 --local-dir <model dir>/projector
+```
+
+The plugin finds the folder on its own, checks every file against `kva.json`, and logs
+`KVA: projector … matches …` at startup. Its README covers modes, costs and troubleshooting.
+
 ## Files
 
-28 files, 698,753,818 bytes, listed with SHA256 hashes in `kva.json`
-(`projector.dtype: "i8"`, layout `i8_row128`, encoding `i8*bf16[1x128]`).
-The package directory is named `projector-qwen3.8-flash-next-i8` by
-`tools/package.py` after that dtype field. `kva.json` SHA256:
-`5b699e27e88d2e27cb546c174c6cb6f257e20433555e96b37fe17781aa3a85ae`.
+`kva.json` (30,385 bytes) lists 27 files, 698,722,493 bytes, with their SHA256 hashes
+(`projector.dtype: "i8"`, layout `i8_row128`, encoding `i8*bf16[1x128]`). `kva.json` SHA256:
+`8b4fc11340aeeec8560f7973786b8f6c44f555f920f10c06299cb2512a2f6308`. Documentation is not listed,
+so this card can change without affecting the projector.
 
 | File(s) | Contents | Size |
 |---|---|---|
@@ -42,7 +53,7 @@ The package directory is named `projector-qwen3.8-flash-next-i8` by
 | `correction.safetensors` | Recurrent GDN terminal-state corrections `st.L` f32 `[48, 128, 128]` for 18 layers (24–26, 28–30, 32–34, 36–38, 40–42, 44–46) | 56,624,584 bytes |
 | `rowsel.safetensors` | Vocabulary frequency tables `score`, `score_none`, `score_all`, f32 `[248320]` | 2,980,120 bytes |
 | `chat_template.jinja` | Parked per-request marker template (not used by this release) | 11,805 bytes |
-| `README.md` | Directory reference | 857 bytes |
+| `README.md` | This model card (not listed in `kva.json`) | — |
 
 ## How the projector was fitted
 
