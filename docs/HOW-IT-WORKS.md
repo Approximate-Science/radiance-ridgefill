@@ -356,19 +356,52 @@ A 32,000-token prompt, alone on the server, in the release config (`--max-num-ba
 
 ## Headline results
 
-Protocol (notes/release-session.md and notes/rebase-1.0.13.md G13). radiance 1.0.13 with its own
-`deploy/compose/flashnext.yaml` flags (TP2, MTP depth 3, `--max-num-batched-tokens 2048`, prefix cache on),
-except `--gpu-headroom-mib 3072` because a display was attached. Two gfx1201 cards, the published container,
-int8 folder, `T` 2,048. TTFT is the median of 7 reps after a settle warm-up, two rounds (both shown).
+Setup: radiance 1.0.13 with its own `deploy/compose/flashnext.yaml` flags (TP2, expert_tiered offload, MTP
+depth 3, `--max-num-batched-tokens 2048`, prefix cache on), except `--gpu-headroom-mib 3072` because a display
+was attached. Two AMD R9700 (gfx1201), the published container, int8 folder, `T` 2,048. Stock is the same
+server with `RADIANCE_RIDGEFILL=off`. Prefill is the engine's prompt time (notes/ramp.md, notes/mixed-traffic.md).
+
+**Prefill speed depends on what the server has been serving.**
+
+- **Typical use: 1.24× (quality) and 1.70× (speed) on a 32K-token prompt.** That is a fresh server, or long
+  prompts mixed with chat (1 long prompt to 6 short chats, cycles 6–15; 95% CI [1.21, 1.27] and [1.68, 1.74]).
+  A fresh server's first three long prompts: 1.07–1.13× and 1.47–1.56×.
+- **Sustained long-prompt traffic: 2.05× and 2.81× at 32K, 1.85× and 2.33× at 16K**, reached after about
+  15–18 long prompts back to back.
+- **Short prompts and decode: no loss.** Short chats paired with stock decode −0.3% (quality) / −0.5% (speed)
+  on a fresh server, inside the accepted 1%, and +3.3–3.9% after long-prompt traffic or under mixed traffic;
+  8 concurrent chats were within noise.
+
+| 32K prompt, prefill vs stock | quality | speed |
+|---|---|---|
+| fresh server, or 1 long : 6 short | 1.24× | 1.70× |
+| first 3 long prompts, fresh server | 1.07–1.13× | 1.47–1.56× |
+| after ~15–18 long prompts back to back | 2.05× | 2.81× |
+
+**Why.** With expert_tiered offload, radiance's heat-based mover shifts VRAM expert slots toward the experts
+requests route to, at most 8 moves per layer and slot class per request (radiance `core/place/heat.h`,
+`moves_per_dispatch`). A fresh server's resident set is split about evenly between layers 0–23 and 24–47.
+RidgeFill runs layers 24–47 in full only for exact rows, so its long prompts route few experts there and the
+mover moves ~2,550 slots on rank 0 to layers 0–23 over ~15–18 long prompts. Streamed expert bytes per 32K
+prompt then fall from 129 to 13 GiB (quality) and 91 to 5 GiB (speed), and prefill time halves. Stock's own
+prefill improves only 5.5% under the same traffic. Short chats and decode use every layer and move the slots
+back within about 10 requests, so under mixed traffic a long prompt gets about the fresh figure. With every
+expert in VRAM there is no mover and this ramp should not apply; that is not measured.
+
+BetterBench's prefill sweep on fresh servers (1.6K / 5.9K / 11.8K / 23.6K / 47K real tokens): quality 0.97 /
+1.19 / 1.28 / 1.38 / 1.45×, speed 0.97 / 1.08 / 1.27 / 1.48 / 1.50×. At 1.6K nothing is approximated (−3%).
+
+The release session's 2.10× / 2.55× at 32K (notes/release-session.md) were medians of series still falling
+through this ramp, against a stock that ran 18% slower than in later sessions; they are superseded.
+
 Quality is dNLL against exact on the last 512 tokens of 9 documents, paired, with a bootstrap 95% CI;
 quality mode is scored at `T` 2,560 so every scored token sees at least 2,048 exact rows.
 
-| | 16K TTFT | 32K TTFT | dNLL vs exact (last 512) | needle (72 items) |
-|---|---|---|---|---|
-| stock | 12,258 / 12,269 ms | 24,058 / 24,069 ms | — | 72/72 |
-| quality | 8,210 / 8,231 ms (**1.49×**) | 11,454 / 11,472 ms (**2.10×**) | +0.0010 [−0.0135, +0.0153] (T 2,560) | 72/72 |
-| speed | 6,237 / 6,247 ms (**1.97×**) | 9,451 / 9,453 ms (**2.55×**) | +0.0242 [+0.0040, +0.0446] | 72/72 |
+| | dNLL vs exact (last 512) | needle (72 items) |
+|---|---|---|
+| stock | — | 72/72 |
+| quality | +0.0010 [−0.0135, +0.0153] (T 2,560) | 72/72 |
+| speed | +0.0242 [+0.0040, +0.0446] | 72/72 |
 
-Decode speed after a long prompt and when settled was equal to stock (stock 8.87 vs quality 9.37 ms/token
-right after a 16K prompt, 8.18 vs 7.99 settled). The headroom setting gives every server ~2.9 GiB fewer expert slots on
-one card; how that shifts the ratios headless is unmeasured.
+The headroom setting gives every server ~2.9 GiB fewer expert slots on one card; how that shifts the ratios
+headless is unmeasured.
