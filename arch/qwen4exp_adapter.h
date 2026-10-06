@@ -99,6 +99,10 @@ inline int declare_codes(RadBuilder* b, const RadBuildCtx* ctx, RidgeFill& k) {
 /* What a late attention layer lacks for speed's tail-only straddle -- the per-row sparse attention (the
  * indexer's selection and its sequence map) and the fused sparse attention + gate -- or nullptr. */
 inline const char* straddle_missing(const AttnGatedFP8& a) {
+    /* An attention-zero rank (three ranks over two KV heads, radiance 1.1.0) declares no attention to lack:
+     * its block is one `fill` over whatever rows it is given (attn_rows). Every rank must answer the same,
+     * or the straddle's tail-sized all-reduce would meet a whole-step one. */
+    if (a.op_fill) return nullptr;
     if (!a.qsa_sel) return "the indexer's selection (qsa_sel)";
     if (!a.qsa_sequ) return "the indexer's sequence map (qsa_sequ)";
     if (!a.op_attn_gq) return "the fused sparse attention + gate (attn_paged_gate_quant)";
@@ -273,8 +277,7 @@ inline void finish_state(RadCtx* c, const RidgeFill& k, const RadBatch* batch, S
         if (!m.layers[(size_t)li].full &&
             std::find(sd.layers.begin(), sd.layers.end(), (int)li) == sd.layers.end())
             read_state(c, k, m, li, batch, &sd);
-    state_end(c, k.state_dir, batch, sd, m.gcfg.n_head_v, m.gcfg.head_v, m.gcfg.head_k, rad_rank(c),
-              m.g.world, approx, kModeNames[k.cfg.mode]);
+    state_end(c, k.state_dir, batch, sd, k.ad.state, rad_rank(c), m.g.world, approx, kModeNames[k.cfg.mode]);
 }
 
 /* R61 -- RADIANCE_RIDGEFILL_CAPTURE_STATE ON A MIXED STEP (decoders beside a prefill chunk): after the
@@ -307,7 +310,6 @@ inline RidgeFillAdapter adapter_of(const qwen4exp_fp8::Model& m) {
     a.n_embd = m.g.n_embd;
     a.n_vocab_all = m.g.n_vocab_all;
     a.n_vocab = m.g.n_vocab;
-    a.world = m.g.world;
     a.wide = m.hccfg.hc * m.g.n_embd;
     a.tile = m.gcfg.chunk;
     a.split_lo = m.ple_layer + 1;  /* -1 (no PLE) gives 0: no constraint */
@@ -328,7 +330,9 @@ inline RidgeFillAdapter adapter_of(const qwen4exp_fp8::Model& m) {
     a.default_tail = kAdapterDefaultTail;
     a.act_dtype = m.g.act_dtype;
     a.dtype = m.g.dtype;
-    a.state = {m.gcfg.n_head_v, m.gcfg.head_v, m.gcfg.head_k};
+    /* the in-tree split's own first head (qwen4exp_fp8.cpp:412-443): the uneven one where it cut one */
+    const int64_t first = m.gcfg.uneven() ? m.gcfg.v_first : m.g.rank * m.gcfg.n_head_v;
+    a.state = {m.gcfg.n_head_v, m.gcfg.head_v, m.gcfg.head_k, first, m.gcfg.n_head_v_all};
     a.buf_stream = m.b_h;
     a.buf_x = m.a_x.x;
     a.buf_x_q = m.a_x.cq();        /* the pair the connection read writes: int8 when q8_fed, else E4M3 */

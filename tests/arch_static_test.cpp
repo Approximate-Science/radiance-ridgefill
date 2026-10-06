@@ -490,7 +490,10 @@ TEST(speed_takes_the_folder_and_declares_its_kernel_ops) {
  * aligned in one block. At TP2, each rank its own block. */
 TEST(the_raw_operands_point_at_their_tensors_copies) {
     RadModelMeta meta = flash_next_meta();
-    for (int world : {1, 2, 4})   /* TP4 (R87): each rank 12 of the 48 value heads */
+    /* TP4 (R87): each rank 12 of the 48 value heads. TP3 (radiance 1.1.0): 15, 15 and 18, the last rank -- the
+     * one without attention -- taking the extra heads FIRST: ranks 0, 1, 2 start at heads 18, 33, 0. */
+    const int64_t tp3_first[3] = {18, 33, 0};
+    for (int world : {1, 2, 3, 4})
         for (int rank = 0; rank < world; ++rank) {
             RadBuildCtx c = served_ctx(rank, world);
             Env env({{"RADIANCE_RIDGEFILL", "quality"}, {"RADIANCE_RIDGEFILL_ROWSEL_TABLE", "all"}});
@@ -530,7 +533,8 @@ TEST(the_raw_operands_point_at_their_tensors_copies) {
                 /* this rank's value heads of the correction, in the host block, read through its device view */
                 const unsigned char* st = (const unsigned char*)k.st[(size_t)l].raw - kDeviceView;
                 CHECK(st >= (const unsigned char*)up.host && st + heads * 4 <= (const unsigned char*)up.host + up.host_bytes);
-                CHECK(std::memcmp(st, src("st." + L) + rank * heads * 4, (size_t)heads * 4) == 0);
+                const int64_t first = world == 3 ? tp3_first[rank] : rank * m.gcfg.n_head_v;
+                CHECK(std::memcmp(st, src("st." + L) + first * m.gcfg.head_v * m.gcfg.head_k * 4, (size_t)heads * 4) == 0);
                 CHECK(k.st[(size_t)l].rows == m.gcfg.n_head_v && k.st[(size_t)l].cols == m.gcfg.head_v * m.gcfg.head_k);
             }
             const unsigned char* sc = (const unsigned char*)k.score.raw - kDeviceView;
@@ -1251,6 +1255,82 @@ TEST(at_tp4_the_masked_path_issues_the_four_class_moe_with_its_drop) {
         }
 }
 
+/* AT THREE RANKS (radiance 1.1.0, "any world size") the delta-net heads split UNEVENLY -- 48 value heads as
+ * 15, 15, 18, the extra heads FIRST on the rank without attention -- and rank 2 of three is ATTENTION-ZERO (two KV
+ * heads serve an attention world of two): its attention block is one `fill` and it keeps no attention cache. On
+ * every rank a quality pass and a streaming plumb pass are the in-tree step with exactly the masked substitutions,
+ * and each rank's correction covers the heads the in-tree declare gave it: the span it declared on the delta
+ * net's A_log (recorded by the fake builder), which is not rank * heads. */
+TEST(at_tp3_every_rank_masks_through_the_in_tree_layer_on_its_own_uneven_heads) {
+    const int64_t first[3] = {18, 33, 0}, heads[3] = {15, 15, 18};
+    for (const char* mode : {"quality", "plumb"})
+        for (int rank = 0; rank < 3; ++rank) {
+            Pair p;
+            declare_pair(p, mode, rank, 3);
+            REQUIRE_EQ(p.st, RAD_OK);
+            const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
+            const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[rank];
+            CHECK_EQ(m.g.attn_zero, rank == 2);
+            CHECK_EQ(m.gcfg.n_head_v, heads[rank]);
+            CHECK_EQ(k.ad.state.first, first[rank]);
+            CHECK_EQ(k.ad.state.n_head_all, 48);
+            int spans = 0;
+            for (const RecSpan& sp : p.ridgefill.spans) {
+                if (sp.w != m.layers[(size_t)kSplit].gdn.w_a_log) continue;
+                ++spans;
+                CHECK_EQ(sp.lo[0], first[rank]);
+                CHECK_EQ(sp.hi[0], first[rank] + heads[rank]);
+            }
+            CHECK(spans > 0);
+            const bool quality = !std::strcmp(mode, "quality");
+            Batch x = make_step(p.ridgefill, {{128}, 0, 2048});
+            Want w;
+            w.b = 128; w.rho_rows = 128; w.stream = true;
+            w.project = w.correct = w.rho = w.scored = quality;
+            const Run got = run_step(qwen4exp_ridgefill::step, x.b, rank);
+            CHECK_EQ(differ_at(got.issues, masked_expected(x, w, rank)), 0);
+            int applies = 0;
+            for (const RecIssue& i : got.issues) {
+                if (!k.op_apply[(size_t)kSplit] || i.op != k.op_apply[(size_t)kSplit]) continue;
+                ++applies;
+                CHECK_EQ(i.opd[4].rows, heads[rank]);
+            }
+            CHECK_EQ(applies, quality ? 1 : 0);
+            CHECK_EQ(got.device_calls, 0);
+        }
+}
+
+/* AT THREE RANKS EVERY RANK TAKES THE SAME PATH AND ISSUES THE SAME COLLECTIVES. A rank whose all-reduces differ in
+ * number or size from its peers' hangs the step or sums the wrong rows, and the attention-zero rank is the one that
+ * could: it declares no sparse attention, which speed's straddle asks for, and no K/V path, which the lean fill
+ * issues. On each path -- quality masked, speed lean, speed straddle, speed beside decoders -- all three ranks derive
+ * the same path, their all_reduce sizes in order are equal, and no rank issues a null handle. */
+TEST(at_tp3_every_rank_takes_the_same_path_and_issues_the_same_collectives) {
+    struct Case { const char* mode; Shape s; int path; };
+    for (const Case& c : {Case{"quality", {{128}, 0, 2048}, qwen4exp_ridgefill::PATH_MASKED},
+                          Case{"speed", {{128}, 0, 2048}, qwen4exp_ridgefill::PATH_LEAN},
+                          Case{"speed", {{128}, 0, 1984}, qwen4exp_ridgefill::PATH_STRADDLE},
+                          Case{"speed", {{1, 128}, 1, 2048}, qwen4exp_ridgefill::PATH_DECODERS}}) {
+        std::vector<int64_t> sizes[3];
+        for (int rank = 0; rank < 3; ++rank) {
+            Pair p;
+            declare_pair(p, c.mode, rank, 3);
+            REQUIRE_EQ(p.st, RAD_OK);
+            const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[rank];
+            Batch x = make_step(p.ridgefill, c.s);
+            CHECK_EQ(qwen4exp_ridgefill::derive(k, &x.b).path, c.path);
+            const Run got = run_step(qwen4exp_ridgefill::step, x.b, rank);
+            for (const RecIssue& i : got.issues) {
+                CHECK(i.op != 0);
+                if (i.op != 0 && i.op < kLane && p.ridgefill.ops[i.op - 1].op == "all_reduce") sizes[rank].push_back(i.n);
+            }
+        }
+        CHECK(!sizes[0].empty());
+        CHECK(sizes[1] == sizes[0]);
+        CHECK(sizes[2] == sizes[0]);
+    }
+}
+
 /* AND A LAYER THAT KEEPS EXPERTS PLAIN bf16 (two here, in every layer: 510 quantised), whose four classes
  * are 128, 128, 127, 127 experts long -- the one shape where the class tables' lengths differ, so the
  * hand-issued GEMMs must take each class's own count. The protected experts' bf16 GEMMs follow as in
@@ -1389,7 +1469,13 @@ std::vector<RecIssue> straddle_expected(const std::vector<RecIssue>& seg, const 
     out.push_back({k.op_proj[(size_t)l], {brows(m.b_h, b), k.proj_w[(size_t)l], k.proj_b[(size_t)l],
                    RAD_NONE, brows(m.a_x.x, b)}, b});
     out.push_back({k.quant.op, {brows(m.a_x.x, b), brows(m.a_x.q8, b), brow_slice(m.a_x.s8, 0, b, n / 128)}, b});
-    if (lay.full) {
+    if (lay.full && lay.attn.op_fill) {   /* the attention-zero rank (TP3): its zero output over the tail rows */
+        const AttnGatedFP8& a = lay.attn;
+        append(out, issues_by([&](RadCtx* cx) { lay.qsa.step(cx, a.w.h, &bt); }));
+        out.push_back({a.op_fill, {brow_slice(a.w.h.x, b, rows, n)}, rows});
+        if (a.op_ar && !rad::arch::ar_taken(a.g, T, a.ar_out, a.ar_out_take))
+            out.push_back({a.op_ar, {brow_slice(a.w.h.x, b, rows, n), RAD_NONE}, rows * n});
+    } else if (lay.full) {
         const AttnGatedFP8& a = lay.attn;
         const int64_t qw = a.g.q_dim(), hd = a.g.head_dim;
         append(out, issues_by([&](RadCtx* cx) { lay.qsa.step(cx, a.w.h, &bt); }));
@@ -1560,19 +1646,20 @@ TEST(speed_beside_decoders_runs_full_late_blocks_over_the_decoder_rows_only) {
  * the tail-only issues above; the epilogue stock. TP1 and rank 0 of TP2 (writes carry the
  * all-reduce). */
 TEST(a_speed_straddle_runs_its_late_blocks_over_the_tail_rows_only) {
-    for (int world : {1, 2, 4}) {
+    /* rank 2 of three is the attention-zero rank (radiance 1.1.0): its attention is a fill of the tail rows */
+    for (auto [world, rank] : {std::pair<int, int>{1, 0}, {2, 0}, {3, 0}, {3, 2}, {4, 0}}) {
         Pair p;
-        declare_pair(p, "speed", 0, world);
+        declare_pair(p, "speed", rank, world);
         REQUIRE_EQ(p.st, RAD_OK);
-        const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[0];
-        const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[0];
+        const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
+        const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[rank];
         REQUIRE(k.straddle_layers);
         Batch x = make_step(p.ridgefill, {{128}, 0, 1984});
         const qwen4exp_ridgefill::Pass pass = qwen4exp_ridgefill::derive(k, &x.b);
         REQUIRE_EQ(pass.path, qwen4exp_ridgefill::PATH_STRADDLE);
         CHECK_EQ(pass.b, 64);
         CHECK(!pass.stream);
-        const std::vector<RecIssue> stock = run_step(qwen4exp_fp8::step, x.b).issues;
+        const std::vector<RecIssue> stock = run_step(qwen4exp_fp8::step, x.b, rank).issues;
         std::vector<rad_op> reads;
         for (int l = kSplit; l < 8; ++l) reads.push_back(m.layers[(size_t)l].hc_mix.op_read);
         const std::vector<size_t> at = starts(stock, reads, m.mixer.op_read);
@@ -1586,12 +1673,12 @@ TEST(a_speed_straddle_runs_its_late_blocks_over_the_tail_rows_only) {
         }
         for (int l = kSplit; l < 8; ++l)
             append(want, straddle_expected(slice(stock, at[(size_t)(l - kSplit)], at[(size_t)(l - kSplit + 1)]),
-                                           x, l, 64, 0));
+                                           x, l, 64, rank));
         for (size_t i = at.back(); i < stock.size(); ++i) want.push_back(stock[i]);
-        push_hazard(want, x, false);
-        const Run got = run_step(qwen4exp_ridgefill::step, x.b);
+        push_hazard(want, x, false, rank);
+        const Run got = run_step(qwen4exp_ridgefill::step, x.b, rank);
         CHECK_EQ(differ_at(got.issues, want), 0);
-        CHECK(has(got.log, "straddle, stage stock, split)"));
+        CHECK(rank != 0 || has(got.log, "straddle, stage stock, split)"));   /* rank 0 logs the step */
         CHECK_EQ(got.device_calls, 0);
     }
 }
@@ -2680,7 +2767,8 @@ void hold_ridgefill_i8(RadBuilder& b) {
  * each rank's state heads are 48 / world (kernel_test each_ranks_heads_compute_their_slice_of_tp1). */
 TEST(every_rank_at_every_tp_declares_the_full_width_int8_projector) {
     RadModelMeta meta = flash_next_meta();
-    for (int world : {1, 2, 4})
+    const int64_t tp3_heads[3] = {15, 15, 18};   /* 48 value heads over three ranks, the extra on the last */
+    for (int world : {1, 2, 3, 4})
         for (int rank = 0; rank < world; ++rank) {
             RadBuildCtx c = served_ctx(rank, world);
             Env env({{"RADIANCE_RIDGEFILL", "quality"}});
@@ -2711,7 +2799,7 @@ TEST(every_rank_at_every_tp_declares_the_full_width_int8_projector) {
                 if (!k.op_apply[(size_t)l]) continue;
                 ++applies;
                 for (const RecParam& q : ridgefill.ops[k.op_apply[(size_t)l] - 1].p)
-                    if (q.key == "n_head") CHECK_EQ(q.ival, 48 / world);
+                    if (q.key == "n_head") CHECK_EQ(q.ival, world == 3 ? tp3_heads[rank] : 48 / world);
             }
             CHECK_EQ(applies, 3);
         }
