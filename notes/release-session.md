@@ -124,3 +124,17 @@ The first attempt aborted at case 5: the gate's glob found only bf16 map files (
   same 39 files; both `.so`, `ridgefill.json`, all 26 `.safetensors`, VERSION.json, LICENSE, NOTICE and
   chat_template.jinja byte-identical. Only the two README.md files and each package's SHA256SUMS (their README line)
   differ (evidence/r2-repackage/diff.txt in the AI-Work dir). No GPU used.
+
+## 0.1.0-r3 (2026-10-06): the stock-path fix, and READMEs with its numbers
+- Binaries from the frozen home 22c14b1 (notes/stockpath-fix.md): `qwen4exp_fp8.so` c42eb60e...;
+  `ridgefill.so` a63c29bc... is unchanged since r2. Projector data unchanged.
+- The packages that passed the verify session are kept as `dist-ridgefill-0.1.0-r3-e2e-tested/` (cb9ed31f...,
+  88a46a39...). They passed: e2e 0-6, KL rows identical to G13, the stock-path ABCA, and the 32K ABA.
+- `dist-ridgefill-0.1.0-r3/` is the same binaries repackaged from main 7fbc586 with the corrected READMEs:
+  - tools/package.py --home data/home-22c14b1 --projector data/projector-ridgefill-qwen38fn-int8 --version 0.1.0
+    --commit 22c14b14... --radiance-version 1.0.13;
+  - `radiance-ridgefill-0.1.0.tar.gz` **35079a9bb9b86e2d75433d9a17fbabc2f1dc338bd4f11f95df4d7694edf94374**;
+  - `ridgefill-projector-qwen3.8-flash-next-i8.tar.gz` **0ac218bf47bd313b1eaea7bc9708b75a05e2b7a8056dd9324b5c516fe060f77d**.
+- Against the e2e-tested r3, extracted: the same 39 files, and both `.so` byte-identical. Only the two README.md
+  files and each package's SHA256SUMS differ (evidence/r3-repackage/diff.txt in the AI-Work dir, with both
+  README diffs). Every SHA256SUMS was verified. No GPU used. Not uploaded.
