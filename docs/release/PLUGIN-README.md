@@ -6,6 +6,10 @@ using a fitted projector, and computes the last `T` prompt tokens exactly
 (`T` = `RADIANCE_RIDGEFILL_TAIL`, default 2048). The mode is server-wide, set once at
 startup. The shipped projector is INT8 only.
 
+By Dylan Johnston and tcclaviger, Apache-2.0 (see `NOTICE`). Cite with DOI
+[10.5281/zenodo.23179168](https://doi.org/10.5281/zenodo.23179168); BibTeX and the prior work
+RidgeFill builds on are at the end.
+
 ## Requirements
 
 - **Radiance engine:** release `1.0.13`. The plugin checks the engine binary at
@@ -116,12 +120,14 @@ Measured on radiance 1.0.13 with its own `deploy/compose/flashnext.yaml` profile
 The ONLY signal is the startup log. Either the projector matched:
 
 ```
-radiance: qwen4exp_ridgefill: RidgeFill: projector <dir> (found <how>) matches <model>: arch ok, <checks>, <N> warning(s); split <S>, <correction held|no correction>, <MiB> MiB in <files> files
+radiance: qwen4exp_ridgefill: RidgeFill: projector <dir> (found <how>) matches <model>: arch ok, <checks>, <N> warning(s); split <S>, <correction held|no correction>, <MiB> MiB in <files> files; RidgeFill projector <name> by <authors> (<license>, doi:<doi>)
 ```
 
 (`arch/ridgefill_projector.h`; `<how>` is `$RADIANCE_RIDGEFILL_PROJECTOR=<dir>`,
 `beside --model <path> …`, or `beside the resolved model file <path>`. The
-shipped folder reports split 24 with correction held.) Each rank then logs
+shipped folder reports split 24 with correction held, and its credit from
+`ridgefill.json`: `RidgeFill projector ridgefill-projector-qwen3.8-flash-next-i8 by
+Dylan Johnston and tcclaviger (Apache-2.0, doi:10.5281/zenodo.23179168)`.) Each rank then logs
 what it holds, e.g.:
 
 ```
@@ -174,3 +180,46 @@ RidgeFill did not load; check `RADIANCE_HOME` order.
 Porting RidgeFill to another model means writing one adapter against the model-free
 core; the projector folder needs no schema code. The contract, with qwen4exp
 as the worked example, is `docs/ADDING-A-MODEL.md`.
+
+## Credit and prior work
+
+RidgeFill is by **Dylan Johnston** (author) and **tcclaviger** (co-author), released under
+Apache-2.0. Cite it with DOI [10.5281/zenodo.23179168](https://doi.org/10.5281/zenodo.23179168)
+(BibTeX below).
+
+The idea that a long prompt's late-layer caches need not come from running every late layer in
+full on every prompt token is not new:
+
+- **DeepSeek-V4.1-Flash's Causal Encoder-Decoder** (DeepSeek technical report,
+  [arXiv:2609.19969](https://arxiv.org/abs/2609.19969), §2.2) builds the decoder's global KV cache
+  from the encoder's outputs, so most prompt tokens skip the full decoder computation in prefill.
+- **YOCO**, "You Only Cache Once" (Sun et al., 2024, [arXiv:2405.05254](https://arxiv.org/abs/2405.05254)):
+  the self-decoder's KV cache serves the cross-decoder, so prefill can exit early.
+- **kishida's [Q3-8B-KVA-Projector](https://huggingface.co/kishida/Q3-8B-KVA-Projector)**
+  ("Late Layer KV Approximation Projector for Qwen3-8B") is the first retrofit of the idea onto an
+  existing model. "KVA" is that work's name; this project used it only as a working name.
+
+What RidgeFill adds:
+
+- a **closed-form ridge fit**, with no gradient training;
+- maps to the late layers' **inputs**, not to their K/V, so each late layer computes its own K/V
+  and its own recurrent state;
+- an **exact tail**: the last `T` prompt tokens always run every layer exactly;
+- **exact-row selection**: quality mode keeps a selected share of bulk rows exact;
+- the **recurrent-state correction** for the gated delta net's state;
+- the **radiance plugin**: an architecture plugin and a kernel library that serve the stock
+  published model, unmodified.
+
+## Citation
+
+```bibtex
+@software{johnston_ridgefill_2026,
+  author  = {Johnston, Dylan and {tcclaviger}},
+  title   = {RidgeFill},
+  year    = {2026},
+  version = {0.1.0},
+  license = {Apache-2.0},
+  doi     = {10.5281/zenodo.23179168},
+  url     = {https://doi.org/10.5281/zenodo.23179168}
+}
+```

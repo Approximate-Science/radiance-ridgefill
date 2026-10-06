@@ -4,7 +4,6 @@ base_model: StillDeadcode/qwen3.8-next-flash-fp8-iq4r-moe
 tags:
   - radiance
   - ridgefill
-  - ridgefill
   - prefill-acceleration
   - qwen3.8-flash-next
 ---
@@ -15,6 +14,10 @@ Auxiliary projection maps, recurrent terminal-state corrections, and token
 frequency tables for the Radiance RidgeFill plugin (`qwen4exp_ridgefill`) on
 `StillDeadcode/qwen3.8-next-flash-fp8-iq4r-moe`. The plugin is Apache-2.0; this
 projector package is Apache-2.0.
+
+By Dylan Johnston and tcclaviger (see `NOTICE`). Cite with DOI
+[10.5281/zenodo.23179168](https://doi.org/10.5281/zenodo.23179168); BibTeX and the prior work
+RidgeFill builds on are at the end. The credit also travels inside the folder (below).
 
 ## What this folder is (and is not)
 
@@ -41,23 +44,32 @@ The plugin finds the folder on its own, checks every file against `ridgefill.jso
 
 ## Files
 
-`ridgefill.json` (30,385 bytes) lists 27 files, 698,722,493 bytes, with their SHA256 hashes
+`ridgefill.json` (30,833 bytes) lists 27 files, 698,726,607 bytes, with their SHA256 hashes
 (`projector.dtype: "i8"`, layout `i8_row128`, encoding `i8*bf16[1x128]`). `ridgefill.json` SHA256:
-`8b4fc11340aeeec8560f7973786b8f6c44f555f920f10c06299cb2512a2f6308`. Documentation is not listed,
+`795363fa153f0e7e16454af6acabd644709e703d84de0dd9535565226bb51faa`. Documentation is not listed,
 so this card can change without affecting the projector.
+
+**Credit inside the projector.** `ridgefill.json` leads with `name`
+(`ridgefill-projector-qwen3.8-flash-next-i8`), `authors` (`["Dylan Johnston", "tcclaviger"]`),
+`license` (`Apache-2.0`), `doi` (`10.5281/zenodo.23179168`) and `homepage`, and the plugin's startup
+`matches` line prints them. Every `.safetensors` file's `__metadata__` carries `name`, `authors`,
+`license` and `doi` as well. The tensors are byte for byte the ones of the first upload (the
+folder was rebuilt with `tools/ridgefill_projector.py credit`, which checks every tensor; the
+manifest's `rebuilt_from` names that folder's manifest hash, `8b4fc113…`).
 
 | File(s) | Contents | Size |
 |---|---|---|
-| `ridgefill.json` | Manifest (format 1): architecture fingerprints, fit metadata, and SHA256 of every file | 30,468 bytes |
-| `proj8.L24.safetensors` … `proj8.L47.safetensors` (24 files) | Late-layer maps for layers 24–47. Each: `proj.L.codes` int8 `[2560, 10240]`, `proj.L.scale` bf16 `[2560, 80]`, `proj.L.bias` bf16 `[2560]` | 26,629,416 bytes each |
-| `correction.safetensors` | Recurrent GDN terminal-state corrections `st.L` f32 `[48, 128, 128]` for 18 layers (24–26, 28–30, 32–34, 36–38, 40–42, 44–46) | 56,624,584 bytes |
-| `rowsel.safetensors` | Vocabulary frequency tables `score`, `score_none`, `score_all`, f32 `[248320]` | 2,980,120 bytes |
-| `chat_template.jinja` | Parked per-request marker template (not used by this release) | 11,805 bytes |
+| `ridgefill.json` | Manifest (format 1): the credit, architecture fingerprints, fit metadata, and SHA256 of every file | 30,833 bytes |
+| `proj8.L24.safetensors` … `proj8.L47.safetensors` (24 files) | Late-layer maps for layers 24–47. Each: `proj.L.codes` int8 `[2560, 10240]`, `proj.L.scale` bf16 `[2560, 80]`, `proj.L.bias` bf16 `[2560]` | 26,629,560 bytes each |
+| `correction.safetensors` | Recurrent GDN terminal-state corrections `st.L` f32 `[48, 128, 128]` for 18 layers (24–26, 28–30, 32–34, 36–38, 40–42, 44–46) | 56,624,736 bytes |
+| `rowsel.safetensors` | Vocabulary frequency tables `score`, `score_none`, `score_all`, f32 `[248320]` | 2,980,272 bytes |
+| `chat_template.jinja` | Parked per-request marker template (not used by this release) | 12,159 bytes |
+| `LICENSE`, `NOTICE` | Apache-2.0 and its attribution notice (not listed in `ridgefill.json`) | — |
 | `README.md` | This model card (not listed in `ridgefill.json`) | — |
 
 ## How the projector was fitted
 
-The shipped maps are `kva-big-s24`: centered ridge regression with an
+The shipped maps: centered ridge regression (closed form, no gradient training) with an
 unpenalized bias, regularization λ = 0.03 chosen by held-out mean block-input
 cosine. Fitted on 425,789 rows (248,923 raw + 176,866 chat-formatted; chat
 weighted to a 0.5 share) from 151 raw documents + 102 chat copies at row
@@ -114,3 +126,46 @@ through the ring. On the release build (radiance 1.0.13's flashnext profile, two
 - Steps carrying image rows run stock exact; approximation resumes after.
 - The folder's `final` MTP map variant, if present, is used only when
   `RADIANCE_RIDGEFILL_FINAL` is not `off` and MTP drafting is on; default is off.
+
+## Credit and prior work
+
+RidgeFill is by **Dylan Johnston** (author) and **tcclaviger** (co-author), released under
+Apache-2.0. Cite it with DOI [10.5281/zenodo.23179168](https://doi.org/10.5281/zenodo.23179168)
+(BibTeX below).
+
+The idea that a long prompt's late-layer caches need not come from running every late layer in
+full on every prompt token is not new:
+
+- **DeepSeek-V4.1-Flash's Causal Encoder-Decoder** (DeepSeek technical report,
+  [arXiv:2609.19969](https://arxiv.org/abs/2609.19969), §2.2) builds the decoder's global KV cache
+  from the encoder's outputs, so most prompt tokens skip the full decoder computation in prefill.
+- **YOCO**, "You Only Cache Once" (Sun et al., 2024, [arXiv:2405.05254](https://arxiv.org/abs/2405.05254)):
+  the self-decoder's KV cache serves the cross-decoder, so prefill can exit early.
+- **kishida's [Q3-8B-KVA-Projector](https://huggingface.co/kishida/Q3-8B-KVA-Projector)**
+  ("Late Layer KV Approximation Projector for Qwen3-8B") is the first retrofit of the idea onto an
+  existing model. "KVA" is that work's name; this project used it only as a working name.
+
+What RidgeFill adds:
+
+- a **closed-form ridge fit**, with no gradient training;
+- maps to the late layers' **inputs**, not to their K/V, so each late layer computes its own K/V
+  and its own recurrent state;
+- an **exact tail**: the last `T` prompt tokens always run every layer exactly;
+- **exact-row selection**: quality mode keeps a selected share of bulk rows exact;
+- the **recurrent-state correction** for the gated delta net's state;
+- the **radiance plugin**: an architecture plugin and a kernel library that serve the stock
+  published model, unmodified.
+
+## Citation
+
+```bibtex
+@software{johnston_ridgefill_2026,
+  author  = {Johnston, Dylan and {tcclaviger}},
+  title   = {RidgeFill},
+  year    = {2026},
+  version = {0.1.0},
+  license = {Apache-2.0},
+  doi     = {10.5281/zenodo.23179168},
+  url     = {https://doi.org/10.5281/zenodo.23179168}
+}
+```

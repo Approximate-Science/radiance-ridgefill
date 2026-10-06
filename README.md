@@ -9,6 +9,10 @@ library, and `tools/ridgefill_projector.py`, which builds the projector folder t
 The plugin is a model-independent core (`arch/ridgefill_*.h`) and one adapter per model (`arch/qwen4exp_*`);
 adding a model is docs/ADDING-A-MODEL.md.
 
+RidgeFill is by Dylan Johnston and tcclaviger (Apache-2.0, `NOTICE`); cite it with DOI
+[10.5281/zenodo.23179168](https://doi.org/10.5281/zenodo.23179168) (`CITATION.cff`; BibTeX and the prior work
+it builds on at the end of this file).
+
 ## Build
 
 Two inputs: an **installed radiance** and a **source checkout of the same release**. The arch plugin
@@ -71,8 +75,8 @@ python -m pytest tests -q
 ```
 Any test that needs machine-local data is SKIPPED unless you opt in; each skip reason names the env
 var to set. The full set (grep `tests/`): `RIDGEFILL_RESEARCH_ROOT` (a checkout of the research repo the
-refit imports read-only), `RIDGEFILL_TOKENIZER` (a checkpoint directory), `RIDGEFILL_SIDECAR` (a built
-`kva-sidecar.safetensors`), `RIDGEFILL_TEST_TOKENIZER` (a tokenizer directory) and
+refit imports read-only), `RIDGEFILL_TOKENIZER` (a checkpoint directory), `RIDGEFILL_SIDECAR` (a sidecar
+built by `tools/dev/ridgefill_sidecar.py`), `RIDGEFILL_TEST_TOKENIZER` (a tokenizer directory) and
 `RIDGEFILL_TEST_OPERATOR_TEMPLATE` (an operator base chat template). Without them the run is green on the
 suites that fake their inputs.
 
@@ -192,3 +196,46 @@ it was built against. On a mismatch it forwards to the engine's own in-tree Qwen
 off, logged with both releases and the engine's sha256) when that file is on `$RADIANCE_HOME` after this
 plugin's home, and declines otherwise (startup then fails by name; a home given only as `--radiance-home` is
 not visible to a plugin).
+
+## Credit and prior work
+
+RidgeFill is by **Dylan Johnston** (author) and **tcclaviger** (co-author), released under
+Apache-2.0. Cite it with DOI [10.5281/zenodo.23179168](https://doi.org/10.5281/zenodo.23179168)
+(BibTeX below).
+
+The idea that a long prompt's late-layer caches need not come from running every late layer in
+full on every prompt token is not new:
+
+- **DeepSeek-V4.1-Flash's Causal Encoder-Decoder** (DeepSeek technical report,
+  [arXiv:2609.19969](https://arxiv.org/abs/2609.19969), §2.2) builds the decoder's global KV cache
+  from the encoder's outputs, so most prompt tokens skip the full decoder computation in prefill.
+- **YOCO**, "You Only Cache Once" (Sun et al., 2024, [arXiv:2405.05254](https://arxiv.org/abs/2405.05254)):
+  the self-decoder's KV cache serves the cross-decoder, so prefill can exit early.
+- **kishida's [Q3-8B-KVA-Projector](https://huggingface.co/kishida/Q3-8B-KVA-Projector)**
+  ("Late Layer KV Approximation Projector for Qwen3-8B") is the first retrofit of the idea onto an
+  existing model. "KVA" is that work's name; this project used it only as a working name.
+
+What RidgeFill adds:
+
+- a **closed-form ridge fit**, with no gradient training;
+- maps to the late layers' **inputs**, not to their K/V, so each late layer computes its own K/V
+  and its own recurrent state;
+- an **exact tail**: the last `T` prompt tokens always run every layer exactly;
+- **exact-row selection**: quality mode keeps a selected share of bulk rows exact;
+- the **recurrent-state correction** for the gated delta net's state;
+- the **radiance plugin**: an architecture plugin and a kernel library that serve the stock
+  published model, unmodified.
+
+## Citation
+
+```bibtex
+@software{johnston_ridgefill_2026,
+  author  = {Johnston, Dylan and {tcclaviger}},
+  title   = {RidgeFill},
+  year    = {2026},
+  version = {0.1.0},
+  license = {Apache-2.0},
+  doi     = {10.5281/zenodo.23179168},
+  url     = {https://doi.org/10.5281/zenodo.23179168}
+}
+```

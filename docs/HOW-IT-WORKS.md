@@ -17,6 +17,18 @@ selected share of bulk rows stay exact. Because bulk rows feed the delta net's s
 projector, the state at the end of the bulk is off by a roughly constant amount. A fitted per-head
 **correction** `C` (`st.l`) is added at the bulk end and taken back before the next chunk's scan.
 
+**Where the idea comes from, and what is new here.** Building a prompt's late-layer caches without
+running the late layers in full is not new. DeepSeek-V4.1-Flash's Causal Encoder-Decoder (DeepSeek
+technical report, arXiv:2609.19969, §2.2) builds the decoder's global KV cache from the encoder's outputs, so
+most prompt tokens skip the full decoder in prefill; YOCO (Sun et al., 2024, arXiv:2405.05254) caches K/V once,
+in the self-decoder, for the cross-decoder to reuse. kishida's Q3-8B-KVA-Projector
+(https://huggingface.co/kishida/Q3-8B-KVA-Projector, "Late Layer KV Approximation Projector for Qwen3-8B")
+is the first retrofit of the idea onto an existing model; "KVA" is that work's name, used here only as a
+working name. RidgeFill (Dylan Johnston and tcclaviger, doi:10.5281/zenodo.23179168) adds: a closed-form
+ridge fit with no gradient training; maps to the late layers' **inputs**, so each late layer computes its own
+K/V and recurrent state; the exact tail; exact-row selection; the recurrent-state correction; and this
+radiance plugin.
+
 Terms used below:
 
 | term | meaning |
@@ -171,7 +183,7 @@ for the log only. One consequence: a replayed approximate pass prints no `approx
 
 | file | contents | read by |
 |---|---|---|
-| `ridgefill.json` | manifest (format 1): adapter `qwen4exp`, split 24, stream width 10,240, layer kinds, projector dtype (`bf16` or `i8`), the model fingerprint, every listed file's sha256 | `ridgefill_folder.h` `read_folder` |
+| `ridgefill.json` | manifest (format 1): the credit (`name`, `authors`, `license`, `doi`, `homepage`; every `.safetensors` header's `__metadata__` carries the first four too), adapter `qwen4exp`, split 24, stream width 10,240, layer kinds, projector dtype (`bf16` or `i8`), the model fingerprint, every listed file's sha256 | `ridgefill_folder.h` `read_folder` |
 | `proj8.L24.safetensors` … `proj8.L47.safetensors` | int8 maps: `proj.l.codes` i8 [2,560 × 10,240], `proj.l.scale` bf16 per 128 columns, `proj.l.bias` bf16 (the bf16 folder: `proj.L<l>` with `proj.l.weight`) | `check_map`, relaid out at load by libr4d's own layout hook (`ridgefill_int8.h`) |
 | `correction.safetensors` | `st.l` f32 [48 heads × 128 × 128] for the 18 late delta-net layers (each rank takes its own heads) | `plan_rank` |
 | `rowsel.safetensors` | `score` (the class table) and the controls `score_none`, `score_all`, f32 [vocab] | quality only (`RADIANCE_RIDGEFILL_ROWSEL_TABLE`) |
@@ -199,7 +211,9 @@ Any missing or corrupt file, malformed tensor or duplicate name **refuses** the 
 
 On success one line reads, for example, `RidgeFill: projector … matches qwen4exp: arch ok, metadata 11/11,
 tokenizer ok, encodings 489/489, anchors 3/3, 0 warning(s); split 24, correction held, 666.4 MiB in 27
-files` (notes/release-session.md). That line is the only sign that RidgeFill is active.
+files; RidgeFill projector ridgefill-projector-qwen3.8-flash-next-i8 by Dylan Johnston and tcclaviger
+(Apache-2.0, doi:10.5281/zenodo.23179168)` (notes/release-session.md; the credit is the manifest's, `credit_of`,
+and a manifest without one prints none). That line is the only sign that RidgeFill is active.
 
 **Why documentation is not in the manifest.** A model hub serves a repo's `README.md` as its model card,
 so the README a user downloads differs from the one the builder wrote. The loader verifies exactly the

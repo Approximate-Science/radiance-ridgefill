@@ -1,5 +1,7 @@
 # NOTES — radiance-ridgefill lab notebook
 
+> KVA was the working name; the method is RidgeFill. (Paths below keep their on-disk names, so some still say `kva`.)
+
 Provenance on every table: plugin commit, radiance `140987f` (v1.0.8), container sha256, flags, date.
 Container: `qwen3.8-next-flash-fp8-iq4r-moe.rad` from HF `StillDeadcode/qwen3.8-next-flash-fp8-iq4r-moe`
 (LFS sha256 `0af5e96244e80c21ac8edca1719dae49b8a201b94a2f3994c3e24026ceaa4d20`, 121,969,901,568 B).
