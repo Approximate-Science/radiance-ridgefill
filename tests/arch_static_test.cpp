@@ -3239,6 +3239,37 @@ TEST(a_folder_is_read_and_a_damaged_one_refused_by_name) {
     }
 }
 
+/* A HUB'S README IS NOT THE FOLDER'S (release, 2026-10-06): on Hugging Face a repo's README.md is its model card, so a
+ * folder downloaded into <model dir>/projector carries a README nobody hashed. tools/kva_projector.py lists no
+ * documentation in kva.json (is_doc, `reseal` for existing folders), and the loader verifies exactly what is listed:
+ * a model card in place of README.md, or no README at all, still reads; one changed weight byte is still refused by
+ * name. */
+TEST(a_folder_reads_whatever_its_unlisted_readme_holds_and_still_refuses_a_changed_weight) {
+    TempDir dir;
+    REQUIRE(!dir.path.empty());
+    const std::string a = safetensors({{"proj.4.weight", "BF16", {2, 8}, 2}, {"proj.4.bias", "BF16", {2}, 2}});
+    const std::string b = safetensors({{"score", "F32", {5}, 4}});
+    const std::string unlisted = "{\"proj.L4.safetensors\": \"" + sha_of(a) + "\", \"rowsel.safetensors\": \"" + sha_of(b) + "\"}";
+    const auto read = [&](std::string* why) {
+        qwen4exp_kva::Folder f;
+        f.place.dir = dir.path.string();
+        why->clear();
+        return qwen4exp_kva::read_folder(&f, why);
+    };
+    std::string why;
+    write_folder(dir.path, unlisted);
+    CHECK(read(&why));
+    std::ofstream(dir.path / "README.md") << "---\nlicense: apache-2.0\nbase_model: Qwen/Qwen3.8-Flash-Next\n---\n# the model card";
+    CHECK(read(&why));
+    std::filesystem::remove(dir.path / "README.md");
+    CHECK(read(&why));
+    std::string changed = a;
+    changed[changed.size() - 1] ^= 0x01;
+    std::ofstream(dir.path / "proj.L4.safetensors", std::ios::binary) << changed;
+    CHECK(!read(&why));
+    CHECK(has(why, "proj.L4.safetensors is corrupt"));
+}
+
 /* Discovery: RADIANCE_KVA_PROJECTOR wins and names itself; otherwise projector/ beside the model
  * file this process has MAPPED (the test maps the tiny container, as the engine maps its model);
  * with neither there is no folder, and the places looked at are said. */

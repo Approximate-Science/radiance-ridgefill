@@ -139,7 +139,7 @@ def test_the_manifest_carries_the_fingerprint_and_every_files_hash(built):
     assert m["model"]["anchors"]["blk.1.ffn_hc_norm.weight"] == r.entry_sha256("blk.1.ffn_hc_norm.weight")
     assert m["model"]["anchors"]["blk.1.attn_hc_norm.weight"] != m["model"]["anchors"]["blk.1.ffn_hc_norm.weight"]
     assert m["tail"]["table"] == [1024, 2048] and m["rowsel"]["share_table"] == [0.1, 0.25]
-    assert set(m["files"]) == {p.name for p in out.iterdir()} - {"kva.json"}
+    assert set(m["files"]) == {p.name for p in out.iterdir()} - {"kva.json", "README.md"}   # documentation unlisted
     for name, digest in m["files"].items():
         assert hashlib.sha256((out / name).read_bytes()).hexdigest() == digest
     assert m["marker"]["template_source_sha256"] == hashlib.sha256(b"{{ messages }}").hexdigest()
@@ -219,7 +219,7 @@ def test_int8_folder_keeps_every_other_file_and_names_its_source(tmp_path):
     assert m["projector"]["dtype"] == "i8" and m["projector"]["encoding"] == "i8*bf16[1x128]"
     assert m["projector"]["files"] == {"4": "proj8.L4.safetensors", "5": "proj8.L5.safetensors"}
     assert m["projector"]["source"]["kva_json_sha256"] == P.S.sha256_file(src / "kva.json")
-    assert sorted(m["files"]) == ["README.md", "proj8.L4.safetensors", "proj8.L5.safetensors"]
+    assert sorted(m["files"]) == ["proj8.L4.safetensors", "proj8.L5.safetensors"]   # README copied, never listed
     assert all(m["files"][n] == P.S.sha256_file(out / n) for n in m["files"])
     assert (out / "README.md").read_text() == "hello"
     with safe_open(str(out / "proj8.L5.safetensors"), "pt") as f:
@@ -262,3 +262,27 @@ def test_final_adds_the_mtp_map_from_the_fitted_source_only(tmp_path):
     (src / "kva.json").write_text(json.dumps(manifest))
     with pytest.raises(SystemExit):   # no final map in it
         P.main(["final", "--from", str(src), "--proj", str(nofinal), "--out", str(tmp_path / "y")])
+
+
+def test_reseal_unlists_documentation_and_touches_no_file(tmp_path):
+    """reseal: an existing folder whose kva.json lists README.md is rewritten to list everything but documentation;
+    every other file is byte-identical and the rest of the manifest is unchanged. A changed weight is refused."""
+    folder = tmp_path / "p"
+    folder.mkdir()
+    P.save({"proj.4.weight": torch.randn(4, 8).to(torch.bfloat16)}, folder / "proj8.L4.safetensors")
+    (folder / "README.md").write_text("install flow")
+    (folder / "notes.md").write_text("x")
+    manifest = {"format": 1, "model": {"anchors": {"a": "00"}}, "files": {n: P.S.sha256_file(folder / n) for n in
+                                                                           ("README.md", "notes.md", "proj8.L4.safetensors")}}
+    (folder / "kva.json").write_text(json.dumps(manifest))
+    before = {n: P.S.sha256_file(folder / n) for n in ("README.md", "notes.md", "proj8.L4.safetensors")}
+    assert P.main(["reseal", "--folder", str(folder)]) == 0
+    m = json.loads((folder / "kva.json").read_text())
+    assert m["files"] == {"proj8.L4.safetensors": before["proj8.L4.safetensors"]}
+    assert {k: v for k, v in m.items() if k != "files"} == {k: v for k, v in manifest.items() if k != "files"}
+    assert before == {n: P.S.sha256_file(folder / n) for n in before}
+    (folder / "README.md").write_text("---\nlicense: apache-2.0\n---\n# a model card")   # the hub's README: still fine
+    assert P.main(["reseal", "--folder", str(folder)]) == 0
+    P.save({"proj.4.weight": torch.zeros(4, 8).to(torch.bfloat16)}, folder / "proj8.L4.safetensors")
+    with pytest.raises(SystemExit):
+        P.main(["reseal", "--folder", str(folder)])

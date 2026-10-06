@@ -80,3 +80,29 @@ The first attempt aborted at case 5: the gate's glob found only bf16 map files (
   .so).
 - The first 0.1.0 run filled /var/mnt/qwen-storage: the prefix-cache disk tier was written under evidence/, so the
   needle writes failed (ENOSPC). Caches now go on the root disk.
+
+## Distribution fix (2026-10-06): the projector manifest lists no documentation; final packages
+- Bug: on Hugging Face the repo's README.md is the model card, but kva.json hashed the folder's own README.md, so a
+  downloaded folder would have been REFUSED. The loader verifies only listed files (arch/kva_folder.h), so the
+  plugin is unchanged.
+- tools/kva_projector.py lists no *.md and gains `reseal`; tools/package.py ships docs/release/PLUGIN-README.md and
+  PROJECTOR-MODEL-CARD.md as the READMEs and refuses a manifest that lists documentation (commit 2b5e681).
+- Static case: a model card or no README reads, a changed weight is refused (68 cases, 1,144,180 checks).
+  pytest 212 passed, 33 skipped.
+- data/projector-qwen38fn-int8 resealed: kva.json 5b699e27…a85ae -> **8b4fc11340aeeec8560f7973786b8f6c44f555f920f10c06299cb2512a2f6308**.
+  Only README.md left the list, every other field is equal, and all 28 other files are byte-identical
+  (evidence/release/reseal-{before,after}.sha256, kva.json.before-reseal).
+- **dist-final/** (package.py from 81001db = main caa6498 + this fix; frozen home a4d8f16, full commit sha):
+  - `radiance-kva-0.1.0.tar.gz` **9e000c16f65058c5dbeb5e80da4031ee9d6884a6e3c3b41d5c7198e0198549b4**;
+  - `projector-qwen3.8-flash-next-i8.tar.gz` **a4119ed9168427d070a41f133d6848dced63402052cce1ac9fd80262414adf12**;
+  - `qwen4exp_fp8.so` 754f347c…a619 and `kva.so` 877630b3…4915: byte-identical to the e2e-tested packages, as is
+    VERSION.json;
+  - the only differences from the tested packages: the two README.md files, the projector's kva.json, and each
+    package's SHA256SUMS.
+- Fresh-engine check of dist-final (01:22-01:28Z, release profile, evidence/release/final-check/session.log):
+  - off ident == the gate's stock baseline;
+  - quality: "matches qwen4exp: arch ok, metadata 11/11, tokenizer ok, encodings 489/489, anchors 3/3, 0 warning(s)"
+    with the model card as README.md, 27 files, 14 approximate steps on a 16K prompt;
+  - one flipped byte in proj8.L24.safetensors: "REFUSED: proj8.L24.safetensors is corrupt …", serving stock, 0
+    approximate steps, ident == stock;
+  - kernel log clean.

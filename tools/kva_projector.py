@@ -13,8 +13,8 @@ written to it. Files written (L = the projector's layers, S the lowest):
   correction.safetensors  st.L [heads, V, K] f32 per delta-net layer (cat of the per-rank fits, rank 0's heads first)
   rowsel.safetensors      score / score_none / score_all [vocab] f32 (the class table and its two controls)
   chat_template.jinja     the model's own template with the kva marker block in front (tools/kva_template.py merge)
-  README.md               the install flow
-  kva.json                the manifest: layout, defaults, the model fingerprint, every file's sha256
+  README.md               the install flow (NOT in the manifest: documentation is never hashed, see is_doc)
+  kva.json                the manifest: layout, defaults, the model fingerprint, every other file's sha256
 
 THE FINGERPRINT (arch/kva_match.h reads it; Dylan's DD-K split):
   cannot run if different  -> arch_id, `meta` (the model's own metadata values, as the engine prints them),
@@ -206,6 +206,23 @@ The projector is streamed from host memory: it costs the cards two one-layer sta
 """
 
 
+def is_doc(name):
+    """Documentation is never listed in kva.json's files: a hub serves the repo's README.md as its model card, so the
+    README a user downloads is not the one written here, and a hashed README would make the loader refuse a correct
+    folder (arch/kva_folder.h verifies exactly the listed files and ignores the rest)."""
+    return name.lower().endswith(".md")
+
+
+def hashed(folder, names):
+    """The manifest's `files`: every listed name that is not documentation, with its sha256."""
+    return {name: S.sha256_file(Path(folder) / name) for name in sorted(names) if not is_doc(name)}
+
+
+def copy_docs(src, out):
+    for doc in sorted(p for p in Path(src).iterdir() if p.is_file() and is_doc(p.name)):
+        shutil.copyfile(doc, Path(out) / doc.name)
+
+
 def build(args):
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -234,7 +251,7 @@ def build(args):
                     ("tokenizer_json", Path(args.tokenizer) / "tokenizer.json"))}},
     }
     files = sorted(p.name for p in out.iterdir() if p.is_file() and p.name != "kva.json")
-    manifest["files"] = {name: S.sha256_file(out / name) for name in files}
+    manifest["files"] = hashed(out, files)
     (out / "kva.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
     total = sum((out / n).stat().st_size for n in files) + (out / "kva.json").stat().st_size
     print(f"wrote {out}: {len(files) + 1} files, {total} bytes ({total / 2**30:.3f} GiB); model {rad.name}, "
@@ -273,11 +290,12 @@ def int8(args):
     kept = [n for n in manifest["files"] if n not in proj["files"].values()]
     for name in kept:
         shutil.copyfile(src / name, out / name)
+    copy_docs(src, out)
     manifest["projector"] = {"dtype": "i8", "layout": "i8_row128", "encoding": "i8*bf16[1x128]",
                              "files": files, "source": {"folder": src.name,
                                                         "kva_json_sha256": S.sha256_file(src / "kva.json")}}
     names = sorted(kept + list(files.values()))
-    manifest["files"] = {name: S.sha256_file(out / name) for name in names}
+    manifest["files"] = hashed(out, names)
     (out / "kva.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
     total = sum((out / n).stat().st_size for n in names) + (out / "kva.json").stat().st_size
     print(f"wrote {out}: {len(names) + 1} files, {total} bytes ({total / 2**30:.3f} GiB); {len(files)} maps i8*bf16[1x128], "
@@ -304,11 +322,34 @@ def final(args):
     out.mkdir(parents=True, exist_ok=True)
     for name in manifest["files"]:
         shutil.copyfile(src / name, out / name)
+    copy_docs(src, out)
     save({"final.weight": t[:, :-1], "final.bias": t[:, -1]}, out / "final.safetensors")
     manifest["final"] = {"file": "final.safetensors", "dtype": "bf16", "source_sha256": got}
-    manifest["files"]["final.safetensors"] = S.sha256_file(out / "final.safetensors")
+    manifest["files"] = hashed(out, list(manifest["files"]) + ["final.safetensors"])
     (out / "kva.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
     print(f"wrote {out}: {src.name} + final.safetensors ({(out / 'final.safetensors').stat().st_size} bytes)")
+
+
+def reseal(args):
+    """Rewrite an existing folder's kva.json so it lists no documentation (is_doc), touching no other file: every listed
+    file that stays listed is first checked against the manifest's own hash (a changed weight is refused, never
+    re-blessed), the fingerprint, anchors and every other field are kept as they are."""
+    folder = Path(args.folder)
+    path = folder / "kva.json"
+    old = path.read_bytes()
+    manifest = json.loads(old)
+    for name, digest in manifest["files"].items():
+        if is_doc(name):
+            continue
+        got = S.sha256_file(folder / name)
+        if got != digest:
+            raise SystemExit(f"{folder / name} hashes {got[:12]}..., the manifest says {digest[:12]}...: not resealing a changed folder")
+    dropped = sorted(n for n in manifest["files"] if is_doc(n))
+    manifest["files"] = {n: d for n, d in manifest["files"].items() if not is_doc(n)}
+    new = (json.dumps(manifest, indent=1) + "\n").encode()
+    path.write_bytes(new)
+    print(f"resealed {folder}: kva.json {hashlib.sha256(old).hexdigest()} -> {hashlib.sha256(new).hexdigest()}; "
+          f"no longer listed: {', '.join(dropped) or 'nothing'}; {len(manifest['files'])} files listed, none touched")
 
 
 def main(argv=None):
@@ -330,8 +371,12 @@ def main(argv=None):
     fm.add_argument("--from", required=True, help="a projector folder")
     fm.add_argument("--proj", required=True, help="the projector safetensors the folder was fitted from (holds `final`)")
     fm.add_argument("--out", required=True, help="the folder to write (created)")
+    rs = sub.add_parser("reseal", help="rewrite an existing folder's kva.json without documentation; no file touched")
+    rs.add_argument("--folder", required=True, help="a projector folder")
     args = ap.parse_args(argv)
-    if args.command == "final":
+    if args.command == "reseal":
+        reseal(args)
+    elif args.command == "final":
         final(args)
     elif args.command == "int8":
         int8(args)
