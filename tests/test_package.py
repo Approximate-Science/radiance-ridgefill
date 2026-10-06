@@ -102,7 +102,7 @@ def make_projector(projector: Path, dtype: str = "bf16") -> Path:
     files["correction.safetensors"] = sha256_file(projector / "correction.safetensors")
     files["rowsel.safetensors"] = sha256_file(projector / "rowsel.safetensors")
     files["chat_template.jinja"] = sha256_file(projector / "chat_template.jinja")
-    files["README.md"] = sha256_file(projector / "README.md")
+    # README.md is documentation: written beside the files, never listed (tools/kva_projector.py is_doc)
     manifest = {"format": 1, "plugin_min_version": "0.3.0", "adapter": "qwen4exp",
                 "adapter_abi": 1, "split": 24, "files": files,
                 "projector": {"dtype": dtype, "layout": "plain_nk",
@@ -120,6 +120,11 @@ def make_repo(dst: Path, with_license: bool = True) -> Path:
     shutil.copyfile(PACKAGE, tools / "package.py")
     shutil.copyfile(TEMPLATE_TOOL, tools / "kva_template.py")
     (dst / "README.md").write_text("# radiance-kva (test repo README)\n", encoding="utf-8")
+    (dst / "docs" / "release").mkdir(parents=True)
+    (dst / "docs" / "release" / "PLUGIN-README.md").write_text("# radiance-kva plugin (release README)\n",
+                                                                encoding="utf-8")
+    (dst / "docs" / "release" / "PROJECTOR-MODEL-CARD.md").write_text(
+        "---\nlicense: apache-2.0\n---\n# KVA projector (model card)\n", encoding="utf-8")
     if with_license:
         (dst / "LICENSE").write_text("MIT test license\n", encoding="utf-8")
     return dst
@@ -187,21 +192,24 @@ def test_layout_and_sums_no_template_by_default(inputs, tmp_path):
     assert (plugin / "architectures" / "qwen4exp_fp8.so").is_file()
     assert (plugin / "kernels" / "kva.so").is_file()
     assert (plugin / "README.md").read_text(encoding="utf-8") == \
-        (inputs["repo"] / "README.md").read_text(encoding="utf-8")
+        (inputs["repo"] / "docs" / "release" / "PLUGIN-README.md").read_text(encoding="utf-8")
     assert (plugin / "LICENSE").is_file()
     assert (plugin / "VERSION.json").is_file()
     check_sums(plugin)
 
     projector = out / "projector-qwen3.8-flash-next-bf16"     # named by the manifest's dtype
     assert projector.is_dir()
-    # an exact copy: every input file, byte-identical, nothing missing or extra
-    # (LICENSE and SHA256SUMS are the two additions packaging makes on top)
-    for name in sorted(p.name for p in inputs["projector"].iterdir()):
+    # an exact copy of every non-documentation file, byte-identical, nothing missing or extra; README.md is the
+    # model card (LICENSE and SHA256SUMS are the other two additions packaging makes on top)
+    for name in sorted(p.name for p in inputs["projector"].iterdir() if p.name != "README.md"):
         assert (projector / name).is_file(), name
         assert sha256_file(projector / name) == sha256_file(inputs["projector"] / name), name
     assert sorted(p.name for p in projector.iterdir()
                   if p.name not in ("SHA256SUMS", "LICENSE")) == \
         sorted(p.name for p in inputs["projector"].iterdir())
+    assert (projector / "README.md").read_bytes() == \
+        (inputs["repo"] / "docs" / "release" / "PROJECTOR-MODEL-CARD.md").read_bytes()
+    assert "README.md" not in json.loads((projector / "kva.json").read_text(encoding="utf-8"))["files"]
     assert (projector / "LICENSE").read_bytes() == \
         (inputs["repo"] / "LICENSE").read_bytes()
     sums_lines = (projector / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
@@ -230,10 +238,12 @@ def test_int8_projector_folder_names_the_package_int8(inputs, tmp_path):
     projector = out / "projector-qwen3.8-flash-next-int8"
     assert projector.is_dir()
     assert not (out / "projector-qwen3.8-flash-next-bf16").exists()
-    # an exact copy of the int8 folder, byte-identical, nothing missing or extra
-    for name in sorted(p.name for p in inputs["projector_int8"].iterdir()):
+    # an exact copy of the int8 folder's non-documentation files; README.md is the model card
+    for name in sorted(p.name for p in inputs["projector_int8"].iterdir() if p.name != "README.md"):
         assert (projector / name).is_file(), name
         assert sha256_file(projector / name) == sha256_file(inputs["projector_int8"] / name), name
+    assert (projector / "README.md").read_bytes() == \
+        (inputs["repo"] / "docs" / "release" / "PROJECTOR-MODEL-CARD.md").read_bytes()
     check_sums(projector)
     assert (out / "projector-qwen3.8-flash-next-int8.tar.gz").is_file()
     dist_sums = (out / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
@@ -557,3 +567,14 @@ def test_deterministic_tar_function_is_pure(pkg, tmp_path):
     with tarfile.open(tmp_path / "a.tar.gz") as tar:
         names = [m.name for m in tar.getmembers()]
     assert names == ["src", "src/d", "src/d/y.txt", "src/x.txt"]
+
+def test_projector_manifest_listing_documentation_refuses_with_the_reseal_hint(inputs, tmp_path):
+    """A kva.json that hashes README.md would be refused on a user's machine once the hub serves the model card as
+    README.md: packaging refuses it by name and names the fix."""
+    projector = inputs["projector"]
+    manifest = json.loads((projector / "kva.json").read_text(encoding="utf-8"))
+    manifest["files"]["README.md"] = sha256_file(projector / "README.md")
+    (projector / "kva.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
+    result = run_packager(inputs, tmp_path / "dist", expect_rc=None)
+    assert result.returncode != 0
+    assert "lists documentation (README.md)" in result.stderr and "reseal" in result.stderr

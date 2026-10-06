@@ -14,13 +14,16 @@ the chat-template package is NOT built by default -- its code path stays behind 
 
 Produces, under --out:
   radiance-kva-<version>/        architectures/qwen4exp_fp8.so, kernels/kva.so, README.md
-                                 (this repo's), LICENSE (the repo's), VERSION.json, SHA256SUMS
-  projector-qwen3.8-flash-next-<dtype>/  an exact copy of the projector folder (its kva.json
-                                 hashes verified BEFORE copying; a mismatch refuses by
-                                 name), named after the dtype its own manifest carries in
+                                 (docs/release/PLUGIN-README.md), LICENSE (the repo's), VERSION.json,
+                                 SHA256SUMS
+  projector-qwen3.8-flash-next-<dtype>/  an exact copy of the projector folder's listed files
+                                 (its kva.json hashes verified BEFORE copying; a mismatch refuses
+                                 by name), named after the dtype its own manifest carries in
                                  projector.dtype -- bf16 or the int8 folder
-                                 tools/kva_projector.py int8 builds, never hard-coded --
-                                 + LICENSE (the repo's) + SHA256SUMS
+                                 tools/kva_projector.py int8 builds, never hard-coded -- with
+                                 README.md = docs/release/PROJECTOR-MODEL-CARD.md (the hub's model
+                                 card: documentation is never in kva.json, and a manifest that
+                                 lists any is refused -- reseal it) + LICENSE (the repo's) + SHA256SUMS
   kva-chat-template/             ONLY with --with-template: kva_template.py, the marker spec,
                                  a pre-merged template (kva_template.py merge of
                                  --base-template), a README, LICENSE (the repo's), SHA256SUMS
@@ -231,7 +234,13 @@ def verify_projector(projector: Path) -> dict:
     on_disk = {p.name: p for p in projector.iterdir()}
     for name in sorted(p for p in on_disk if not on_disk[p].is_file()):
         die(f"{projector / name}: not a regular file (the projector folder is files only)")
-    extra = sorted(set(on_disk) - set(files) - {"kva.json"})
+    listed_docs = sorted(n for n in files if n.lower().endswith(".md"))
+    if listed_docs:
+        die(f"the projector manifest {manifest_path} lists documentation ({', '.join(listed_docs)}): a hub serves the "
+            f"repo's README.md as its model card, so a hashed README is refused on a user's machine; run "
+            f"tools/kva_projector.py reseal --folder {projector} first")
+    # documentation is never listed (tools/kva_projector.py is_doc): the projector package's README.md is the model card
+    extra = sorted(set(on_disk) - set(files) - {"kva.json"} - {n for n in on_disk if n.lower().endswith(".md")})
     if extra:
         die(f"the projector manifest {manifest_path} does not list: {', '.join(extra)}")
     for name in sorted(files):
@@ -401,7 +410,8 @@ def package(args: argparse.Namespace) -> int:
                             "--template-spec (kva-marker-spec.json)")
         base = require_file(Path(args.base_template),
                             "--base-template (the model's chat template)")
-    readme = require_file(repo / "README.md", "the repo README")
+    readme = require_file(repo / "docs" / "release" / "PLUGIN-README.md", "the plugin package's README")
+    card = require_file(repo / "docs" / "release" / "PROJECTOR-MODEL-CARD.md", "the projector model card")
     license_ = require_file(repo / "LICENSE", "the repo LICENSE")
     template_tool = require_file(repo / "tools" / "kva_template.py", "the template tool")
 
@@ -455,7 +465,9 @@ def package(args: argparse.Namespace) -> int:
     #      on the load path)
     projector_dir.mkdir()
     for path in sorted(projector.iterdir()):
-        copy_file(path, projector_dir / path.name)
+        if not path.name.lower().endswith(".md"):   # the folder's own notes give way to the model card
+            copy_file(path, projector_dir / path.name)
+    copy_file(card, projector_dir / "README.md")
     copy_file(license_, projector_dir / "LICENSE")
     write_sums(projector_dir)
 
