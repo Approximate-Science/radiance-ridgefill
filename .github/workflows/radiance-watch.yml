@@ -9,8 +9,9 @@
 # Every radiance file under abi/, arch/common/ and arch/qwen4exp_fp8/ that changed since the pinned release
 # (RADIANCE_VERSION) is a ::warning:: annotation, compatible or not.
 #
-# GitHub Actions syntax, kept to the subset Forgejo / Codeberg Actions also runs: one ubuntu job,
-# actions/checkout and shell steps; the report upload picks the artifact action each forge supports.
+# GitHub Actions: one ubuntu job, actions/checkout and shell steps. (A Forgejo / Codeberg copy needs
+# actions/upload-artifact@v3 for the report; GitHub refuses any job that names v3, even in a skipped step,
+# so this file names v4 only -- the first runs on GitHub, 2026-10-06, failed at job setup on that.)
 name: radiance-watch
 
 on:
@@ -87,16 +88,9 @@ jobs:
         run: scripts/update_radiance.sh "${{ steps.rel.outputs.tag }}" --host-only --ci
 
       # The report and every log: data/update-<release>/ (summary.txt, report.md, build and test logs).
-      - name: Report (GitHub)
-        if: always() && github.server_url == 'https://github.com'
+      - name: Report
+        if: always()
         uses: actions/upload-artifact@v4
-        with:
-          name: radiance-watch-${{ steps.rel.outputs.tag }}
-          path: data/update-*/
-          if-no-files-found: warn
-      - name: Report (Forgejo / Codeberg)
-        if: always() && github.server_url != 'https://github.com'
-        uses: actions/upload-artifact@v3
         with:
           name: radiance-watch-${{ steps.rel.outputs.tag }}
           path: data/update-*/
