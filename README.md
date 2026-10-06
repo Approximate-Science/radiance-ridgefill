@@ -1,5 +1,7 @@
 # radiance-ridgefill
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23179168.svg)](https://doi.org/10.5281/zenodo.23179168)
+
 RidgeFill prefill for radiance's Qwen3.8-Flash-Next (`qwen4exp`), as plugins: an architecture
 plugin that shadows the in-tree `qwen4exp_fp8.so` (plugin name `qwen4exp_ridgefill`), the `ridgefill.so` kernel
 library, and `tools/ridgefill_projector.py`, which builds the projector folder the plugin loads from
