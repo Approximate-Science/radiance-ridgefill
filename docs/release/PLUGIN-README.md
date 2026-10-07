@@ -12,7 +12,7 @@ RidgeFill builds on are at the end.
 
 ## Requirements
 
-- **Radiance engine:** release `1.2.2` (commit ac79f4d). The plugin checks the engine binary at
+- **Radiance engine:** release `1.2.3` (commit 05af4db). The plugin checks the engine binary at
   startup and forwards to the engine's own architecture (RidgeFill off) or refuses to
   start on a mismatch; see Troubleshooting.
 - **Base model:** the stock published container
@@ -35,7 +35,7 @@ RidgeFill builds on are at the end.
 2. **Download the plugin** from the GitHub release built for your radiance release (each build targets one
    radiance release, named in the tag; on any other the plugin turns itself off, code RF-201):
    ```sh
-   TAG=v0.1.0-radiance-1.2.2
+   TAG=v0.1.0-radiance-1.2.3
    URL=https://github.com/Approximate-Science/radiance-ridgefill/releases/download/$TAG
    curl -fLO $URL/radiance-ridgefill-0.1.0.tar.gz && curl -fLO $URL/SHA256SUMS
    sha256sum -c SHA256SUMS && tar -xzf radiance-ridgefill-0.1.0.tar.gz   # <plugin dir> = radiance-ridgefill-0.1.0/
@@ -189,7 +189,7 @@ files against their hashes (`--projector <dir>`). Every message RidgeFill can pr
 - Missing or incompatible projector: the server runs stock (see the `serving
   stock` lines above). A tokenizer or geometry mismatch refuses by name;
   quantization or anchor differences warn and run.
-- Engine other than 1.2.2: forwarded to the in-tree architecture (RidgeFill off) or
+- Engine other than 1.2.3: forwarded to the in-tree architecture (RidgeFill off) or
   refused at startup, never silently approximated. Forwarding needs the engine's own
   in-tree `qwen4exp_fp8.so` on `$RADIANCE_HOME` behind this plugin's home; a home given
   only as `--radiance-home` is invisible to plugins, so the start then fails by name.
@@ -198,7 +198,7 @@ files against their hashes (`--projector <dir>`). Every message RidgeFill can pr
 - Radiance's own MTP drafting works with the plugin; the plugin's optional
   `final` map only applies when the folder holds it and MTP is on.
 - Prefix cache behaves like stock; see the hazard counter above.
-- YaRN (`--rope-scaling yarn:...`, radiance 1.2.2): the plugin issues the engine's own rotary ops, so YaRN
+- YaRN (`--rope-scaling yarn:...`, radiance 1.2.2+): the plugin issues the engine's own rotary ops, so YaRN
   reaches its path too, but the projector was fitted without YaRN and its quality under it is unmeasured.
 
 ## For model authors
