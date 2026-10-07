@@ -1,7 +1,8 @@
 # notes/rebase-1.2.2.md -- the plugin on radiance 1.2.2 (ac79f4d, seen upstream 2026-10-07 11:43Z): NOT MERGED
 
-**Status: correct, but its stock-path cost reads at the ~1% line (quality +1.20% pooled, +0.98% over the ABCA pair),
-up from +0.35-0.42% on 1.2.1. Held on this branch until Dylan decides or the cause is found; main stays on 1.2.1.**
+**Status: correct. The gate's stock-path reading (quality +1.20%) is engine-side measurement variance, not a plugin
+change ("Correction" below): held-normalised the plugin costs ~+0.5%, as on 1.0.13-1.2.1. Kept on this branch for
+Dylan's decision; main stays on 1.2.1.**
 
 ## What 1.2.2 changed, and what it means here
 | change | here |
@@ -41,3 +42,22 @@ VRAM against flex that 1.2.1 did not (speed is unchanged). Quality ends 107 MiB 
 streams 1.2-1.4% more, and prefills short prompts +1.2% slower. Plugin-side candidates: find what quality allocates
 that 1.2.2 now measures as held (masked-path / row-table buffers?) and move it into the activation arena the engine
 lends to experts at small steps, or shrink it; then re-gate the stock path.
+
+## Correction: the cause is 1.2.2's startup measurement, not the plugin
+
+The table above reads as if 1.2.2 charged quality-mode VRAM against the expert cache. It does not. Per server,
+"already held" (the engine's startup measurement) plus flex is nearly constant:
+
+| server | 1.2.1 held / flex / sum (MiB) | 1.2.2 held / flex / sum (MiB) |
+|---|---|---|
+| stock | 376.4 / 4107 / 4483 | **343.0** / 4147 / 4490 |
+| speed | 375.6 / 4081 / 4457 | 371.5 / 4081 / 4453 |
+| quality | 375.6 / 4081 / 4457 | **404.9** / 4040 / 4445 |
+| quality2 | 375.5 / 4081 / 4457 | 375.6 / 4071 / 4447 |
+
+The plugin's own footprint (stock's sum minus a plugin server's) is 26-45 MiB on both releases. On 1.2.2 the held
+measurement varies 343-405 MiB from server to server (1.2.1: 375.5-376.4), and each server's flex expert cache is
+what remains, so stock-path cost tracks it: quality (4040) +1.20%, quality2 (4071) +0.76%, speed (4081) +0.77%,
+against a stock server that happened to measure low. Held-normalised, the plugin costs ~+0.5%. Worth reporting
+upstream: 1.2.2's startup held measurement moves a server's expert cache by up to ~60 MiB, about +-1% on
+short-prompt prefill, stock included. To confirm: a stock-path rerun with more servers (or held-matched servers).
