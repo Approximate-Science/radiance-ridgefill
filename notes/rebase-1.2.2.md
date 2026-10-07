@@ -26,3 +26,18 @@ Where the extra cost goes: RidgeFill servers stream 1.2-1.4% more expert bytes t
 (14,994 slab slots on every server), so the difference is in which experts the mover keeps resident as requests
 run -- something about the plugin's stock path steers 1.2.2's mover slightly differently. Next: compare the heat
 engine's promotion / routing-evidence counters (serve logs, /stats) between a stock and an off server on 1.2.2.
+
+## Cause, measured from the gate's own /stats (no GPU run)
+
+| `experts.flex_capacity`, card 0 | 1.2.1 | 1.2.2 |
+|---|---|---|
+| stock | 4,107 MiB | 4,147 MiB |
+| speed | 4,081 MiB | 4,081 MiB |
+| quality | 4,081 MiB | 4,040 MiB |
+
+Startup "already held": quality 404.89 MiB vs stock 343.02 on 1.2.2 (1.2.1: 375.56 vs 376.36). Two effects: 1.2.2 gives
+stock 40 MiB more flex expert residency that the plugin servers do not get, and charges ~41 MiB of quality-mode
+VRAM against flex that 1.2.1 did not (speed is unchanged). Quality ends 107 MiB (~44 expert units) short of stock,
+streams 1.2-1.4% more, and prefills short prompts +1.2% slower. Plugin-side candidates: find what quality allocates
+that 1.2.2 now measures as held (masked-path / row-table buffers?) and move it into the activation arena the engine
+lends to experts at small steps, or shrink it; then re-gate the stock path.
