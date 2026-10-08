@@ -1,6 +1,6 @@
 # How the RidgeFill plugin works
 
-This is the plugin as it is on `main`, built against radiance 1.2.4 (7d84086), serving Qwen3.8-Flash-Next (arch id
+This is the plugin as it is on `main`, built against radiance 1.3.0 (89cee7c), serving Qwen3.8-Flash-Next (arch id
 `qwen4exp`, 48 layers, model width 2,560, a hyper-connection residual stream 4 × 2,560 = 10,240 wide). Every
 claim names the file and function it comes from. Numbers come from the notes named next to them.
 
@@ -71,7 +71,7 @@ included declare and step and adds nothing (`core_declare` returns before declar
 
 **The release guard** (`arch/ridgefill_guard.h` `open_guard`, run from `rad_plugin_open`): the plugin finds the
 object that defines `rad_issue` and counts the NUL-delimited copies of the release string it was built
-against (`RIDGEFILL_RADIANCE_VERSION`, "1.2.4"). Exactly one copy means it serves. Any other count means it looks
+against (`RIDGEFILL_RADIANCE_VERSION`, "1.3.0"). Exactly one copy means it serves. Any other count means it looks
 for `architectures/qwen4exp_fp8.so` on `$RADIANCE_HOME` that is not itself, `dlopen`s it and forwards
 `probe`/`declare`/`step` there (`take_forward`). The engine then serves stock with RidgeFill off, and the plugin
 logs a WARNING naming both releases and the engine's sha256. If there is no file to forward to, the plugin
