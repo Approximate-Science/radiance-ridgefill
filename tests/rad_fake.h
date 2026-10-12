@@ -208,6 +208,11 @@ int   rad_memcpy_async(void* dst, const void* src, int64_t n, RadStream) {
     return RAD_OK;
 }
 int   rad_memset_async(void*, int, int64_t, RadStream) { ++g_ctx->device_calls; return RAD_E_UNSUPPORTED; }
+/* 1.4.0: the next routed layer's expert prefetch. The engine `(void)`s all three (a failure costs the
+ * prediction, nothing else), and a prefetch is a copy the fake never sees: no device call, RAD_OK. */
+int   rad_expert_prefetch(RadCtx*, const RadPrefetchNext*, rad_buf, int64_t, int64_t, int64_t) { return RAD_OK; }
+int   rad_expert_prefetch_mark(RadCtx*) { return RAD_OK; }
+int   rad_expert_prefetch_step(RadCtx*, int) { return RAD_OK; }
 }  /* extern "C" */
 
 namespace {
