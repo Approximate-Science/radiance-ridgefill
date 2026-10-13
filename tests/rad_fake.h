@@ -66,6 +66,8 @@ struct RadCtx {
     /* Each device read: its source and how many issues preceded it -- which is what pins a
      * capture to the point in the step it claims to read. */
     std::vector<std::pair<const void*, size_t>> reads;
+    /* Each routing report: the layer and the histogram it hands the heat engine. */
+    std::vector<std::pair<int, const int32_t*>> reports;
 };
 
 static RadCtx* g_ctx = nullptr;   /* for the device API, which carries no context */
@@ -162,7 +164,7 @@ int rad_lane_join(RadCtx* c, int from, int to) { c->issues.push_back({kJoin, {},
 int rad_step_fail(RadCtx* c, const char* what) { c->step_fail = what ? what : ""; return RAD_E_SHAPE; }
 int rad_rank(RadCtx* c) { return c->rank; }
 RadStream rad_stream(RadCtx*) { return nullptr; }
-int rad_route_report(RadCtx*, int, const RadRouting*) { return RAD_OK; }
+int rad_route_report(RadCtx* c, int layer, const RadRouting* r) { c->reports.push_back({layer, r->expert_count}); return RAD_OK; }
 int32_t* rad_route_counts(RadCtx*, int, int64_t) { return nullptr; }
 /* The next-layer expert prefetch (radiance 1.4.0), recorded as pseudo-ops so the oracle holds where a
  * copy issues them: the prediction (the next layer and the rows), the table switch, the link mark. */

@@ -62,6 +62,8 @@ struct MoeArm {
     rad_op                drop = 0;
     rad_buf               mask = 0;
     std::function<void()> after_gate_up;
+    /* the histogram the routing report credits instead of the layer's counts (null: its counts) */
+    const int32_t*        credit = nullptr;
 };
 
 /* THE STAGER PROBE (notes/impl.md §2): layer e's gate-up GEMM issued over one token with every
@@ -204,7 +206,7 @@ inline void moe_layer(RadCtx* c, const MoeFP8& e, const MoeArm& arm, const RadBa
     r.expert_ids    = (const int32_t*)rad_buf_ptr(c, e.w.ids);
     r.expert_w      = nullptr;
     const int32_t* const counts = rad_route_counts(c, e.layer, e.c.n_expert);
-    r.expert_count  = counts ? counts : (const int32_t*)rad_buf_ptr(c, e.w.ecnt);
+    r.expert_count  = arm.credit ? arm.credit : counts ? counts : (const int32_t*)rad_buf_ptr(c, e.w.ecnt);
     r.sorted_tok    = (const int32_t*)rad_buf_ptr(c, e.w.sorted);
     r.expert_offset = (const int32_t*)rad_buf_ptr(c, e.w.eoff);
     r.top_k         = e.c.top_k;
