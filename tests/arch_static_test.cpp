@@ -1128,7 +1128,7 @@ RecIssue probe_of(const std::vector<RecIssue>& stock, int x, int rank) {
 
 /* THE ORACLE FOR EVERY MASKED PASS: the in-tree step's own issues on this batch, with exactly the
  * substitutions the masked path names -- the mask ahead of layer 0; on a streaming pass the probes
- * of layers S-1.. behind layer S-3's gate-up GEMM; the stream copy before layer S; and in each late
+ * probe of the last layer behind layer S-4's gate-up GEMM; the stream copy before layer S; and in each late
  * layer the projection selected in after the connection read, the correction around the last
  * sequence's scan and the bulk rows dropped from the routing. Built from qwen4exp_fp8::step, not
  * from the plugin. */
@@ -1148,8 +1148,8 @@ std::vector<RecIssue> masked_expected(const Batch& x, const Want& w, int rank = 
                            praw(b.positions, RAD_I32, w.b), w.scored ? k.score : RAD_NONE,
                            brows(k.b_mask, T), brows(k.b_bounds, 4), brows(k.b_zeros, k.n_zeros)}, w.b});
         out.push_back(stock[i]);
-        if (w.stream && stock[i].op == m.layers[kSplit - 3].mlp.op_gu)
-            for (int p = kSplit - 1; p < 8; ++p) out.push_back(probe_of(stock, p, rank));
+        if (w.stream && stock[i].op == m.layers[kSplit - 4].mlp.op_gu)
+            out.push_back(probe_of(stock, 7, rank));
     }
     if (w.project) {
         const int64_t wide = m.hccfg.hc * m.g.n_embd, rows = w.b - w.s_lb;
@@ -1177,7 +1177,7 @@ int differ_at(const std::vector<RecIssue>& got, const std::vector<RecIssue>& wan
 
 /* PLUMB IS THE STOCK STEP THROUGH THE MASKED PATH: with the stager lever off (stage stock) it is the
  * in-tree step plus the one ridgefill_mask issue (mode all: every row exact, no projection, no correction,
- * no drop); with the lever on, the probes ride behind layer S-3's gate-up GEMM (R94's static half);
+ * no drop); with the lever on, the probe rides behind layer S-4's gate-up GEMM (R94's static half);
  * with a forced split, each late delta-net layer's scan is two scans over the bounds pairs (R47's
  * static half). A 64-row chunk keeps the fused top-k (no drop). */
 TEST(plumb_is_the_stock_step_through_the_masked_path) {
@@ -1250,10 +1250,10 @@ TEST(at_tp4_the_masked_path_issues_the_four_class_moe_with_its_drop) {
             int drops = 0, probes = 0;
             for (const RecIssue& i : got.issues) {
                 drops += k.op_drop && i.op == k.op_drop;
-                probes += i.op == m.layers[(size_t)kSplit - 1].mlp.op_gu && i.n == 1;
+                probes += i.op == m.layers[7].mlp.op_gu && i.n == 1;
             }
             CHECK_EQ(drops, quality ? 8 - kSplit : 0);   /* one a late routed layer */
-            CHECK_EQ(probes, 1);                         /* layer S-1's probe, behind layer S-3's gate-up */
+            CHECK_EQ(probes, 1);                         /* the last layer's probe, behind layer S-4's gate-up */
             CHECK_EQ(got.device_calls, 0);
         }
 }
@@ -1589,7 +1589,7 @@ std::vector<RecIssue> decoders_layer_expected(const std::vector<RecIssue>& seg, 
 }
 
 /* The whole step of speed beside decoders: the in-tree step's issues on this batch up to layer S
- * with the mask ahead of layer 0 (zeros and bounds) and the stager probes behind layer S-3's gate-up
+ * with the mask ahead of layer 0 (zeros and bounds) and the stager probe behind layer S-4's gate-up
  * (the decoders' late experts stream), then decoders_layer_expected per late layer, the epilogue stock. */
 std::vector<RecIssue> decoders_expected(const Batch& x, int rank = 0) {
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rank];
@@ -1606,8 +1606,8 @@ std::vector<RecIssue> decoders_expected(const Batch& x, int rank = 0) {
                            praw(b.positions, RAD_I32, b.n_tok), RAD_NONE, brows(k.b_mask, b.n_tok),
                            brows(k.b_bounds, 4), brows(k.b_zeros, k.n_zeros)}, b.n_tok});
         out.push_back(stock[i]);
-        if (stock[i].op == m.layers[kSplit - 3].mlp.op_gu)
-            for (int p = kSplit - 1; p < 8; ++p) out.push_back(probe_of(stock, p, rank));
+        if (stock[i].op == m.layers[kSplit - 4].mlp.op_gu)
+            out.push_back(probe_of(stock, 7, rank));
     }
     for (int l = kSplit; l < 8; ++l)
         append(out, decoders_layer_expected(slice(stock, at[(size_t)(l - kSplit)], at[(size_t)(l - kSplit + 1)]), x, l, rank));

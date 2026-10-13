@@ -179,7 +179,7 @@ inline void prologue(RadCtx* c, qwen4exp_fp8::Model& m, const RadBatch* batch) {
 }
 
 /* qwen4exp_fp8.cpp:1509-1529 for one layer -- with the MoE issued through `arm` when one is given
- * (layer S-3 of a streaming pass: stock rows, the stager probes behind its gate-up GEMM). */
+ * (layer S-4 of a streaming pass: stock rows, the stager probe behind its gate-up GEMM). */
 inline void layer(RadCtx* c, qwen4exp_fp8::Model& m, int64_t li, const RadBatch* batch,
                   const MoeArm* arm = nullptr) {
     const qwen4exp_fp8::Layer& l = m.layers[(size_t)li];
@@ -209,17 +209,20 @@ inline void epilogue(RadCtx* c, qwen4exp_fp8::Model& m, const RadBatch* batch) {
                 brows(m.b_logits, batch->n_out));
 }
 
-/* THE STAGER LEVER (notes/impl.md §2): behind layer S-3's gate-up GEMM, while the stager holds layers
- * S-3 and S-2 in its two buffers and has released neither, probe the gate-up of every layer from S-1
- * to the last. Each probe makes the stager start the layer after it, and a start that finds both
- * buffers held STREAMS that layer: from here on no late layer is staged whole, and each reads only
- * the experts its exact rows route to. Layer S-1 itself, which runs every row, is still staged when
- * the real pass reaches layer S-2. Correctness never depends on any of it: a probe moves no number. */
+/* THE STAGER LEVER (notes/impl.md §2, radiance 1.4.0's ring: notes/rebase-1.4.0.md): behind layer S-4's
+ * gate-up GEMM, probe the gate-up of the LAST trunk layer once. radiance 1.4.0's prefill stager stages
+ * the layers ahead into a ring, paced three layers back (core/place/stager.cpp stage_ahead), and a
+ * layer's first expert op moves its next layer to stage past it (before_op: next_ = li + 1). At S-4
+ * the stager has staged through S-1 and waits for S-3's arrival to stage S; the probe of the last
+ * layer moves it past the end, so layers S-3..S-1, which run every row, stay staged, and no late layer
+ * is copied whole: each reads only the experts its exact rows route to. Probing every late layer, as
+ * the two-buffer stager of radiance <= 1.3.0 needed, makes the ring stage each late layer whole instead
+ * (each probe records the pace event the probe three layers on stages behind). Correctness never
+ * depends on any of it: a probe moves no number. */
 inline MoeArm probe_arm(RadCtx* c, const RidgeFill& k, const qwen4exp_fp8::Model& m) {
     MoeArm arm;
     arm.after_gate_up = [c, &k, &m] {
-        for (int64_t x = k.split - 1; x < m.g.n_layer; ++x)
-            moe_probe(c, m.layers[(size_t)x].mlp, k.b_zeros, k.b_probe);
+        moe_probe(c, m.layers[(size_t)(m.g.n_layer - 1)].mlp, k.b_zeros, k.b_probe);
     };
     return arm;
 }
@@ -313,7 +316,7 @@ inline RidgeFillAdapter adapter_of(const qwen4exp_fp8::Model& m) {
     a.wide = m.hccfg.hc * m.g.n_embd;
     a.tile = m.gcfg.chunk;
     a.split_lo = m.ple_layer + 1;  /* -1 (no PLE) gives 0: no constraint */
-    a.probe_depth = 3;             /* the probes ride behind layer S-3's gate-up (notes/impl.md §2) */
+    a.probe_depth = 4;             /* the probe rides behind layer S-4's gate-up (probe_arm) */
     a.top_k = m.moecfg.top_k;
     a.buf_route_ids = m.b_eids;
     for (const qwen4exp_fp8::Layer& l : m.layers) {
