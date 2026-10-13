@@ -585,6 +585,9 @@ const RadBuilder* g_op_names = nullptr;
 const char* op_name(rad_op h) {
     if (h == kLane) return "lane";
     if (h == kJoin) return "lane join";
+    if (h == kXpPredict) return "expert prefetch";
+    if (h == kXpStep) return "expert prefetch step";
+    if (h == kXpMark) return "expert prefetch mark";
     return g_op_names && h > 0 && h <= g_op_names->ops.size() ? g_op_names->ops[h - 1].op.c_str() : "?";
 }
 void declare_pair(Pair& p, const char* mode, int rank = 0, int world = 1, int64_t max_out_rows = 0,
@@ -1998,7 +2001,7 @@ TEST(the_correction_is_declared_and_issued_only_when_held) {
         const Run r = run_step(qwen4exp_ridgefill::step, bk.b);
         int corrections = 0;
         for (const RecIssue& i : r.issues)
-            corrections += i.op && ridgefill.ops[i.op - 1].op == "ridgefill_state_correct";
+            corrections += i.op && i.op < kLane && ridgefill.ops[i.op - 1].op == "ridgefill_state_correct";
         CHECK_EQ(corrections, held ? 2 * 3 : 0);
     }
 }
