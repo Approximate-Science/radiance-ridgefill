@@ -162,12 +162,13 @@ projector, and a 64-row checkpoint remainder cost 208–222 ms approximated agai
 notes/stageb.md session 2c). `STAGE_ROWS` (default unlimited). At startup, `check_mode` refuses `T` above
 2 × `--max-num-batched-tokens` − 64 (no row could ever be bulk) or below the adapter's 512.
 
-**Streaming the late experts (the stager lever).** On a streaming pass (masked or decoders), `stock_layer` attaches zero-row
-**probes** behind layer S−3's gate-up GEMM. These are the gate-up handle of every layer from S−1 up, issued
-with all expert offsets zero, so they read no weight. They make radiance's expert stager **stream** the late
-layers (read only the routed experts of exact rows) instead of staging each layer whole
-(`qwen4exp_adapter.h` `probe_arm`, notes/impl.md §2). A probe moves no number. `stream_ok` needs
-`RADIANCE_RIDGEFILL_STAGE=auto` and three routed layers below S. Quality on a pass that cannot stream runs stock,
+**Streaming the late experts (the stager lever).** On a streaming pass (masked or decoders), `stock_layer` attaches one
+zero-row **probe** behind layer S−4's gate-up GEMM: the gate-up handle of the last trunk layer, issued with all
+expert offsets zero, so it reads no weight. radiance's prefill stager (a ring since 1.4.0, paced three layers
+back) then moves past the last layer before it reaches S, so it **streams** the late layers (each reads only the
+routed experts of its exact rows) instead of staging each layer whole; layers S−3..S−1, which run every row,
+stay staged (`qwen4exp_adapter.h` `probe_arm`; notes/impl.md §2 has the two-buffer stager's version, notes/rebase-1.5.0.md
+the ring's). A probe moves no number. `stream_ok` needs `RADIANCE_RIDGEFILL_STAGE=auto` and four routed layers below S. Quality on a pass that cannot stream runs stock,
 because a masked pass that stages its late layers measured slower than the exact step.
 
 **Why host decisions read only keyed batch fields.** radiance records a recurring pass as a tape keyed on
@@ -361,6 +362,20 @@ A 32,000-token prompt, alone on the server, in the release config (`--max-num-ba
   hazard line appears, because nothing branched.
 
 ## Headline results
+
+**On radiance 1.5.0 (what this build serves) the sustained-traffic gain is gone, and so is stock's.** Same two
+cards (one on a PCIe Gen5 x16 path, one on Gen4 x4), shipped defaults with the flashnext serving flags (no prefix
+cache, `--gpu-headroom-mib 3072`), one fresh server a mode, 32K prompts back to back, against stock on the same
+engine (notes/rebase-1.5.0.md):
+- fresh server: quality 1.14x, speed 1.55x;
+- after ~20 long prompts: quality 1.33x, speed 1.69x, because stock itself slows from 22.9 to 28.7 s. In absolute
+  terms quality takes 21.6 s and speed 16.9 s, against 16.9 s / 12.2 s on radiance 1.3.0.
+- **Why:** two rules new in radiance 1.4.0 stop the expert cache moving under back-to-back long prompts: no heat
+  swaps behind a pass the prefill stager armed, and a per-layer heat credit cap. A plugin cannot reach either;
+  notes/future/upstream-credit-cap.md drafts the request.
+- Decode after the long prompts is within 1% of stock (paired 0.993).
+
+The rest of this section is radiance 1.0.13's.
 
 Setup: radiance 1.0.13 with its own `deploy/compose/flashnext.yaml` flags (TP2, expert_tiered offload, MTP
 depth 3, `--max-num-batched-tokens 2048`, prefix cache on), except `--gpu-headroom-mib 3072` because a display

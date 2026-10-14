@@ -41,6 +41,8 @@ start -> end.
 | 1.5.0 quality, heat-credit fix | 20.31 | 23.13 | 23.16 | 8,482 -> 8,268 | 8,473 -> 6,797 |
 | 1.5.0 speed, pre-fix | 14.74 | 17.53 | 17.52 | 8,482 -> 8,019 | 8,473 -> 7,048 |
 | 1.5.0 speed, heat-credit fix | 14.74 | 17.01 | 17.00 | 8,482 -> 7,994 | 8,473 -> 7,072 |
+| 1.5.0 quality, SHIPPED (88a9bff: probe change) | 20.04 | 21.68 | 21.64 | 8,486 -> 7,836 | 8,435 -> 7,224 |
+| 1.5.0 speed, SHIPPED | 14.76 | 16.92 | 16.92 | 8,481 -> 8,016 | 8,440 -> 7,045 |
 | 1.5.0 off (stock) | 22.86 | 28.68 | 28.67 | 8,517 -> 7,822 | 8,489 -> 7,444 |
 
 - **Fresh servers:** 1.5.0 is faster than 1.3.0 (quality 19.64 vs 23.77, speed 14.74 vs 15.95).
@@ -100,3 +102,32 @@ ctest 5/5 in the image. No radiance-build:1.5.0 image exists; `--gpu-smoke`'s st
 | exact KL reference ref-r1.5.0 | rows.f32, tokens.i32, logp.f16 BYTE-IDENTICAL to ref-r1.4.0 |
 | int8 quality T2560 | 67 approximate steps; rows BYTE-IDENTICAL to G13's; dNLL +0.00103 [-0.01348, +0.01529] |
 | int8 speed T2048 | 67 approximate steps; rows BYTE-IDENTICAL to G13's; dNLL +0.02423 [+0.00404, +0.04460] |
+
+**The shipped binary against stock on 1.5.0, same protocol:**
+- **32K, fresh:** quality 1.14x, speed 1.55x. **16K, the second prompt:** 1.10x / 1.52x.
+- **32K, last5:** 1.33x / 1.69x. **16K after the ramp:** 1.28x / 1.56x.
+- **Decode after the ramp,** paired by chat with off: 0.993 [0.656, 1.001] (quality; one chat 0.656) and
+  0.993 [0.983, 1.093] (speed). Quality's median is 78.78 tok/s, against off's 86.50.
+
+**G2, the release config (1.5.0's flashnext flags, `--prefix-cache-mib 4096`, headroom 3072; data/gate150/g2): PASS.**
+- **Package:** tools/package.py through scripts/release_session.sh RK_RELEASE_PARTS="package e2e", the frozen home
+  reused. Plugin tarball 4fa32804; projector tarball 203b5a20, byte-identical to the 1.3.0 gate's; 41 checksums OK.
+- **Fresh-engine e2e:** cases 0-6 pass, 7 SKIPPED (parked per-request feature) -- as on 1.3.0.
+- **Stock-path ABCA** (quality, speed, stock, quality2; 2 warm-ups + 12 rounds of 512/1024/1600/2000 tokens,
+  paired by request with stock):
+
+| | 512 | 1024 | 1600 | 2000 | pooled |
+|---|---|---|---|---|---|
+| quality / stock | -0.50% | -1.93% | +1.14% | +1.11% | **+0.87%** [-0.96, +1.41] |
+| speed / stock | +0.95% | +0.66% | +1.38% | +0.87% | **+0.94%** [+0.68, +1.21] |
+| quality2 / stock | -0.08% | -1.70% | +1.25% | +1.22% | **+0.90%** [-0.73, +1.54] |
+
+  The drift (quality2 / quality) is +0.03%. That is the ~1% residual 1.3.0 accepted (+0.94-0.96%).
+- **Decode vs stock** (10 chats each, fresh servers): quality 0.9968, speed 0.9962, quality2 0.9958. 30/30
+  texts identical (1.3.0: 0.9941 / 0.9946 / 0.9911).
+- **Docs:** README, the release README and HOW-IT-WORKS now carry the 1.5.0 numbers above. The packages gated
+  here were made from 88a9bff, before that text.
+
+**Not done:** a radiance-build:1.5.0 image. The homes come from radiance-build:1.3.0 (ROCm 7.2.4) against the 1.5.0
+image's /opt/radiance (configure checks they agree), and `--gpu-smoke`'s steps ran by hand as G1. Mixed traffic
+(long prompts between chats, where decode steps are unarmed and the mover swaps) was not measured on 1.5.0.
