@@ -50,7 +50,7 @@ export RK_MODEL=/var/home/dylan/models/rad/qwen3.8-next-flash-fp8-iq4r-moe.rad
 export RK_DOCS=/var/home/dylan/AI-Work/kva-flashnext-tests-data/samples/quick/ppl.jsonl
 # THE USER'S CONFIG (orchestrator, 2026-10-05): the pinned radiance release's own shipped profile for this model,
 # deploy/compose/flashnext.yaml, with ONE deviation -- --gpu-headroom-mib 3072 instead of 96, because the display runs
-# on card 0000:03:00.0 (Dylan's rule); radiance 1.1.0 dropped the profile's --expert-vs-cache-ratio. Its prefix cache (VRAM + 4 GiB host + 128 GiB disk under --prefix-cache-dir) is
+# on card 0000:03:00.0 (Dylan's rule); radiance 1.1.0 dropped the profile's --expert-vs-cache-ratio. Its prefix cache (VRAM + 4 GiB host; radiance 1.5.0 removed the disk tier) is
 # ON: every server gets a FRESH cache dir (RK_CACHE_DIR, mounted at /kvcache by scripts/common.sh), so no server reuses
 # another's KV, and every timed prompt carries a leading nonce, so no TTFT is answered from the cache. Radiance's pure
 # defaults do not load this model on two 32 GB cards (--host-pool-mib 0: "DID NOT FIT", evidence/r1013/def13-a.serve.log).
@@ -58,7 +58,7 @@ export RK_DOCS=/var/home/dylan/AI-Work/kva-flashnext-tests-data/samples/quick/pp
 # models read-only); NOT mirrored here: network_mode host (it hides the GPUs under rootless docker: loopback -p
 # instead), user 1000:1000 (rootless root already maps to the host user), group_add (the scratch image has no group
 # entries; the device nodes are world-rw here), --api-key / restart / healthcheck (test runs).
-: "${RK_RELEASE_FLAGS:=--tp 2 --tp-wire wht6 --max-num-seqs 8 --max-model-len 200000 --placement expert_tiered --host-pool-mib 12288 --gpu-headroom-mib 3072 --kv-cache-dtype fp8 --prefix-cache-host-mib 4096 --prefix-cache-dir /kvcache --prefix-cache-disk-mib 131072 --num-speculative-tokens 3 --max-num-batched-tokens 2048}"
+: "${RK_RELEASE_FLAGS:=--tp 2 --tp-wire wht6 --max-num-seqs 8 --max-model-len 200000 --placement expert_tiered --host-pool-mib 12288 --gpu-headroom-mib 3072 --kv-cache-dtype fp8 --prefix-cache-mib 4096 --num-speculative-tokens 3 --max-num-batched-tokens 2048}"
 # the prefix cache's disk tier can fill its volume (2026-10-05: 19 GB a server filled /var/mnt/qwen-storage): the
 # cache root is a parameter, one server's dir at a time, removed before the next
 K=${RK_RELEASE_CACHE_ROOT:-$E/kvcache}; mkdir -p "$K"
@@ -74,7 +74,7 @@ export RK_FLAGS="$RK_RELEASE_FLAGS" RK_SERVE_SEQS=default RK_E2E_SEQS=default RK
 # scripts/common.sh's Stage C cache profile appends its own prefix-cache flags whenever RK_CACHE_DIR is set (and drops
 # --no-prefix-cache); the engine takes the last value, so they must carry the profile's sizes (2026-10-05: its default
 # 32,768 MiB disk tier silently replaced the profile's 131,072 -- never reached, 19 GB at most)
-export RK_CACHE_HOST_MIB=4096 RK_CACHE_DISK_MIB=131072
+export RK_CACHE_HOST_MIB=4096
 PY=/var/home/dylan/projects/research/kva/.venv/bin/python
 T0=$(date '+%Y-%m-%d %H:%M:%S')
 log() { echo "$*" | tee -a "$E/session.log"; }

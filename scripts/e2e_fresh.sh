@@ -57,8 +57,8 @@
 #   RK_E2E_SERVE_TIMEOUT  default 1800 s: how long to wait for /health a case (114 GiB load)
 #   RK_E2E_TTFT_LEN       default 16384: the TTFT prompt length
 #   RK_E2E_TTFT_REPS      default 3: timed reps after one warm-up (median is compared)
-#   RK_E2E_CACHE_ROOT     default unset: with flags that turn the prefix cache's disk tier on
-#                         (--prefix-cache-dir /kvcache), each case gets <root>/<case> mounted at /kvcache,
+#   RK_E2E_CACHE_ROOT     default unset: each case gets <root>/<case> mounted at /kvcache (the prefix
+#                         cache's disk tier until radiance 1.5.0 removed it; unused since),
 #                         so no case reuses another's cached KV
 #   RK_E2E_SEQS           default 8 (the measurement deployment's --max-num-seqs); `default` passes
 #                         none, so a run with RK_FLAGS="--tp 2" serves radiance's own defaults throughout

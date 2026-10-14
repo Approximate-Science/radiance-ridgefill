@@ -77,13 +77,14 @@ export RK_PORT RK_RADIANCE_VERSION RK_IMAGE RK_BUILD_IMAGE RK_RADIANCE_SRC RK_PL
 # host pool cannot hold and the KV cache takes the rest.)
 : "${RK_FLAGS:=--tp 2 --kv-cache-dtype fp8 --tp-wire exact --max-num-batched-tokens 2048 --no-prefix-cache --num-speculative-tokens 0 --max-model-len 49152 --gpu-headroom-mib 3072 --placement expert_tiered --host-pool-mib 12288}"
 
-# THE CACHE PROFILE (Stage C, HANDOVER-FIX §4): RK_CACHE_DIR=<host dir> serves with fnserve.sh's
-# prefix-cache flags instead of --no-prefix-cache -- finished turns copied to a 4 GiB host tier and on
-# to disk under the mounted dir (radiance scripts/fnserve.sh:102-103; RK_CACHE_HOST_MIB /
-# RK_CACHE_DISK_MIB override the sizes). Everything else in RK_FLAGS stays, so a cache run differs
-# from the measured baseline by the cache alone.
+# THE CACHE PROFILE (Stage C, HANDOVER-FIX §4): RK_CACHE_DIR=<host dir> serves with the profile's
+# prefix cache instead of --no-prefix-cache -- finished turns copied to a 4 GiB host tier
+# (RK_CACHE_HOST_MIB overrides the size). Everything else in RK_FLAGS stays, so a cache run differs
+# from the measured baseline by the cache alone. radiance 1.5.0 renamed --prefix-cache-host-mib to
+# --prefix-cache-mib and removed the disk tier (--prefix-cache-dir, --prefix-cache-disk-mib are refused
+# by name), so the dir is still mounted at /kvcache but nothing writes it.
 if [ -n "${RK_CACHE_DIR:-}" ]; then
-    RK_FLAGS="$(printf '%s' "$RK_FLAGS" | sed 's/ *--no-prefix-cache//') --prefix-cache-host-mib ${RK_CACHE_HOST_MIB:-4096} --prefix-cache-dir /kvcache --prefix-cache-disk-mib ${RK_CACHE_DISK_MIB:-32768}"
+    RK_FLAGS="$(printf '%s' "$RK_FLAGS" | sed 's/ *--no-prefix-cache//') --prefix-cache-mib ${RK_CACHE_HOST_MIB:-4096}"
 fi
 
 # rk_die -- print to stderr, naming the missing thing, and exit non-zero.

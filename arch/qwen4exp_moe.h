@@ -120,6 +120,8 @@ inline void moe_experts(RadCtx* c, const MoeFP8& e, const MoeArm& arm, int64_t T
     const int64_t ne = e.c.n_expert, k = e.c.top_k, n = e.g.n_embd;
     const bool shared = e.op_sgate != 0;
     const auto& w = e.w;
+    /* The layer before predicted for this one: its copies go into the tables here, where they landed. */
+    (void)rad_expert_prefetch_step(c, e.layer);
     if (e.c.expert_bf16)
         RAD_ISSUE_N(c, e.op_gu, rows, brow_slice(w.h.x, r0, rows, n), RAD_WTAB(e.w_gu[0], ne),
                     brows(w.sorted, rows * k), brows(w.eoff, ne + 1), brows(w.egu, rows * k));
@@ -147,6 +149,8 @@ inline void moe_experts(RadCtx* c, const MoeFP8& e, const MoeArm& arm, int64_t T
                     brows(w.sorted, rows * k), brows(w.eoff, e.n_reg + 1),
                     RAD_WTAB(e.w_dn[1], moe_class_len(e, 1)), RAD_WTAB(e.w_dns[1], moe_class_len(e, 1)),
                     brows(w.edn, rows * k));
+    /* This layer's streamed experts are read: the next one's copies cross the link from here. */
+    (void)rad_expert_prefetch_mark(c);
     if (e.op_pgu) {
         const int64_t np = (int64_t)e.prot.size();
         const RadOperand poff = brow_slice(w.eoff, e.n_reg, np + 1, 1);
@@ -165,6 +169,9 @@ inline void moe_pass(RadCtx* c, const MoeFP8& e, const MoeArm& arm, int64_t T, i
     const int64_t ne = e.c.n_expert, k = e.c.top_k, n = e.g.n_embd;
     const auto& w = e.w;
     if (!e.ext_in) e.nq_h.step(c, T, r0, rows);
+    /* THE NEXT ROUTED LAYER'S PREDICTION, from this router's input (rad_expert_prefetch, radiance 1.4.0). */
+    if (e.xp_next && e.xp_next->xp.n_parts > 0)
+        (void)rad_expert_prefetch(c, &e.xp_next->xp, w.h.x, r0, rows, n);
     int32_t* const counts = rad_route_counts(c, e.layer, ne);
     const RadOperand ecnt = counts ? praw(counts, RAD_I32, ne) : brows(w.ecnt, ne);
     const bool gate_done = moe_route(c, e, arm, ecnt, r0, rows);

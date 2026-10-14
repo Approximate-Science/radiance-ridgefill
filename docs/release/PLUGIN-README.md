@@ -12,7 +12,7 @@ RidgeFill builds on are at the end.
 
 ## Requirements
 
-- **Radiance engine:** release `1.3.0` (commit 89cee7c). The plugin checks the engine binary at
+- **Radiance engine:** release `1.5.0` (commit b93b531). The plugin checks the engine binary at
   startup and forwards to the engine's own architecture (RidgeFill off) or refuses to
   start on a mismatch; see Troubleshooting.
 - **Base model:** the stock published container
@@ -35,7 +35,7 @@ RidgeFill builds on are at the end.
 2. **Download the plugin** from the GitHub release built for your radiance release (each build targets one
    radiance release, named in the tag; on any other the plugin turns itself off, code RF-201):
    ```sh
-   TAG=v0.1.0-radiance-1.3.0
+   TAG=v0.1.0-radiance-1.5.0
    URL=https://github.com/Approximate-Science/radiance-ridgefill/releases/download/$TAG
    curl -fLO $URL/radiance-ridgefill-0.1.0.tar.gz && curl -fLO $URL/SHA256SUMS
    sha256sum -c SHA256SUMS && tar -xzf radiance-ridgefill-0.1.0.tar.gz   # <plugin dir> = radiance-ridgefill-0.1.0/
@@ -125,6 +125,18 @@ On BetterBench's prefill sweep (fresh servers, 1.6K / 5.9K / 11.8K / 23.6K / 47K
 
 Earlier copies of this README gave 2.10x / 2.55x at 32K. Those were measured partway through the ramp above and hold only for sustained long-prompt traffic.
 
+**On radiance 1.5.0 (what this build serves) the sustained-traffic gain is gone, and so is stock's.** Same two
+cards (one on a PCIe Gen5 x16 path, one on Gen4 x4), shipped defaults with the flashnext serving flags (no prefix
+cache, `--gpu-headroom-mib 3072`), one fresh server a mode, 32K prompts back to back, against stock on the same
+engine (notes/rebase-1.5.0.md):
+- fresh server: quality 1.14x, speed 1.55x;
+- after ~20 long prompts: quality 1.33x, speed 1.69x, because stock itself slows from 22.9 to 28.7 s. In absolute
+  terms quality takes 21.6 s and speed 16.9 s, against 16.9 s / 12.2 s on radiance 1.3.0.
+- **Why:** two rules new in radiance 1.4.0 stop the expert cache moving under back-to-back long prompts: no heat
+  swaps behind a pass the prefill stager armed, and a per-layer heat credit cap. A plugin cannot reach either;
+  notes/future/upstream-credit-cap.md drafts the request.
+- Decode after the long prompts is within 1% of stock (paired 0.993).
+
 ## What it costs
 
 Same hardware and profile as above. Quality: last 512 tokens of 9 long documents, paired against exact, bootstrap 95% CI.
@@ -189,7 +201,7 @@ files against their hashes (`--projector <dir>`). Every message RidgeFill can pr
 - Missing or incompatible projector: the server runs stock (see the `serving
   stock` lines above). A tokenizer or geometry mismatch refuses by name;
   quantization or anchor differences warn and run.
-- Engine other than 1.3.0: forwarded to the in-tree architecture (RidgeFill off) or
+- Engine other than 1.5.0: forwarded to the in-tree architecture (RidgeFill off) or
   refused at startup, never silently approximated. Forwarding needs the engine's own
   in-tree `qwen4exp_fp8.so` on `$RADIANCE_HOME` behind this plugin's home; a home given
   only as `--radiance-home` is invisible to plugins, so the start then fails by name.

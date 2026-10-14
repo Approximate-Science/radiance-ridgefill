@@ -36,6 +36,18 @@ MTP 3, `--gpu-headroom-mib 3072`), int8 projector, against the same server with 
 docs/HOW-IT-WORKS.md "Headline results" has the mechanism and the BetterBench sweep. The 2.10x / 2.55x of the
 release session were measured partway through the cache shift and hold only for sustained long-prompt traffic.
 
+**On radiance 1.5.0 (what this build serves) the sustained-traffic gain is gone, and so is stock's.** Same two
+cards (one on a PCIe Gen5 x16 path, one on Gen4 x4), shipped defaults with the flashnext serving flags (no prefix
+cache, `--gpu-headroom-mib 3072`), one fresh server a mode, 32K prompts back to back, against stock on the same
+engine (notes/rebase-1.5.0.md):
+- fresh server: quality 1.14x, speed 1.55x;
+- after ~20 long prompts: quality 1.33x, speed 1.69x, because stock itself slows from 22.9 to 28.7 s. In absolute
+  terms quality takes 21.6 s and speed 16.9 s, against 16.9 s / 12.2 s on radiance 1.3.0.
+- **Why:** two rules new in radiance 1.4.0 stop the expert cache moving under back-to-back long prompts: no heat
+  swaps behind a pass the prefill stager armed, and a per-layer heat credit cap. A plugin cannot reach either;
+  notes/future/upstream-credit-cap.md drafts the request.
+- Decode after the long prompts is within 1% of stock (paired 0.993).
+
 ## Build
 
 Two inputs: an **installed radiance** and a **source checkout of the same release**. The arch plugin

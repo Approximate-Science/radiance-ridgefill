@@ -164,6 +164,15 @@ int rad_rank(RadCtx* c) { return c->rank; }
 RadStream rad_stream(RadCtx*) { return nullptr; }
 int rad_route_report(RadCtx*, int, const RadRouting*) { return RAD_OK; }
 int32_t* rad_route_counts(RadCtx*, int, int64_t) { return nullptr; }
+/* The next-layer expert prefetch (radiance 1.4.0), recorded as pseudo-ops so the oracle holds where a
+ * copy issues them: the prediction (the next layer and the rows), the table switch, the link mark. */
+constexpr rad_op kXpPredict = 0xFFFF2000u, kXpStep = 0xFFFF2001u, kXpMark = 0xFFFF2002u;
+int rad_expert_prefetch(RadCtx* c, const RadPrefetchNext* next, rad_buf, int64_t r0, int64_t rows, int64_t) {
+    c->issues.push_back({kXpPredict, {}, next->layer * 1000000 + r0 * 1000 + rows});
+    return RAD_OK;
+}
+int rad_expert_prefetch_mark(RadCtx* c) { c->issues.push_back({kXpMark, {}, 0}); return RAD_OK; }
+int rad_expert_prefetch_step(RadCtx* c, int layer) { c->issues.push_back({kXpStep, {}, layer}); return RAD_OK; }
 void* rad_buf_ptr(RadCtx*, rad_buf b) { return (void*)(uintptr_t)(b * 64 + 16); }
 
 /* THE PROJECTOR'S DEVICE MEMORY (ridgefill_projector.h). VRAM is a fake address range nothing reads: a
