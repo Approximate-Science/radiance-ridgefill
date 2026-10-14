@@ -1,4 +1,4 @@
-# DRAFT (not sent) -- request to radiance: a runtime knob for the heat engine's credit cap
+# DRAFT (not sent) -- request to radiance: let sustained long-prompt traffic move the expert cache again
 
 **To:** radiance (codeberg.org/StillDeadcode/radiance), issue tracker. **From:** RidgeFill (Dylan Johnston).
 **Status:** draft for Dylan; nothing filed.
@@ -21,10 +21,20 @@ the cache stays put. Measured with the same 32K ramp on two R9700s:
 - 1.3.0: quality 23.8 -> 16.5 s, layers 0-23 resident 8,616 -> 10,319;
 - 1.4.0: flat at ~22 s, both halves shrinking.
 
-The plugin works around it today by reporting an all-zero histogram for the late layers of such passes
-(RidgeFill commit 00546fe). That is coarser than what it needs, which is "this histogram stands for N of
-the chunk's M rows".
+A second 1.4.0 rule matters more: "NO SWAPS BEHIND A PASS THE STAGER ARMED" (core/engine.cpp). Every chunk of
+a long prompt is armed, so prompts back to back give the mover about one unarmed step each: 64 promotions a
+request, against 272 on 1.3.0. Later in the ramp it reaches 1,044 a request, 96-97% of them readmits.
+Stock radiance 1.5.0 also gets slower over the same ramp (32K prompts back to back: 22.86 -> 28.67 s, staged
+bytes 279 -> 351 GiB a prompt) where 1.3.0's stock did not. A plugin-side workaround (reporting an all-zero
+histogram for the late layers of such passes, RidgeFill branch heat-credit-1.5.0) fixes the ranking but not
+the move rate, and measured no prefill gain on 1.5.0 (RidgeFill notes/rebase-1.5.0.md).
 
-## Smallest change that would serve
-`RadRouting` gains `float credit_weight` (0 = 1.0, so existing plugins are unchanged). `observe` multiplies
-the histogram's credit by it *after* the cap. An architecture that ran a layer for E of T rows sets E/T.
+Measured on two R9700s (Gen5 x16 + Gen4 x4), shipped defaults plus the flashnext serving flags.
+
+## Smallest changes that would serve
+1. Some swaps behind armed passes, e.g. a small per-step budget that the stager's own copies do not
+   saturate, or swaps at a prompt's chunk boundaries. Without this, a sustained run of long prompts cannot
+   adapt the cache at all, with or without RidgeFill.
+2. `RadRouting` gains `float credit_weight` (0 = 1.0, so existing plugins are unchanged), and `observe`
+   multiplies the histogram's credit by it *after* the cap. An architecture that ran a layer for E of T rows
+   sets E/T.
