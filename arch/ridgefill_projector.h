@@ -63,7 +63,6 @@ struct Upload {
     int64_t vram_bytes = 0, host_bytes = 0;
     std::vector<RadOperand> proj_w, proj_b, proj_s, st, ring_src, ring_dst, final_w, final_b;
     RadOperand score = RAD_NONE;
-    const int32_t* credit = nullptr;   /* the zero histogram a late layer reports (device view), or null */
 };
 static Upload g_upload[MAX_RANKS];
 
@@ -272,7 +271,7 @@ inline RowBlock row_block(const RidgeFillAdapter& a, int64_t codes = -1, int64_t
 struct Layout {
     std::vector<int64_t> w, st, slot, fw;   /* fw: the final map's hc row blocks (with MTP), else empty */
     RowBlock rb;
-    int64_t score = -1, credit = -1, vend = 0, hend = 0;
+    int64_t score = -1, vend = 0, hend = 0;
 };
 
 /* A piece copied into `block` at offset `at` (the block's own placement is already reserved). */
@@ -355,13 +354,6 @@ inline Layout plan_rank(const Loaded& l, const RidgeFillAdapter& a, const Config
     }
     const FolderTensor* sc = c.mode == MODE_QUALITY ? tensor(f, kScoreNames[c.rowsel_table]) : nullptr;
     if (sc) x.score = place_piece(plan, &x.hend, sc->data, sc->bytes, true);
-    /* The zero histogram the late layers' routing report hands the heat engine on approximate passes
-     * (the adapter's ffn and lean fill): zero by construction, whatever pass ran before. */
-    if (a.top_k > 0) {
-        static std::vector<unsigned char> zeros;
-        zeros.assign((size_t)a.n_expert * sizeof(int32_t), 0);
-        x.credit = place_piece(plan, &x.hend, zeros.data(), (int64_t)zeros.size(), true);
-    }
     return x;
 }
 
@@ -416,7 +408,6 @@ inline bool upload_rank(const Loaded& l, const RidgeFillAdapter& a, const Config
     if ((x.vend && !u.vram) || (x.hend && !u.host)) return false;
     take_operands(u, x, a, l.int8);
     if (x.score >= 0) u.score = RAD_P_T2(dev_at(u, true, x.score), RAD_F32, a.n_vocab_all, 0);
-    if (x.credit >= 0) u.credit = (const int32_t*)dev_at(u, true, x.credit);
     if (c.mode == MODE_PLUMB)   /* plumb reads no fitted tensor: say so rather than print a row of zeros */
         std::fprintf(stderr, "radiance: %s: RidgeFill: rank %d holds nothing (plumb reads no fitted tensor)\n", g_log_name, rank);
     else std::fprintf(stderr, "radiance: %s: RidgeFill: rank %d holds the projector: %.1f MiB host-mapped "

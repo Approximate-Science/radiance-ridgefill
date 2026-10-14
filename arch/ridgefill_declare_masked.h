@@ -166,7 +166,6 @@ static int take_upload(const RadBuildCtx* ctx, RidgeFill& k) {
     k.proj_s = u.proj_s;
     k.st = u.st;
     k.score = u.score;
-    k.credit_zeros = u.credit;
     k.ring_src = u.ring_src;
     k.ring_dst = u.ring_dst;
     k.final_w = u.final_w;

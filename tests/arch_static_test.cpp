@@ -1645,32 +1645,26 @@ TEST(speed_beside_decoders_runs_full_late_blocks_over_the_decoder_rows_only) {
     }
 }
 
-/* WHAT AN APPROXIMATE PASS CREDITS THE HEAT ENGINE (radiance 1.4.0+'s credit cap, notes/rebase-1.5.0.md): with the
- * drop arm and no decoder in the pass, or on the lean fill (no late MoE at all), every late layer reports the
- * host block's zero histogram and every layer below S its own counts; with a decoder beside the prompt, or in
- * plumb (no drop), every layer reports its own counts. Every routed layer reports exactly once. The zero
- * histogram is zero in the host block whatever ran before. */
-TEST(an_approximate_pass_credits_the_late_layers_nothing_unless_a_decoder_rides_it) {
-    struct Case { const char* mode; Shape shape; qwen4exp_ridgefill::Path path; bool zero_late; };
-    for (const Case& t : {Case{"quality", {{128}, 0, 2048}, qwen4exp_ridgefill::PATH_MASKED, true},
-                          Case{"speed", {{128}, 0, 2048}, qwen4exp_ridgefill::PATH_LEAN, true},
-                          Case{"quality", {{1, 128}, 1, 2048}, qwen4exp_ridgefill::PATH_MASKED, false},
-                          Case{"plumb", {{128}, 0, 2048}, qwen4exp_ridgefill::PATH_MASKED, false}}) {
+/* WHAT A MASKED PASS CREDITS THE HEAT ENGINE (radiance 1.4.0's credit cap, notes/rebase-1.4.0.md): with the
+ * drop arm and no decoder in the pass, every late layer reports the zero offsets as its histogram and every
+ * layer below S its own counts; with a decoder beside the prompt, or in plumb (no drop), every layer reports
+ * its own counts. Every routed layer reports once either way. */
+TEST(a_dropping_pass_credits_the_late_layers_nothing_unless_a_decoder_rides_it) {
+    struct Case { const char* mode; Shape shape; bool zero_late; };
+    for (const Case& t : {Case{"quality", {{128}, 0, 2048}, true}, Case{"quality", {{1, 128}, 1, 2048}, false},
+                          Case{"plumb", {{128}, 0, 2048}, false}}) {
         Pair p;
         declare_pair(p, t.mode);
         REQUIRE_EQ(p.st, RAD_OK);
         const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[0];
-        CHECK_EQ(k.credit_zeros != nullptr, std::strcmp(t.mode, "plumb") != 0);
-        if (k.credit_zeros) {
-            const int32_t* host = (const int32_t*)((const unsigned char*)k.credit_zeros - kDeviceView);
-            for (int64_t e = 0; e < k.ad.n_expert; ++e) CHECK_EQ(host[e], 0);
-        }
         Batch x = make_step(p.ridgefill, t.shape);
-        REQUIRE_EQ(qwen4exp_ridgefill::derive(k, &x.b).path, t.path);
+        REQUIRE_EQ(qwen4exp_ridgefill::derive(k, &x.b).path, qwen4exp_ridgefill::PATH_MASKED);
         const Run got = run_step(qwen4exp_ridgefill::step, x.b);
+        RadCtx probe;
+        const int32_t* const zeros = (const int32_t*)rad_buf_ptr(&probe, k.b_zeros);
         REQUIRE_EQ(got.reports.size(), (size_t)8);
         for (const auto& [layer, hist] : got.reports)
-            CHECK_EQ(hist == k.credit_zeros && hist != nullptr, t.zero_late && layer >= kSplit);
+            CHECK_EQ(hist == zeros, t.zero_late && layer >= kSplit);
     }
 }
 

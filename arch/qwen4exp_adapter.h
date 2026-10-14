@@ -132,7 +132,6 @@ inline void late_block(RadCtx* c, const RidgeFill& k, int64_t li, const RadBatch
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
     const qwen4exp_fp8::Layer& l = m.layers[(size_t)li];
     if (path == PATH_LEAN) {   /* the cache writers only: K/V and the indexer keys, or the corrected scan */
-        if (k.credit_zeros && k.ad.routed[(size_t)li]) moe_credit(c, l.mlp, k.credit_zeros);   /* see ffn */
         if (l.full) {
             qsa_keys(c, l.qsa, l.attn.w.h, batch);
             attn_kv(c, l.attn, batch);
@@ -163,17 +162,15 @@ inline void late_block(RadCtx* c, const RidgeFill& k, int64_t li, const RadBatch
  * so a bulk chunk credits layers 0..S-1 (every row routed) and the late layers (only the exact rows routed)
  * the same 512, and the expert cache no longer moves toward the layers the approximated prompt reads in
  * full -- through 1.3.0 the credit was the count, and that move is RidgeFill's sustained-traffic gain
- * (notes/ramp.md; notes/rebase-1.5.0.md). Reporting the zero histogram (the host block's, zero by
- * construction) instead decays the late layers' heat without crediting the prompt's few exact rows
- * there; the lean fill, which runs no late MoE, reports it too (late_block), since a layer nothing
- * reports is not decayed either. A decoder's routing is always credited. */
+ * (notes/ramp.md; notes/rebase-1.4.0.md). Reporting the zero offsets instead decays the late layers'
+ * heat without crediting the prompt's few exact rows there. A decoder's routing is always credited. */
 inline void ffn(RadCtx* c, const RidgeFill& k, int64_t li, const RadBatch* batch, int64_t r0, int64_t to, rad_op drop,
                 rad_buf mask) {
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
     int64_t D = 0, DT = 0;
     batch_split(batch, &D, &DT);
     MoeArm arm{ drop, mask, {} };
-    if (drop && D == 0) arm.credit = k.credit_zeros;
+    if (drop && D == 0) arm.credit = (const int32_t*)rad_buf_ptr(c, k.b_zeros);
     moe_layer(c, m.layers[(size_t)li].mlp, arm, batch, r0, to);
 }
 
