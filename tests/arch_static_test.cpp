@@ -928,7 +928,6 @@ struct Run {
     std::string           log;
     int                   device_calls = 0;
     std::vector<std::pair<const void*, size_t>> reads;
-    std::vector<std::pair<int, const int32_t*>> reports;
 };
 
 Run run_step(void (*step)(RadCtx*, const RadBatch*), const RadBatch& b, int rank = 0) {
@@ -949,7 +948,6 @@ Run run_step(void (*step)(RadCtx*, const RadBatch*), const RadBatch& b, int rank
         if (i.op != kLane && i.op != kJoin && (!ring || i.op != ring)) r.issues.push_back(i);
     r.device_calls = c.device_calls;
     r.reads = c.reads;
-    r.reports = c.reports;
     return r;
 }
 
@@ -1642,29 +1640,6 @@ TEST(speed_beside_decoders_runs_full_late_blocks_over_the_decoder_rows_only) {
         REQUIRE_EQ(p.st, RAD_OK);
         Batch x = make_step(p.ridgefill, {{1, 128}, 1, 2048});
         CHECK_EQ(qwen4exp_ridgefill::derive(qwen4exp_ridgefill::g_ridgefill[0], &x.b).path, qwen4exp_ridgefill::PATH_MASKED);
-    }
-}
-
-/* WHAT A MASKED PASS CREDITS THE HEAT ENGINE (radiance 1.4.0's credit cap, notes/rebase-1.4.0.md): with the
- * drop arm and no decoder in the pass, every late layer reports the zero offsets as its histogram and every
- * layer below S its own counts; with a decoder beside the prompt, or in plumb (no drop), every layer reports
- * its own counts. Every routed layer reports once either way. */
-TEST(a_dropping_pass_credits_the_late_layers_nothing_unless_a_decoder_rides_it) {
-    struct Case { const char* mode; Shape shape; bool zero_late; };
-    for (const Case& t : {Case{"quality", {{128}, 0, 2048}, true}, Case{"quality", {{1, 128}, 1, 2048}, false},
-                          Case{"plumb", {{128}, 0, 2048}, false}}) {
-        Pair p;
-        declare_pair(p, t.mode);
-        REQUIRE_EQ(p.st, RAD_OK);
-        const qwen4exp_ridgefill::RidgeFill& k = qwen4exp_ridgefill::g_ridgefill[0];
-        Batch x = make_step(p.ridgefill, t.shape);
-        REQUIRE_EQ(qwen4exp_ridgefill::derive(k, &x.b).path, qwen4exp_ridgefill::PATH_MASKED);
-        const Run got = run_step(qwen4exp_ridgefill::step, x.b);
-        RadCtx probe;
-        const int32_t* const zeros = (const int32_t*)rad_buf_ptr(&probe, k.b_zeros);
-        REQUIRE_EQ(got.reports.size(), (size_t)8);
-        for (const auto& [layer, hist] : got.reports)
-            CHECK_EQ(hist == zeros, t.zero_late && layer >= kSplit);
     }
 }
 

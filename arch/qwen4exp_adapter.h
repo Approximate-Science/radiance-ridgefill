@@ -155,23 +155,11 @@ inline void late_block(RadCtx* c, const RidgeFill& k, int64_t li, const RadBatch
 }
 
 /* Layer li's MoE over rows [r0, to), issued by hand (qwen4exp_moe.h) so that, given the drop op and the
- * mask, the bulk rows' routing slots are emptied: a dropped slot's expert is neither staged nor read.
- *
- * WHAT A DROPPING PASS CREDITS THE HEAT ENGINE: nothing, when no decoder rides it. radiance 1.4.0 credits a
- * layer's histogram at most HeatParams::credit_cap (512) selections a step (core/place/heat.cpp observe),
- * so a bulk chunk credits layers 0..S-1 (every row routed) and the late layers (only the exact rows routed)
- * the same 512, and the expert cache no longer moves toward the layers the approximated prompt reads in
- * full -- through 1.3.0 the credit was the count, and that move is RidgeFill's sustained-traffic gain
- * (notes/ramp.md; notes/rebase-1.4.0.md). Reporting the zero offsets instead decays the late layers'
- * heat without crediting the prompt's few exact rows there. A decoder's routing is always credited. */
-inline void ffn(RadCtx* c, const RidgeFill& k, int64_t li, const RadBatch* batch, int64_t r0, int64_t to, rad_op drop,
+ * mask, the bulk rows' routing slots are emptied: a dropped slot's expert is neither staged nor read. */
+inline void ffn(RadCtx* c, const RidgeFill&, int64_t li, const RadBatch* batch, int64_t r0, int64_t to, rad_op drop,
                 rad_buf mask) {
     const qwen4exp_fp8::Model& m = qwen4exp_fp8::g_model[rad_rank(c)];
-    int64_t D = 0, DT = 0;
-    batch_split(batch, &D, &DT);
-    MoeArm arm{ drop, mask, {} };
-    if (drop && D == 0) arm.credit = (const int32_t*)rad_buf_ptr(c, k.b_zeros);
-    moe_layer(c, m.layers[(size_t)li].mlp, arm, batch, r0, to);
+    moe_layer(c, m.layers[(size_t)li].mlp, MoeArm{ drop, mask, {} }, batch, r0, to);
 }
 
 /* ---- the exact layers and the step around them: copies of the in-tree step's pieces, issued by the core's
