@@ -214,6 +214,20 @@ inline void moe_layer(RadCtx* c, const MoeFP8& e, const MoeArm& arm, const RadBa
     rad_route_report(c, e.layer, &r);
 }
 
+/* The routing report of a layer that ran no MoE (the lean fill): `credit` as its histogram -- the zero
+ * one -- so the heat engine decays the layer as on every pass that runs it (radiance 1.4.0+ decays a
+ * layer only when it is credited, core/place/heat.cpp observe) instead of freezing its heat. */
+inline void moe_credit(RadCtx* c, const MoeFP8& e, const int32_t* credit) {
+    RadRouting r{};
+    r.expert_ids    = (const int32_t*)rad_buf_ptr(c, e.w.ids);
+    r.expert_count  = credit;
+    r.sorted_tok    = (const int32_t*)rad_buf_ptr(c, e.w.sorted);
+    r.expert_offset = (const int32_t*)rad_buf_ptr(c, e.w.eoff);
+    r.top_k         = e.c.top_k;
+    r.n_expert      = e.c.n_expert;
+    rad_route_report(c, e.layer, &r);
+}
+
 }  /* namespace qwen4exp_ridgefill */
 
 #endif /* QWEN4EXP_MOE_H */

@@ -89,6 +89,8 @@ struct RidgeFill {
      * layers' gate-up probes read and write. */
     rad_buf b_zeros = 0, b_probe = 0;
     int64_t n_zeros = 0;
+    /* the zero histogram in the host block (ridgefill_projector.h plan_rank), device view; null in plumb */
+    const int32_t* credit_zeros = nullptr;
     /* THE TAIL-ONLY STRADDLE (A.1) needs every late attention layer on its per-row sparse gated form
      * (rad_block_attn_gated_fp8.h:542-558): declared here, decided per pass from the keyed context
      * against the largest exactness bound. */
